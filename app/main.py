@@ -11,12 +11,15 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app import config
 from app.rag import answer_question
 from app.agent import run_agentic_rag, MAX_RETRIES
+from app import ingest
 
 # --- Structured logging setup -------------------------------------------------
 # Every request is logged as one JSON line: question, sources used, answer,
@@ -33,10 +36,26 @@ logger.addHandler(_handler)
 logger.addHandler(logging.StreamHandler())  # also print to console
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Cleanup routine to run on startup."""
+    docs_dir = Path(config.DOCS_DIR)
+    if docs_dir.exists():
+        for file_path in docs_dir.iterdir():
+            if file_path.is_file() and not file_path.name.startswith("sample_"):
+                try:
+                    file_path.unlink()
+                    logger.info(f"Deleted uploaded file on startup: {file_path.name}")
+                except Exception as exc:
+                    logger.warning(f"Failed to delete {file_path.name}: {exc}")
+    yield
+
+
 app = FastAPI(
     title="RAG Capstone API",
     description="Document Q&A over a local knowledge base using RAG.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -73,6 +92,37 @@ class AgenticAskResponse(BaseModel):
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+def serve_ui():
+    """Serves the interactive web UI."""
+    ui_path = Path(__file__).parent / "ui.html"
+    return ui_path.read_text(encoding="utf-8")
+
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Accepts a file, saves it to the docs/ directory, and triggers ingestion."""
+    docs_dir = Path(config.DOCS_DIR)
+    docs_dir.mkdir(exist_ok=True)
+    
+    file_path = docs_dir / file.filename
+    content = await file.read()
+    file_path.write_bytes(content)
+    
+    logger.info(f"Saved uploaded file to {file_path}. Triggering ingestion...")
+    
+    # Run the ingestion pipeline synchronously
+    try:
+        summary = ingest.run(force=False)
+        return {
+            "message": f"Successfully processed {file.filename}",
+            "ingest_summary": summary
+        }
+    except Exception as exc:
+        logger.error(json.dumps({"event": "error", "endpoint": "upload", "error": str(exc)}))
+        raise HTTPException(status_code=500, detail=f"File saved but ingestion failed: {str(exc)}")
 
 
 @app.post("/ask", response_model=AskResponse)

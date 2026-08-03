@@ -1,7 +1,7 @@
 """
 Model provider factory. Every place in the codebase that needs an LLM or
 an embeddings model calls get_llm()/get_embeddings() from here instead of
-constructing ChatOpenAI/OpenAIEmbeddings directly -- that's what makes
+constructing ChatGroq/FastEmbedEmbeddings directly -- that's what makes
 switching providers a one-line config change (MODEL_PROVIDER in .env)
 instead of a code change scattered across rag.py, agent.py, and eval*.py.
 
@@ -57,4 +57,3 @@ def get_embeddings():
         )
 
     raise ValueError(f"Unknown MODEL_PROVIDER: {config.MODEL_PROVIDER}")
-""", "StartLine": 1, "TargetContent": """

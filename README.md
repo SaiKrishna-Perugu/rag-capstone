@@ -177,7 +177,7 @@ was needed). See the compatibility note at the top of `eval_ragas.py` if
 open version conflict between `ragas` and recent `langchain-community`
 releases, worked around with a small shim, not a bug in this code.
 
-## Switching to Vertex AI (instead of OpenAI)
+## Switching to Vertex AI (instead of Groq)
 
 All LLM/embeddings calls go through `app/providers.py`, so this is a config
 change, not a code change:
