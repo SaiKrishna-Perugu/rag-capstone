@@ -1,0 +1,28 @@
+Acme Corp Customer Support Policy (Sample Document)
+
+1. Refund Policy
+Customers may request a full refund within 30 days of purchase, provided the
+product is unused and in its original packaging. Refunds are processed within
+5-7 business days to the original payment method. Digital products are
+non-refundable once downloaded.
+
+2. Shipping Policy
+Standard shipping takes 5-8 business days within the country of purchase.
+Express shipping (additional fee) takes 1-2 business days. International
+shipping is available to select countries and takes 10-15 business days.
+
+3. Warranty
+All hardware products come with a 1-year limited warranty covering
+manufacturing defects. The warranty does not cover accidental damage,
+water damage, or unauthorized repairs. To file a warranty claim, contact
+support with your order number and a description of the issue.
+
+4. Account Cancellation
+Customers may cancel their subscription at any time from the account
+settings page. Cancellation takes effect at the end of the current billing
+cycle. No partial refunds are issued for unused time in the current cycle.
+
+5. Support Hours
+Customer support is available Monday to Friday, 9:00 AM to 6:00 PM (local
+time zone of the support center). Support is not available on public
+holidays. Average first response time is under 4 business hours.

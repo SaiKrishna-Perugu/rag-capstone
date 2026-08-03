@@ -1,0 +1,42 @@
+# Python environments
+venv/
+.venv/
+testenv/
+testenv2/
+
+# Python cache & artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Vector store (rebuilt by uv run python -m app.ingest)
+chroma_db/
+!chroma_db/.gitkeep
+
+# Logs & eval outputs
+logs/
+*.log
+eval_results.json
+ragas_results.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

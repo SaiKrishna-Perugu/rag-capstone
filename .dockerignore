@@ -1,0 +1,12 @@
+venv/
+testenv/
+testenv2/
+__pycache__/
+*.pyc
+.env
+logs/
+eval_results.json
+ragas_results.json
+.git/
+.gitignore
+README.md
