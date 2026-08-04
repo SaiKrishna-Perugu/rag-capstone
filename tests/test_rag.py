@@ -1,4 +1,5 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 
 def test_check_groundedness_supported(mock_groundedness):
     # This tests that our check_groundedness function works and can parse LLM output

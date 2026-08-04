@@ -1,4 +1,5 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 
 def test_retrieve_with_hybrid_and_rerank():
     from app.retrieval import retrieve_with_hybrid_and_rerank

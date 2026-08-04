@@ -5,11 +5,14 @@ defaults or add new settings.
 
 Supported MODEL_PROVIDER values: "vertexai", "groq"
 """
+import logging
 import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
@@ -33,8 +36,7 @@ def _get_secret(secret_name: str, default: str = "") -> str:
             response = client.access_secret_version(request={"name": name})
             return response.payload.data.decode("UTF-8")
         except Exception as e:
-            import logging
-            logging.warning(f"Failed to fetch secret {secret_name} from GCP Secret Manager: {e}")
+            logger.warning(f"Failed to fetch secret {secret_name} from GCP Secret Manager: {e}")
     return default
 
 # --- Groq settings (free tier: Llama 3.3 70B) ------------------------------

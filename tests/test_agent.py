@@ -1,4 +1,5 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 
 def test_run_agentic_rag_hit():
     from app.agent import run_agentic_rag
