@@ -23,7 +23,11 @@ COPY . .
 # listen on it. Shell form (not exec-form array) so the env var actually
 # expands at container start instead of being read as a literal string.
 # Run as non-root for defense-in-depth (Cloud Run best practice).
-RUN adduser --disabled-password --no-create-home appuser
+# Provide a writable home directory for FastEmbed model caching,
+# and ensure runtime directories are owned by the non-root user.
+RUN adduser --disabled-password appuser \
+    && mkdir -p logs docs chroma_db \
+    && chown -R appuser:appuser logs docs chroma_db
 USER appuser
 
 EXPOSE 8080

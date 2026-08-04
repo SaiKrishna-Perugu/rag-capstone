@@ -16,3 +16,7 @@ docs/
 .git/
 .gitignore
 README.md
+.ruff_cache/
+.pytest_cache/
+.github/
+tests/
