@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -22,5 +22,9 @@ COPY . .
 # Cloud Run injects $PORT (default 8080) and requires the container to
 # listen on it. Shell form (not exec-form array) so the env var actually
 # expands at container start instead of being read as a literal string.
+# Run as non-root for defense-in-depth (Cloud Run best practice).
+RUN adduser --disabled-password --no-create-home appuser
+USER appuser
+
 EXPOSE 8080
 CMD exec uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}
