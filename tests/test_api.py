@@ -6,9 +6,9 @@ def test_health_check(client):
     assert response.status_code == 200
     assert response.json()["status"] in ("ok", "degraded")
 
-def test_ask_endpoint_requires_auth(client):
+def test_ask_endpoint_requires_auth(client, monkeypatch):
     # Configure an API key for the test
-    config.API_KEY = "test_secret_key"
+    monkeypatch.setattr(config, "API_KEY", "test_secret_key")
     
     response = client.post("/ask", json={"question": "test"})
     assert response.status_code == 401
@@ -17,8 +17,6 @@ def test_ask_endpoint_requires_auth(client):
     # It will fail at validation or execution because we are missing mocks, 
     # but it shouldn't return 401
     assert response.status_code != 401
-    
-    config.API_KEY = "" # reset
 
 def test_ask_endpoint_success(client, mock_cache, mock_retrieval, mock_llm_answer, mock_groundedness):
     response = client.post("/ask", json={"question": "What is the refund policy?"})

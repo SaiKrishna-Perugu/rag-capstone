@@ -32,8 +32,9 @@ def _get_secret(secret_name: str, default: str = "") -> str:
             name = f"projects/{project}/secrets/{secret_name}/versions/latest"
             response = client.access_secret_version(request={"name": name})
             return response.payload.data.decode("UTF-8")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to fetch secret {secret_name} from GCP Secret Manager: {e}")
     return default
 
 # --- Groq settings (free tier: Llama 3.3 70B) ------------------------------

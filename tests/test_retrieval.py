@@ -8,7 +8,7 @@ def test_retrieve_with_hybrid_and_rerank():
         mock_vs.similarity_search.return_value = []
         mock_get_vs.return_value = mock_vs
         
-        with patch("app.retrieval._get_bm25_retriever") as mock_get_bm25:
+        with patch("app.retrieval._build_bm25_retriever") as mock_get_bm25:
             mock_bm25 = MagicMock()
             mock_bm25.invoke.return_value = []
             mock_get_bm25.return_value = mock_bm25

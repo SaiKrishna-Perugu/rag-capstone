@@ -26,6 +26,7 @@ def get_llm(temperature: float = 0.0):
             api_key=config.GROQ_API_KEY,
             temperature=temperature,
             max_retries=config.LLM_MAX_RETRIES,
+            timeout=config.LLM_REQUEST_TIMEOUT,
         )
 
     if config.MODEL_PROVIDER == "vertexai":
@@ -36,6 +37,7 @@ def get_llm(temperature: float = 0.0):
             location=config.GCP_LOCATION,
             temperature=temperature,
             max_retries=config.LLM_MAX_RETRIES,
+            timeout=config.LLM_REQUEST_TIMEOUT,
         )
 
     raise ValueError(f"Unknown MODEL_PROVIDER: {config.MODEL_PROVIDER}")

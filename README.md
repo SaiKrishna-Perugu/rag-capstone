@@ -240,8 +240,9 @@ gcloud secrets add-iam-policy-binding rag_api_key --member="serviceAccount:YOUR_
 gcloud secrets add-iam-policy-binding groq_api_key --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
 
 # 6. Deploy using declarative yaml
-# Open cloudbuild.yaml and replace YOUR_PROJECT_ID with your actual project ID
-gcloud run services replace cloudbuild.yaml
+# Open cloudrun-groq.yaml (if using Groq) or cloudrun-vertexai.yaml (if using Vertex AI)
+# Replace YOUR_PROJECT_ID with your actual project ID
+gcloud run services replace cloudrun-groq.yaml
 ```
 
 **If using Vertex AI (4a):** the Cloud Run service's default compute
@@ -275,7 +276,8 @@ docs/           # source documents (sample included)
 tests/          # unit and integration tests
 eval.py         # custom eval harness (LLM-as-judge, correctness + groundedness)
 eval_ragas.py   # RAGAS eval harness (faithfulness, relevancy, precision, recall)
-cloud-run-service.yaml # Declarative Cloud Run configuration
+  cloudrun-groq.yaml    # Declarative Cloud Run configuration for Groq
+  cloudrun-vertexai.yaml # Declarative Cloud Run configuration for Vertex AI
 Dockerfile
 pyproject.toml
 ```

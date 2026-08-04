@@ -883,6 +883,23 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-secret-manager"
+version = "2.30.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpc-google-iam-v1" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/33/4a/7acb616b316c91969f7abf5f3719cb61cc4a97af86411e683ddb11147aa1/google_cloud_secret_manager-2.30.0.tar.gz", hash = "sha256:26ec87737731b483f7f95c26a8c7ab79e22cb66317c95006e7f6985dbc43c8a2", size = 286034, upload-time = "2026-07-16T20:36:23.29Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/8b/9347282b7f6828511d8cf927f3ab62b4b849aaa46aa12ae79e2f6da6cb0b/google_cloud_secret_manager-2.30.0-py3-none-any.whl", hash = "sha256:0f285e77d09a73700e3fca9abbc77f844a50276989bf76d64a76b6e2b871e396", size = 229181, upload-time = "2026-07-16T20:36:01.125Z" },
+]
+
+[[package]]
 name = "google-cloud-storage"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2924,6 +2941,7 @@ dependencies = [
     { name = "docx2txt" },
     { name = "fastapi" },
     { name = "fastembed" },
+    { name = "google-cloud-secret-manager" },
     { name = "langchain" },
     { name = "langchain-chroma" },
     { name = "langchain-community" },
@@ -2959,6 +2977,7 @@ requires-dist = [
     { name = "docx2txt", specifier = "==0.9" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "fastembed", specifier = ">=0.8.0" },
+    { name = "google-cloud-secret-manager", specifier = ">=2.30.0" },
     { name = "langchain", specifier = "==1.3.14" },
     { name = "langchain-chroma", specifier = "==1.1.0" },
     { name = "langchain-community", specifier = "==0.4.2" },
