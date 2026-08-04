@@ -13,15 +13,13 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Install uv
-      uses: astral-sh/setup-uv@v5
-      
-    - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       with:
         python-version-file: "pyproject.toml"
+        enable-cache: true
         
     - name: Install dependencies
       run: uv sync --frozen
