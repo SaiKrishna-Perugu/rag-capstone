@@ -6,6 +6,7 @@ defaults or add new settings.
 Supported MODEL_PROVIDER values: "vertexai", "groq"
 """
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,8 +19,25 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
 # single knob that controls which provider get_llm()/get_embeddings() build.
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "groq").lower()
 
+def _get_secret(secret_name: str, default: str = "") -> str:
+    """Fetch secret from env (local) or GCP Secret Manager (prod)."""
+    val = os.getenv(secret_name)
+    if val:
+        return val
+    project = os.getenv("GCP_PROJECT_ID")
+    if project:
+        try:
+            from google.cloud import secretmanager
+            client = secretmanager.SecretManagerServiceClient()
+            name = f"projects/{project}/secrets/{secret_name}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            return response.payload.data.decode("UTF-8")
+        except Exception:
+            pass
+    return default
+
 # --- Groq settings (free tier: Llama 3.3 70B) ------------------------------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_KEY = _get_secret("GROQ_API_KEY", "")
 GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 # Groq doesn't offer an embeddings API, so when MODEL_PROVIDER=groq we use
 # FastEmbed (local ONNX-based embeddings, no API key, no torch dependency).
@@ -48,6 +66,17 @@ DOCS_DIR = os.getenv("DOCS_DIR", "docs")
 COLLECTION_NAME = "capstone_rag"
 
 TOP_K = int(os.getenv("TOP_K", "4"))
+
+# --- API Security ---------------------------------------------------------
+API_KEY = _get_secret("API_KEY", "")  # empty string = auth disabled
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
+RATE_LIMIT = os.getenv("RATE_LIMIT", "20/minute")
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
+
+# --- LLM Resilience -------------------------------------------------------
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
+LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
 
 # --- LangSmith tracing ---------------------------------------------------
 # LangChain/LangGraph auto-trace every LLM call once these env vars are

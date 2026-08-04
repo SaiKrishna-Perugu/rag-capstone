@@ -21,18 +21,17 @@ logged as one opaque call. It's also the right foundation to extend for
 more complex multi-agent orchestration later, rather than a throwaway
 implementation.
 """
-from typing import TypedDict, Literal
+from typing import Literal, TypedDict
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 from langsmith import traceable
 
-from app import config
 from app.providers import get_llm
 from app.rag import (
-    retrieve,
-    generate_answer,
-    check_groundedness,
     _format_context,
+    check_groundedness,
+    generate_answer,
+    retrieve,
 )
 
 MAX_RETRIES = 2  # total retries after the first attempt (3 attempts overall)
@@ -100,8 +99,8 @@ def node_rewrite_query(state: AgentState) -> AgentState:
     llm = _get_grading_llm()
     messages = [
         ("system", _REWRITE_SYSTEM_PROMPT),
-        ("human", f"ORIGINAL QUESTION:\n{state['original_question']}\n\n"
-                   f"PREVIOUS QUERY:\n{state['current_query']}"),
+        ("human", (f"ORIGINAL QUESTION:\n{state['original_question']}\n\n"
+                   f"PREVIOUS QUERY:\n{state['current_query']}")),
     ]
     new_query = llm.invoke(messages).content.strip()
     return {

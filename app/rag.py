@@ -7,7 +7,6 @@ without spinning up the FastAPI app.
 """
 from dataclasses import dataclass, field
 
-from app import config
 from app.providers import get_llm
 from app.retrieval import retrieve_with_hybrid_and_rerank
 
@@ -35,7 +34,7 @@ class RagResult:
     groundedness: str = "NOT_CHECKED"
 
 
-def retrieve(question: str, k: int = None) -> list:
+def retrieve(question: str, k: int | None = None) -> list:
     """
     Retrieve the top-k most relevant chunks for a question, via hybrid
     (BM25 + vector, RRF-fused) retrieval followed by LLM reranking --
@@ -85,7 +84,7 @@ def check_groundedness(answer: str, chunks: list) -> str:
     return verdict if verdict in ("GROUNDED", "UNSUPPORTED") else "UNKNOWN"
 
 
-def answer_question(question: str, k: int = None, check_hallucination: bool = True) -> RagResult:
+def answer_question(question: str, k: int | None = None, check_hallucination: bool = True) -> RagResult:
     chunks = retrieve(question, k=k)
 
     if not chunks:

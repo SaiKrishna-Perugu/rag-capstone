@@ -16,7 +16,6 @@ import json
 import sys
 from pathlib import Path
 
-from app import config
 from app.providers import get_llm
 from app.rag import answer_question
 
@@ -127,7 +126,7 @@ if __name__ == "__main__":
 
     summary = run_eval()
 
-    print(f"\n=== Eval Summary ===")
+    print("\n=== Eval Summary ===")
     print(f"Correctness pass rate:  {summary['correctness_pass_rate'] * 100:.0f}% "
           f"({sum(1 for r in summary['results'] if r['correctness'] == 'PASS')}/{summary['total']})")
     print(f"Groundedness rate:      {summary['groundedness_rate'] * 100:.0f}%")

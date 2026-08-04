@@ -35,14 +35,13 @@ exactly the kind of thing you'd move to a persisted, incrementally
 updated BM25 index (or a hybrid-native vector DB) instead.
 """
 import json
-from functools import lru_cache
 
-from langchain_community.retrievers import BM25Retriever
 from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
 from app import config
-from app.providers import get_llm, get_embeddings
+from app.providers import get_embeddings, get_llm
 
 RRF_K = 60  # standard RRF damping constant -- de-emphasizes rank-1 dominance
 CANDIDATE_POOL_MULTIPLIER = 3  # retrieve 3x more candidates than final top_k before reranking
@@ -103,7 +102,7 @@ def _reciprocal_rank_fusion(ranked_lists: list, k: int = RRF_K) -> list:
     return [doc_by_key[key] for key in fused]
 
 
-def hybrid_retrieve(question: str, k: int = None) -> list:
+def hybrid_retrieve(question: str, k: int | None = None) -> list:
     """
     Vector search + BM25 search, fused via Reciprocal Rank Fusion.
     Returns the top-k fused results (this is the CANDIDATE pool that
@@ -126,7 +125,7 @@ def hybrid_retrieve(question: str, k: int = None) -> list:
     return fused[:candidate_k]
 
 
-def rerank(question: str, candidates: list, top_k: int = None) -> list:
+def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
     """
     LLM-based listwise reranking: one call scores the whole candidate
     pool at once (cheaper and usually more consistent than N pointwise
@@ -165,7 +164,7 @@ def rerank(question: str, candidates: list, top_k: int = None) -> list:
         return candidates[:top_k]
 
 
-def retrieve_with_hybrid_and_rerank(question: str, k: int = None) -> list:
+def retrieve_with_hybrid_and_rerank(question: str, k: int | None = None) -> list:
     """The full pipeline: hybrid candidate retrieval -> LLM rerank -> top-k."""
     k = k or config.TOP_K
     candidates = hybrid_retrieve(question, k=k)

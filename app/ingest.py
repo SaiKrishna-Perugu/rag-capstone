@@ -23,18 +23,18 @@ import hashlib
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+from langchain_chroma import Chroma
 from langchain_community.document_loaders import (
+    BSHTMLLoader,
+    CSVLoader,
+    Docx2txtLoader,
     PyPDFLoader,
     TextLoader,
-    CSVLoader,
-    BSHTMLLoader,
-    Docx2txtLoader,
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
 
 from app import config
 from app.providers import get_embeddings
@@ -171,7 +171,7 @@ def run(force: bool = False) -> dict:
 
         manifest[path] = {
             "hash": current_hash,
-            "last_ingested": datetime.now(timezone.utc).isoformat(),
+            "last_ingested": datetime.now(UTC).isoformat(),
             "num_chunks": len(chunks),
         }
         (summary["updated"] if is_changed else summary["added"]).append(path)

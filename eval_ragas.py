@@ -69,9 +69,8 @@ from ragas.metrics import (
     ResponseRelevancy,
 )
 
-from app import config
-from app.providers import get_llm, get_embeddings
-from app.rag import retrieve, generate_answer
+from app.providers import get_embeddings, get_llm
+from app.rag import generate_answer, retrieve
 
 # ---------------------------------------------------------------------------
 # Same placeholder pattern as eval.py -- replace with real Q&A pairs based

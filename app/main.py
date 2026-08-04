@@ -6,20 +6,26 @@ Run:
 
 Then open http://127.0.0.1:8000/docs for interactive Swagger UI.
 """
+import asyncio
 import json
 import logging
 import time
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
-from app import config
+from app import cache, config, ingest, memory, metrics, streaming
+from app.agent import run_agentic_rag
+from app.middleware import APIKeyMiddleware
 from app.rag import answer_question
-from app.agent import run_agentic_rag, MAX_RETRIES
-from app import ingest
 
 # --- Structured logging setup -------------------------------------------------
 # Every request is logged as one JSON line: question, sources used, answer,
@@ -58,11 +64,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# --- Production middleware ------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(APIKeyMiddleware)
+
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, examples=["What is the refund policy?"])
+    question: str = Field(..., min_length=1, max_length=config.MAX_QUESTION_LENGTH, examples=["What is the refund policy?"])
     top_k: int | None = Field(default=None, ge=1, le=10)
     check_hallucination: bool = True
+    session_id: str | None = Field(default=None, description="Optional session ID for conversation memory.")
 
 
 class SourceChunk(BaseModel):
@@ -91,7 +112,37 @@ class AgenticAskResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    """Liveness probe -- checks that the service is running and critical
+    dependencies (vector store) are reachable."""
+    checks = {"api": "ok"}
+
+    try:
+        from app.retrieval import _get_vector_store
+        vs = _get_vector_store()
+        count = vs._collection.count()
+        checks["vector_store"] = f"ok ({count} chunks)"
+    except Exception as exc:
+        checks["vector_store"] = f"error: {exc}"
+
+    status = "ok" if all("error" not in str(v) for v in checks.values()) else "degraded"
+    return {"status": status, "checks": checks}
+
+
+@app.get("/ready")
+def ready() -> dict:
+    """Readiness probe -- returns 200 only when the service can serve
+    requests (vector store has documents loaded)."""
+    try:
+        from app.retrieval import _get_vector_store
+        vs = _get_vector_store()
+        count = vs._collection.count()
+        if count == 0:
+            raise HTTPException(status_code=503, detail="Vector store is empty -- no documents ingested.")
+        return {"status": "ready", "chunks_indexed": count}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Not ready: {exc}")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -101,58 +152,142 @@ def serve_ui():
     return ui_path.read_text(encoding="utf-8")
 
 
+@app.get("/metrics")
+def get_metrics() -> dict:
+    """Returns in-memory Prometheus-style metrics as JSON."""
+    return metrics.get_snapshot()
+
+
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    """Accepts a file, saves it to the docs/ directory, and triggers ingestion."""
+@limiter.limit(config.RATE_LIMIT)
+async def upload_files(request: Request, files: list[UploadFile] = File(...)):
+    """Accepts multiple files, saves them to the docs/ directory, and triggers ingestion."""
+    request_id = str(uuid.uuid4())
+    metrics.record_request("upload")
     docs_dir = Path(config.DOCS_DIR)
     docs_dir.mkdir(exist_ok=True)
     
-    file_path = docs_dir / file.filename
-    content = await file.read()
-    file_path.write_bytes(content)
-    
-    logger.info(f"Saved uploaded file to {file_path}. Triggering ingestion...")
-    
-    # Run the ingestion pipeline synchronously
+    saved_files = []
+
+    for file in files:
+        # --- Input validation --------------------------------------------------
+        # Sanitize filename to prevent path traversal (e.g., "../../etc/passwd")
+        safe_name = Path(file.filename).name if file.filename else "uploaded_file"
+        if not safe_name or safe_name.startswith("."):
+            raise HTTPException(status_code=400, detail=f"Invalid filename: {file.filename}")
+
+        # Validate file extension against supported loaders
+        suffix = Path(safe_name).suffix.lower()
+        supported = {".pdf", ".txt", ".md", ".csv", ".html", ".htm", ".docx"}
+        if suffix not in supported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{suffix}'. Supported: {', '.join(sorted(supported))}",
+            )
+
+        content = await file.read()
+
+        # Check file size
+        max_bytes = config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        if len(content) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File {safe_name} too large ({len(content) / 1024 / 1024:.1f}MB). Max: {config.MAX_UPLOAD_SIZE_MB}MB.",
+            )
+
+        file_path = docs_dir / safe_name
+        file_path.write_bytes(content)
+        saved_files.append(safe_name)
+
+    logger.info(f"Saved uploaded files: {saved_files}. Triggering ingestion...")
+
+    # Run the ingestion pipeline in a thread to avoid blocking the event loop
     try:
-        summary = ingest.run(force=False)
+        summary = await asyncio.to_thread(ingest.run, force=False)
         return {
-            "message": f"Successfully processed {file.filename}",
+            "message": f"Successfully processed {len(saved_files)} files: {', '.join(saved_files)}",
             "ingest_summary": summary
         }
     except Exception as exc:
-        logger.error(json.dumps({"event": "error", "endpoint": "upload", "error": str(exc)}))
-        raise HTTPException(status_code=500, detail=f"File saved but ingestion failed: {str(exc)}")
+        metrics.record_error("upload")
+        logger.error(json.dumps({"request_id": request_id, "event": "error", "endpoint": "upload", "error": str(exc)}))
+        raise HTTPException(status_code=500, detail=f"File saved but ingestion failed: {exc!s}")
 
 
 @app.post("/ask", response_model=AskResponse)
-def ask(request: AskRequest) -> AskResponse:
+@limiter.limit(config.RATE_LIMIT)
+async def ask(request: Request, body: AskRequest) -> AskResponse:
+    request_id = str(uuid.uuid4())
+    metrics.record_request("ask")
     start = time.perf_counter()
 
+    # --- Conversation Memory: Contextualize Question ----------------------
+    contextualized_q = await asyncio.to_thread(
+        memory.contextualize_question, body.session_id, body.question
+    )
+
+    # --- Check Semantic Cache First ---------------------------------------
+    cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
+    if cached_hit:
+        # Save to memory even if it was a cache hit
+        if body.session_id:
+            await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, cached_hit["answer"])
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        metrics.record_latency(latency_ms)
+        logger.info(json.dumps({
+            "request_id": request_id,
+            "event": "ask",
+            "cache": "HIT",
+            "question": body.question,
+            "answer": cached_hit["answer"],
+            "similarity_score": cached_hit["similarity_score"],
+            "latency_ms": latency_ms,
+        }))
+        return AskResponse(
+            question=body.question,
+            answer=cached_hit["answer"],
+            groundedness=cached_hit["groundedness"],
+            sources=[],  # Cached answers don't return full source chunks
+            latency_ms=latency_ms,
+        )
+
     try:
-        result = answer_question(
-            question=request.question,
-            k=request.top_k,
-            check_hallucination=request.check_hallucination,
+        result = await asyncio.to_thread(
+            answer_question,
+            question=contextualized_q,
+            k=body.top_k,
+            check_hallucination=body.check_hallucination,
         )
     except Exception as exc:
-        # Don't leak internals to the client, but log the real error.
-        logger.error(json.dumps({"event": "error", "question": request.question, "error": str(exc)}))
+        metrics.record_error("ask")
+        logger.error(json.dumps({"request_id": request_id, "event": "error", "question": body.question, "error": str(exc)}))
         raise HTTPException(status_code=500, detail="Failed to generate an answer. Check server logs.")
 
     latency_ms = int((time.perf_counter() - start) * 1000)
+    metrics.record_latency(latency_ms)
+    metrics.record_groundedness(result.groundedness)
+    if not result.sources:
+        metrics.record_empty_retrieval()
 
     logger.info(json.dumps({
+        "request_id": request_id,
         "event": "ask",
-        "question": request.question,
+        "question": body.question,
+        "contextualized_query": contextualized_q,
         "answer": result.answer,
         "groundedness": result.groundedness,
         "num_sources": len(result.sources),
         "latency_ms": latency_ms,
     }))
 
+    # Cache the successful result for future similar questions
+    await asyncio.to_thread(cache.set_cached_answer, contextualized_q, result.answer, result.groundedness)
+    
+    if body.session_id:
+        await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, result.answer)
+
     return AskResponse(
-        question=request.question,
+        question=body.question,
         answer=result.answer,
         groundedness=result.groundedness,
         sources=[SourceChunk(**s) for s in result.sources],
@@ -160,30 +295,83 @@ def ask(request: AskRequest) -> AskResponse:
     )
 
 
+@app.post("/ask-stream")
+@limiter.limit(config.RATE_LIMIT)
+async def ask_stream(request: Request, body: AskRequest):
+    """
+    Streaming version of /ask. Returns Server-Sent Events (SSE).
+    Clients should read the stream for `{"token": "..."}` payloads,
+    followed by a `{"type": "final", ...}` payload at the end.
+    """
+    return StreamingResponse(
+        streaming.stream_answer(body.question, body.session_id, body.top_k),
+        media_type="text/event-stream"
+    )
+
 @app.post("/ask-agentic", response_model=AgenticAskResponse)
-def ask_agentic(request: AskRequest) -> AgenticAskResponse:
+@limiter.limit(config.RATE_LIMIT)
+async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     """
     Self-correcting RAG: retrieve -> grade -> (generate | rewrite & retry) ->
     fallback if still insufficient after MAX_RETRIES. See app/agent.py.
-
-    Same request shape as /ask, so you can call both with the same question
-    and compare single-pass vs agentic behavior directly -- useful for
-    demonstrating the difference in an interview.
     """
+    request_id = str(uuid.uuid4())
+    metrics.record_request("ask-agentic")
     start = time.perf_counter()
 
+    # --- Conversation Memory: Contextualize Question ----------------------
+    contextualized_q = await asyncio.to_thread(
+        memory.contextualize_question, body.session_id, body.question
+    )
+
+    # --- Check Semantic Cache First ---------------------------------------
+    cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
+    if cached_hit:
+        if body.session_id:
+            await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, cached_hit["answer"])
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        metrics.record_latency(latency_ms)
+        logger.info(json.dumps({
+            "request_id": request_id,
+            "event": "ask-agentic",
+            "cache": "HIT",
+            "question": body.question,
+            "answer": cached_hit["answer"],
+            "similarity_score": cached_hit["similarity_score"],
+            "latency_ms": latency_ms,
+        }))
+        return AgenticAskResponse(
+            question=body.question,
+            final_query=contextualized_q,
+            answer=cached_hit["answer"],
+            groundedness=cached_hit["groundedness"],
+            sources=[],
+            retries_used=0,
+            latency_ms=latency_ms,
+        )
+
     try:
-        final_state = run_agentic_rag(request.question)
+        final_state = await asyncio.to_thread(run_agentic_rag, contextualized_q)
     except Exception as exc:
-        logger.error(json.dumps({"event": "error", "endpoint": "ask-agentic",
-                                  "question": request.question, "error": str(exc)}))
+        metrics.record_error("ask-agentic")
+        logger.error(json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask-agentic",
+                                  "question": body.question, "error": str(exc)}))
         raise HTTPException(status_code=500, detail="Failed to generate an answer. Check server logs.")
 
     latency_ms = int((time.perf_counter() - start) * 1000)
+    metrics.record_latency(latency_ms)
+    metrics.record_groundedness(final_state["groundedness"])
+    if final_state["retry_count"] > 0:
+        for _ in range(final_state["retry_count"]):
+            metrics.record_agent_retry()
+    if not final_state["sources"]:
+        metrics.record_empty_retrieval()
 
     logger.info(json.dumps({
+        "request_id": request_id,
         "event": "ask-agentic",
-        "question": request.question,
+        "question": body.question,
+        "contextualized_query": contextualized_q,
         "final_query": final_state["current_query"],
         "answer": final_state["answer"],
         "groundedness": final_state["groundedness"],
@@ -192,8 +380,14 @@ def ask_agentic(request: AskRequest) -> AgenticAskResponse:
         "latency_ms": latency_ms,
     }))
 
+    # Cache the successful result for future similar questions
+    await asyncio.to_thread(cache.set_cached_answer, contextualized_q, final_state["answer"], final_state["groundedness"])
+    
+    if body.session_id:
+        await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, final_state["answer"])
+
     return AgenticAskResponse(
-        question=request.question,
+        question=body.question,
         final_query=final_state["current_query"],
         answer=final_state["answer"],
         groundedness=final_state["groundedness"],

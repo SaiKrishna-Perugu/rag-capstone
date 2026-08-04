@@ -8,6 +8,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Marked.js for parsing markdown in responses -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- DOMPurify for XSS protection -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
     <style>
         :root {
             --bg-color: #0f172a; /* Slate 900 */
@@ -398,9 +400,15 @@
 
         <div id="results-container">
             <div class="card">
-                <div class="card-header">
-                    AI Response
-                    <span class="badge" id="badge-rewrites" style="display:none">Query Rewritten</span>
+                <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        AI Response
+                        <span class="badge" id="badge-rewrites" style="display:none">Query Rewritten</span>
+                    </div>
+                    <button class="secondary-btn" id="copy-btn" onclick="copyAnswer()" style="display: none; padding: 4px 8px; font-size: 0.8rem; background: var(--glass-bg);">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        Copy
+                    </button>
                 </div>
                 <div class="answer-content" id="answer-content"></div>
             </div>
@@ -430,6 +438,9 @@
     </div>
 
     <script>
+        // Generate a random session ID for conversation memory
+        const sessionId = Math.random().toString(36).substring(2, 15);
+        
         const input = document.getElementById('question-input');
         const askBtn = document.getElementById('ask-btn');
         const loader = document.getElementById('loader');
@@ -438,11 +449,10 @@
         const errorMsg = document.getElementById('error-message');
 
         const loadingTexts = [
-            "Analyzing documents and generating response...",
             "Agent is thinking...",
-            "Retrieving relevant context...",
-            "Grading retrieved chunks...",
-            "Checking hallucination...",
+            "Contextualizing question...",
+            "Searching documents...",
+            "Generating response..."
         ];
         let loadingInterval;
 
@@ -471,18 +481,66 @@
             }, 2500);
 
             try {
-                const response = await fetch('/ask-agentic', {
+                resultsContainer.style.display = 'flex';
+                document.getElementById('answer-content').innerHTML = ''; // Clear old answer
+                document.getElementById('sources-grid').innerHTML = ''; // Clear old sources
+                document.getElementById('badge-rewrites').style.display = 'none';
+                document.getElementById('copy-btn').style.display = 'none';
+
+                const response = await fetch('/ask-stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question: question, check_hallucination: true })
+                    body: JSON.stringify({ question: question, check_hallucination: true, session_id: sessionId })
                 });
 
                 if (!response.ok) {
                     throw new Error(`Server returned ${response.status}`);
                 }
 
-                const data = await response.json();
-                renderResults(data);
+                loader.style.display = 'none';
+                clearInterval(loadingInterval);
+                
+                // Read the SSE stream
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let fullAnswer = "";
+                let buffer = "";
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    
+                    // The last element is either an empty string (if it ended with \n) 
+                    // or an incomplete line. Keep it in the buffer.
+                    buffer = lines.pop();
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const dataStr = line.slice(6);
+                            if (!dataStr) continue;
+                            
+                            try {
+                                const data = JSON.parse(dataStr);
+                                
+                                if (data.error) {
+                                    throw new Error(data.details || data.error);
+                                }
+                                
+                                if (data.token) {
+                                    fullAnswer += data.token;
+                                    document.getElementById('answer-content').innerHTML = DOMPurify.sanitize(marked.parse(fullAnswer));
+                                } else if (data.type === 'final') {
+                                    renderFinalResults(data);
+                                }
+                            } catch (e) {
+                                console.error("Error parsing stream chunk:", e, "Data string:", dataStr);
+                            }
+                        }
+                    }
+                }
             } catch (err) {
                 errorMsg.innerText = "Error: " + err.message + " (Check server logs)";
                 errorMsg.style.display = 'block';
@@ -491,15 +549,19 @@
                 clearInterval(loadingInterval);
                 askBtn.disabled = false;
                 input.disabled = false;
+                input.value = ''; // clear input for next question
                 input.focus();
             }
         }
 
-        function renderResults(data) {
-            loader.style.display = 'none';
-            
-            // Render Answer
-            document.getElementById('answer-content').innerHTML = marked.parse(data.answer);
+        function renderFinalResults(data) {
+            // Ensure final answer is fully rendered
+            if (data.answer) {
+                document.getElementById('answer-content').innerHTML = DOMPurify.sanitize(marked.parse(data.answer));
+                document.getElementById('copy-btn').style.display = 'inline-block';
+                // Store raw text for copying
+                document.getElementById('copy-btn').dataset.answer = data.answer;
+            }
             
             // Show badge if agent rewrote the query
             const rewriteBadge = document.getElementById('badge-rewrites');
@@ -547,20 +609,22 @@
         }
 
         async function handleFileUpload(event) {
-            const file = event.target.files[0];
-            if (!file) return;
+            const files = event.target.files;
+            if (!files || files.length === 0) return;
 
             const uploadLabel = document.getElementById('upload-label');
             const uploadStatus = document.getElementById('upload-status');
             const uploadError = document.getElementById('upload-error');
 
-            uploadLabel.innerText = "Uploading and ingesting " + file.name + "...";
+            uploadLabel.innerText = `Uploading ${files.length} document(s)...`;
             uploadStatus.style.display = 'none';
             uploadError.style.display = 'none';
             askBtn.disabled = true;
 
             const formData = new FormData();
-            formData.append("file", file);
+            for (let i = 0; i < files.length; i++) {
+                formData.append("files", files[i]);
+            }
 
             try {
                 const response = await fetch('/upload', {
@@ -574,15 +638,34 @@
                 }
 
                 const data = await response.json();
-                uploadStatus.innerText = data.message + " (" + data.ingest_summary.added.length + " added)";
+                uploadStatus.innerText = data.message;
                 uploadStatus.style.display = 'block';
             } catch (err) {
                 uploadError.innerText = "Upload failed: " + err.message;
                 uploadError.style.display = 'block';
             } finally {
-                uploadLabel.innerText = "+ Upload another document";
+                uploadLabel.innerText = "+ Upload document(s)";
                 askBtn.disabled = false;
                 event.target.value = ''; // reset file input
+            }
+        }
+
+        async function copyAnswer() {
+            const btn = document.getElementById('copy-btn');
+            const text = btn.dataset.answer;
+            if (!text) return;
+            
+            try {
+                await navigator.clipboard.writeText(text);
+                const originalHtml = btn.innerHTML;
+                btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><polyline points="20 6 9 17 4 12"></polyline></svg> Copied!`;
+                btn.style.color = "var(--success)";
+                setTimeout(() => {
+                    btn.innerHTML = originalHtml;
+                    btn.style.color = "inherit";
+                }, 2000);
+            } catch (err) {
+                console.error('Failed to copy text: ', err);
             }
         }
     </script>

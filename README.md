@@ -31,21 +31,29 @@ deployment -- see the rest of this README.
 
 ## Architecture
 
-```
-docs/*.pdf,*.txt,*.md,*.csv,*.html,*.docx
-      |
-      v
-  ingest.py --(per-file: hash-check -> chunk -> embed)--> Chroma vector store
-             (skips unchanged files; deletes+replaces changed ones --
-              this is the "freshness pipeline")
-                                          |
-                                          v
-POST /ask  -->  retrieve (hybrid: BM25 + vector, RRF-fused -> LLM rerank)
-                                          -->  generate grounded answer
-                                          -->  check groundedness (LLM-as-judge)
-                                          -->  log request (question, answer,
-                                               sources, groundedness, latency)
-                                          -->  return answer + sources
+```mermaid
+graph TD
+    subgraph Ingestion
+        A[docs/*.pdf, *.txt, etc.] --> B(ingest.py)
+        B -->|Hash check| C{Changed?}
+        C -->|Yes| D[Chunk & Embed]
+        D --> E[(Chroma Vector Store)]
+        C -->|No| F[Skip]
+    end
+
+    subgraph API Request
+        G[POST /ask-stream] --> H[Conversation Memory]
+        H --> I{Semantic Cache}
+        I -->|Hit| J[Return Cached Answer]
+        I -->|Miss| K[Hybrid Retrieval BM25 + Vector]
+        K --> L[RRF Fusion]
+        L --> M[LLM Reranking]
+        M --> N[Grounded Generation SSE Stream]
+        N --> O[Check Groundedness]
+        O --> P[Return Final Answer & Sources]
+        P -.->|Update| H
+        P -.->|Update| I
+    end
 ```
 
 ### Hybrid retrieval + reranking
@@ -209,30 +217,31 @@ usage. Requires the `gcloud` CLI installed and authenticated.
 gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
 gcloud services enable run.googleapis.com aiplatform.googleapis.com \
-    cloudbuild.googleapis.com
+    cloudbuild.googleapis.com secretmanager.googleapis.com \
+    artifactregistry.googleapis.com
 
 # 2. Ingest documents LOCALLY first -- chroma_db/ must exist in the build
 #    context before building the image (see Dockerfile comments for why
 #    ingestion doesn't run at build time).
-python -m app.ingest
+uv run python -m app.ingest
 
-# 3. Build and push the container image via Cloud Build (no local Docker
-#    daemon needed -- this builds in the cloud)
-gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/rag-capstone
+# 3. Create Artifact Registry repository
+gcloud artifacts repositories create rag-repo \
+    --repository-format=docker \
+    --location=us-central1
 
-# 4a. Deploy using Vertex AI as the model provider (recommended -- this is
-#     the actual "cloud AI platform" story worth having):
-gcloud run deploy rag-capstone \
-  --image gcr.io/YOUR_PROJECT_ID/rag-capstone \
-  --platform managed \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --set-env-vars MODEL_PROVIDER=vertexai,GCP_PROJECT_ID=YOUR_PROJECT_ID,GCP_LOCATION=us-central1
+# 4. Build and push the container image via Cloud Build
+gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
 
-# 5. Test the deployed service (gcloud prints the URL after deploy)
-curl -X POST https://YOUR-SERVICE-URL/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "How long is the refund window?"}'
+# 5. Store API keys securely in Secret Manager
+echo -n "your-api-key" | gcloud secrets create rag_api_key --data-file=-
+echo -n "your-groq-key" | gcloud secrets create groq_api_key --data-file=-
+gcloud secrets add-iam-policy-binding rag_api_key --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding groq_api_key --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+
+# 6. Deploy using declarative yaml
+# Open cloudbuild.yaml and replace YOUR_PROJECT_ID with your actual project ID
+gcloud run services replace cloudbuild.yaml
 ```
 
 **If using Vertex AI (4a):** the Cloud Run service's default compute
@@ -247,18 +256,28 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
 
 ## Project structure
 
-```
+```text
 app/
+  agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
+  cache.py      # semantic caching for repeated questions
   config.py     # centralized env/config loading
   ingest.py     # load -> chunk -> embed -> persist to Chroma
+  main.py       # FastAPI endpoints (/, /upload, /ask, /ask-agentic) + UI serving + logging
+  memory.py     # conversation history and contextual query rewriting
+  metrics.py    # observability and prometheus-style metrics
+  middleware.py # API key auth, CORS, rate limiting
+  providers.py  # model provider factory (Groq / Vertex AI)
   rag.py        # single-pass retrieval, grounded generation, groundedness check
-  agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
-  main.py       # FastAPI endpoints (/ask, /ask-agentic) + structured logging
+  retrieval.py  # hybrid retrieval + LLM reranking
+  streaming.py  # Server-Sent Events (SSE) streaming
+  ui.html       # frontend interface
 docs/           # source documents (sample included)
+tests/          # unit and integration tests
 eval.py         # custom eval harness (LLM-as-judge, correctness + groundedness)
 eval_ragas.py   # RAGAS eval harness (faithfulness, relevancy, precision, recall)
+cloud-run-service.yaml # Declarative Cloud Run configuration
 Dockerfile
-requirements.txt
+pyproject.toml
 ```
 
 ## What this covers vs. a production system
@@ -292,12 +311,4 @@ real and working, not stubbed — but scoped down from a production system:
 1. **pgvector** — swap ChromaDB for Postgres + pgvector for a
    production-grade, horizontally scalable vector store (relevant once this
    needs to scale past a single-instance Cloud Run deployment).
-2. **Ingestion as a separate job** — currently `uv run python -m app.ingest` must
-   run locally before building the container (see Dockerfile comments).
-   A Cloud Run Job (or Cloud Function triggered on document upload) would
-   decouple ingestion from the deploy flow entirely.
-3. **CI/CD pipeline** — GitHub Actions workflow to run the eval harnesses
-   on every push and block merges if faithfulness/groundedness drops below
-   a threshold (regression guard for RAG quality).
-4. **Semantic caching** — cache answers for semantically similar queries
-   to reduce LLM cost and latency on repeated/paraphrased questions.
+2. **Asynchronous Ingestion Worker** — currently, the `/upload` endpoint runs ingestion synchronously in a thread. While this works well for demos and small files, for production at scale, document processing should be decoupled into a separate worker queue (e.g. Cloud Run Jobs + Pub/Sub) to prevent HTTP timeouts on massive files.
