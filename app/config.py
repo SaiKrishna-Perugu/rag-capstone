@@ -14,6 +14,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# --- Detect CI/test environments ------------------------------------------
+_IS_CI = any(os.getenv(v) for v in ("CI", "GITHUB_ACTIONS", "PYTEST_CURRENT_TEST"))
+
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
 
@@ -48,10 +51,16 @@ GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 GROQ_EMBEDDING_MODEL = os.getenv("GROQ_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
 if MODEL_PROVIDER == "groq" and not GROQ_API_KEY:
-    raise RuntimeError(
-        "MODEL_PROVIDER=groq requires GROQ_API_KEY to be set in .env. "
-        "Get a free key at https://console.groq.com/keys"
-    )
+    if _IS_CI:
+        logger.warning(
+            "GROQ_API_KEY not set, but running in CI/test. "
+            "Mocked tests will work; integration tests will need the secret."
+        )
+    else:
+        raise RuntimeError(
+            "MODEL_PROVIDER=groq requires GROQ_API_KEY to be set in .env. "
+            "Get a free key at https://console.groq.com/keys"
+        )
 
 # --- GCP / Vertex AI settings -----------------------------------------------
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
