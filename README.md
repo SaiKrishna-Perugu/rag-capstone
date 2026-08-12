@@ -210,19 +210,30 @@ same collection silently produces bad retrieval, not an error.
 ## Deploying to GCP (Cloud Run + Vertex AI)
 
 Uses GCP's free trial ($300 credit, 90 days) -- enough for portfolio-project
-usage. Requires the `gcloud` CLI installed and authenticated.
+usage. Requires the `gcloud` CLI installed and authenticated (Cloud Shell
+has this pre-installed; `uv` isn't, so run
+`curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env`
+first if you're using it).
+
+These steps assume `us-central1` and the Groq path (`cloudrun-groq.yaml`) --
+substitute your own region/project ID, and see the Vertex AI note at the
+end if you're using `cloudrun-vertexai.yaml` instead.
 
 ```bash
 # 1. One-time project setup
 gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
-gcloud services enable run.googleapis.com aiplatform.googleapis.com \
+gcloud services enable run.googleapis.com \
     cloudbuild.googleapis.com secretmanager.googleapis.com \
     artifactregistry.googleapis.com
 
 # 2. Ingest documents LOCALLY first -- chroma_db/ must exist in the build
 #    context before building the image (see Dockerfile comments for why
-#    ingestion doesn't run at build time).
+#    ingestion doesn't run at build time). chroma_db/ is gitignored (it's
+#    generated data) but the repo's .gcloudignore explicitly re-includes it
+#    for Cloud Build uploads specifically -- without that, the image would
+#    silently ship with an empty vector store and /ready would fail with
+#    "Not ready: '/app/chroma_db'" forever.
 uv run python -m app.ingest
 
 # 3. Create Artifact Registry repository
@@ -230,30 +241,76 @@ gcloud artifacts repositories create rag-repo \
     --repository-format=docker \
     --location=us-central1
 
-# 4. Build and push the container image via Cloud Build
+# 4. Build and push the container image via Cloud Build (a few minutes --
+#    this also pre-downloads the FastEmbed embedding model into the image,
+#    see Dockerfile comments)
 gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
 
-# 5. Store API keys securely in Secret Manager
+# 5. Create the service account cloudrun-groq.yaml runs as
+gcloud iam service-accounts create rag-capstone-sa \
+    --display-name="RAG Capstone Cloud Run service account"
+
+# 6. Store API keys securely in Secret Manager, and grant THAT service
+#    account (not the default compute SA -- it's a different identity)
+#    access to read them
 echo -n "your-api-key" | gcloud secrets create rag_api_key --data-file=-
 echo -n "your-groq-key" | gcloud secrets create groq_api_key --data-file=-
-gcloud secrets add-iam-policy-binding rag_api_key --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
-gcloud secrets add-iam-policy-binding groq_api_key --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding rag_api_key --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding groq_api_key --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
 
-# 6. Deploy using declarative yaml
+# 7. Deploy using the declarative yaml
 # Open cloudrun-groq.yaml (if using Groq) or cloudrun-vertexai.yaml (if using Vertex AI)
 # Replace YOUR_PROJECT_ID with your actual project ID
-gcloud run services replace cloudrun-groq.yaml
+gcloud run services replace cloudrun-groq.yaml --region=us-central1
+
+# 8. Cloud Run services aren't publicly reachable by default -- allow it
+gcloud run services add-iam-policy-binding rag-capstone \
+    --region=us-central1 \
+    --member="allUsers" \
+    --role="roles/run.invoker"
 ```
 
-**If using Vertex AI (4a):** the Cloud Run service's default compute
-service account needs the `roles/aiplatform.user` IAM role, or Vertex AI
-calls will fail with a permissions error:
+**A secret can't be created empty** (`gcloud secrets create ... --data-file=-`
+with no input errors with `INVALID_ARGUMENT: Secret Payload cannot be empty`).
+If you want the deployed app's API-key auth effectively off (open demo),
+`app/middleware.py`'s check is `if config.API_KEY and ...`, so any
+non-empty placeholder value works the same as truly empty -- just don't
+send that header when testing. If you want it protected, use a real value
+and send it back as `X-API-Key: <value>` on every `/ask`, `/ask-agentic`,
+`/upload`, and `/metrics` call.
+
+### Redeploying after code or doc changes
+
+```bash
+uv run python -m app.ingest        # only if docs/ changed
+gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
+gcloud run deploy rag-capstone --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest --region=us-central1
+```
+
+Use `gcloud run deploy --image=...` (not `gcloud run services replace`) for
+routine image-only updates. `cloudrun-groq.yaml` references the image by
+the mutable `:latest` tag, so its rendered spec text never changes between
+builds -- `services replace` diffs spec text, sees nothing different, and
+silently keeps serving the old revision even though a new image was just
+pushed. `run deploy --image=...` always resolves `:latest` to its current
+digest and creates a new revision when it differs. Reserve
+`services replace` for when you actually edit the YAML itself (new env
+var, different secret, resource limits).
+
+**If using Vertex AI:** also enable `aiplatform.googleapis.com` in step 1
+(`gcloud services enable aiplatform.googleapis.com`). `cloudrun-vertexai.yaml`
+runs as the default compute service account, which needs the
+`roles/aiplatform.user` IAM role, or Vertex AI calls will fail with a
+permissions error:
 ```bash
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
   --role="roles/aiplatform.user"
 ```
 (Find `YOUR_PROJECT_NUMBER` via `gcloud projects describe YOUR_PROJECT_ID`.)
+Also add `GCP_PROJECT_ID` to that YAML's `env:` block -- `app/config.py`
+requires it whenever `MODEL_PROVIDER=vertexai` and it isn't set there by
+default.
 
 ## Project structure
 

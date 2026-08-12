@@ -53,5 +53,4 @@ spec:
         readinessProbe:
           httpGet:
             path: /ready
-          initialDelaySeconds: 15
           periodSeconds: 15
