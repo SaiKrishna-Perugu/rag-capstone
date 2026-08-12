@@ -70,7 +70,11 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
         try:
             chunks = await asyncio.to_thread(retrieve, contextualized_q, top_k)
         except Exception as exc:
-            yield f"data: {json.dumps({'error': 'Retrieval failed', 'details': str(exc)})}\n\n"
+            logger.error(
+                json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask-stream/retrieve", "error": str(exc)}),
+                exc_info=True,
+            )
+            yield f"data: {json.dumps({'error': 'Retrieval failed', 'details': str(exc), 'request_id': request_id})}\n\n"
             return
             
         context = _format_context(chunks)
@@ -91,7 +95,11 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
                     full_answer.append(chunk.content)
                     yield f"data: {json.dumps({'token': chunk.content})}\n\n"
         except Exception as exc:
-            yield f"data: {json.dumps({'error': 'Generation failed', 'details': str(exc)})}\n\n"
+            logger.error(
+                json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask-stream/generate", "error": str(exc)}),
+                exc_info=True,
+            )
+            yield f"data: {json.dumps({'error': 'Generation failed', 'details': str(exc), 'request_id': request_id})}\n\n"
             return
             
         final_answer = "".join(full_answer)
@@ -137,7 +145,8 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
             "groundedness": groundedness,
             "sources": sources,
             "latency_ms": latency_ms,
-            "cached": False
+            "cached": False,
+            "request_id": request_id,
         }
         yield f"data: {json.dumps(final_payload)}\n\n"
         
@@ -145,11 +154,14 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
         # Catch ANY exception (e.g., API Key invalid, network timeout) and securely 
         # log it, then yield a proper JSON SSE payload instead of silently 500-ing.
         metrics.record_error("ask-stream")
-        logger.error(json.dumps({
-            "request_id": request_id, 
-            "event": "error", 
-            "endpoint": "ask-stream", 
-            "question": question, 
-            "error": str(exc)
-        }))
-        yield f"data: {json.dumps({'error': 'Server Error', 'details': str(exc)})}\n\n"
+        logger.error(
+            json.dumps({
+                "request_id": request_id, 
+                "event": "error", 
+                "endpoint": "ask-stream", 
+                "question": question, 
+                "error": str(exc),
+            }),
+            exc_info=True,
+        )
+        yield f"data: {json.dumps({'error': 'Server Error', 'details': 'An unexpected error occurred. Check server logs.', 'request_id': request_id})}\n\n"

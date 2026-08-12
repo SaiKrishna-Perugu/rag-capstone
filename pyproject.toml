@@ -49,4 +49,8 @@ dev = [
 pythonpath = ["."]
 
 [tool.ruff.lint]
-ignore = ["BLE001", "B008", "SIM117"]
+# G201: the project's structured-logging convention is logger.error(json_payload,
+# exc_info=True) rather than logger.exception(...), so the traceback is attached
+# to a JSON-formatted message consistent with every other log line -- see
+# app/streaming.py and app/main.py's error handlers.
+ignore = ["BLE001", "B008", "SIM117", "G201"]

@@ -2,9 +2,11 @@ from app import config
 
 
 def test_health_check(client):
+    # /health is a pure liveness probe -- doesn't touch the vector store,
+    # so it can only ever report "ok" (see /ready for the dependency check).
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] in ("ok", "degraded")
+    assert response.json() == {"status": "ok"}
 
 def test_ask_endpoint_requires_auth(client, monkeypatch):
     # Configure an API key for the test
@@ -30,4 +32,20 @@ def test_upload_endpoint_validation(client):
     files = {"files": ("test.exe", b"malicious payload", "application/x-msdownload")}
     response = client.post("/upload", files=files)
     assert response.status_code == 400
-    assert "Unsupported file type" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "Unsupported file type" in detail["error"]
+    assert "request_id" in detail
+
+def test_upload_endpoint_disabled(client, monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_UPLOADS", False)
+    files = {"files": ("test.txt", b"hello", "text/plain")}
+    response = client.post("/upload", files=files)
+    assert response.status_code == 403
+    assert "disabled" in response.json()["detail"]["error"].lower()
+
+def test_config_endpoint(client):
+    response = client.get("/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert "enable_uploads" in data
+    assert data["model_provider"] == config.MODEL_PROVIDER

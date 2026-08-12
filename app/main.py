@@ -112,20 +112,8 @@ class AgenticAskResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    """Liveness probe -- checks that the service is running and critical
-    dependencies (vector store) are reachable."""
-    checks = {"api": "ok"}
-
-    try:
-        from app.retrieval import _get_vector_store
-        vs = _get_vector_store()
-        count = vs._collection.count()
-        checks["vector_store"] = f"ok ({count} chunks)"
-    except Exception as exc:
-        checks["vector_store"] = f"error: {exc}"
-
-    status = "ok" if all("error" not in str(v) for v in checks.values()) else "degraded"
-    return {"status": status, "checks": checks}
+    """Liveness probe -- checks that the FastAPI process is running and responsive."""
+    return {"status": "ok"}
 
 
 @app.get("/ready")
@@ -143,6 +131,15 @@ def ready() -> dict:
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Not ready: {exc}")
+
+
+@app.get("/config")
+def get_ui_config() -> dict:
+    """Returns runtime configuration for the web UI."""
+    return {
+        "enable_uploads": config.ENABLE_UPLOADS,
+        "model_provider": config.MODEL_PROVIDER,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -163,6 +160,12 @@ def get_metrics() -> dict:
 async def upload_files(request: Request, files: list[UploadFile] = File(...)):
     """Accepts multiple files, saves them to the docs/ directory, and triggers ingestion."""
     request_id = str(uuid.uuid4())
+    if not config.ENABLE_UPLOADS:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "Uploads are disabled in this environment.", "request_id": request_id},
+        )
+
     metrics.record_request("upload")
     docs_dir = Path(config.DOCS_DIR)
     docs_dir.mkdir(exist_ok=True)
@@ -174,7 +177,10 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         # Sanitize filename to prevent path traversal (e.g., "../../etc/passwd")
         safe_name = Path(file.filename).name if file.filename else "uploaded_file"
         if not safe_name or safe_name.startswith("."):
-            raise HTTPException(status_code=400, detail=f"Invalid filename: {file.filename}")
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"Invalid filename: {file.filename}", "request_id": request_id},
+            )
 
         # Validate file extension against supported loaders
         suffix = Path(safe_name).suffix.lower()
@@ -182,7 +188,10 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         if suffix not in supported:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file type '{suffix}'. Supported: {', '.join(sorted(supported))}",
+                detail={
+                    "error": f"Unsupported file type '{suffix}'. Supported: {', '.join(sorted(supported))}",
+                    "request_id": request_id,
+                },
             )
 
         content = await file.read()
@@ -192,7 +201,10 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         if len(content) > max_bytes:
             raise HTTPException(
                 status_code=413,
-                detail=f"File {safe_name} too large ({len(content) / 1024 / 1024:.1f}MB). Max: {config.MAX_UPLOAD_SIZE_MB}MB.",
+                detail={
+                    "error": f"File {safe_name} too large ({len(content) / 1024 / 1024:.1f}MB). Max: {config.MAX_UPLOAD_SIZE_MB}MB.",
+                    "request_id": request_id,
+                },
             )
 
         file_path = docs_dir / safe_name
@@ -206,12 +218,19 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         summary = await asyncio.to_thread(ingest.run, force=False)
         return {
             "message": f"Successfully processed {len(saved_files)} files: {', '.join(saved_files)}",
-            "ingest_summary": summary
+            "ingest_summary": summary,
+            "request_id": request_id,
         }
     except Exception as exc:
         metrics.record_error("upload")
-        logger.error(json.dumps({"request_id": request_id, "event": "error", "endpoint": "upload", "error": str(exc)}))
-        raise HTTPException(status_code=500, detail=f"File saved but ingestion failed: {exc!s}")
+        logger.error(
+            json.dumps({"request_id": request_id, "event": "error", "endpoint": "upload", "error": str(exc)}),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"File saved but ingestion failed: {exc!s}", "request_id": request_id},
+        )
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -260,8 +279,14 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
         )
     except Exception as exc:
         metrics.record_error("ask")
-        logger.error(json.dumps({"request_id": request_id, "event": "error", "question": body.question, "error": str(exc)}))
-        raise HTTPException(status_code=500, detail="Failed to generate an answer. Check server logs.")
+        logger.error(
+            json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask", "question": body.question, "error": str(exc)}),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to generate an answer. Check server logs.", "request_id": request_id},
+        )
 
     latency_ms = int((time.perf_counter() - start) * 1000)
     metrics.record_latency(latency_ms)
@@ -354,9 +379,20 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
         final_state = await asyncio.to_thread(run_agentic_rag, contextualized_q)
     except Exception as exc:
         metrics.record_error("ask-agentic")
-        logger.error(json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask-agentic",
-                                  "question": body.question, "error": str(exc)}))
-        raise HTTPException(status_code=500, detail="Failed to generate an answer. Check server logs.")
+        logger.error(
+            json.dumps({
+                "request_id": request_id,
+                "event": "error",
+                "endpoint": "ask-agentic",
+                "question": body.question,
+                "error": str(exc),
+            }),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to generate an answer. Check server logs.", "request_id": request_id},
+        )
 
     latency_ms = int((time.perf_counter() - start) * 1000)
     metrics.record_latency(latency_ms)

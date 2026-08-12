@@ -448,6 +448,28 @@
         const resultsContainer = document.getElementById('results-container');
         const errorMsg = document.getElementById('error-message');
 
+        // Fetch runtime configuration to dynamically configure UI
+        async function initApp() {
+            try {
+                const res = await fetch('/config');
+                if (res.ok) {
+                    const cfg = await res.json();
+                    if (!cfg.enable_uploads) {
+                        const uploadSection = document.getElementById('upload-section');
+                        if (uploadSection) {
+                            uploadSection.innerHTML = '<span style="color: var(--text-muted); font-size: 0.9rem;">Document uploads are disabled in this public demo environment. Knowledge base is pre-indexed.</span>';
+                            uploadSection.style.borderStyle = 'solid';
+                            uploadSection.style.borderColor = 'rgba(255,255,255,0.08)';
+                            uploadSection.style.padding = '12px 20px';
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('Could not fetch runtime config:', e);
+            }
+        }
+        window.addEventListener('DOMContentLoaded', initApp);
+
         const loadingTexts = [
             "Agent is thinking...",
             "Contextualizing question...",

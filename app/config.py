@@ -49,6 +49,7 @@ GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 # FastEmbed (local ONNX-based embeddings, no API key, no torch dependency).
 # This model is ~33MB, downloaded once on first run.
 GROQ_EMBEDDING_MODEL = os.getenv("GROQ_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+FASTEMBED_CACHE_PATH = os.getenv("FASTEMBED_CACHE_PATH", ".fastembed_cache")
 
 if MODEL_PROVIDER == "groq" and not GROQ_API_KEY:
     if _IS_CI:
@@ -79,10 +80,11 @@ COLLECTION_NAME = "capstone_rag"
 
 TOP_K = int(os.getenv("TOP_K", "4"))
 
-# --- API Security ---------------------------------------------------------
+# --- API Security & Features ----------------------------------------------
 API_KEY = _get_secret("API_KEY", "")  # empty string = auth disabled
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
 RATE_LIMIT = os.getenv("RATE_LIMIT", "20/minute")
+ENABLE_UPLOADS = os.getenv("ENABLE_UPLOADS", "true").lower() == "true"
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
 

@@ -55,6 +55,12 @@ bad retrieval, not an error).
 
 Groq has no embeddings API, so `groq` mode uses local FastEmbed (ONNX,
 no API key, no torch) for embeddings while still using Groq for chat.
+FastEmbed's cache location is `FASTEMBED_CACHE_PATH` (config default:
+`.fastembed_cache`, overridden to `/app/.fastembed_cache` in the Docker
+image) — the Dockerfile pre-downloads the model into that path at build
+time so containers never hit Hugging Face's API at runtime (its default
+cache is `/tmp`, which doesn't persist across instances anyway, and Cloud
+Run's shared outbound IPs routinely hit HF's anonymous rate limit).
 
 **Request flow for `/ask` and `/ask-stream`** (`app/main.py` → `app/rag.py`):
 1. `app/memory.py` rewrites the question using conversation history if a
@@ -104,7 +110,16 @@ be called with the same question to compare behavior.
 - `main.py` — FastAPI app/routes; every `/ask*` request is logged as one
   structured JSON line to `logs/requests.log` (question, sources,
   groundedness, retries, latency) — this is the primary observability
-  signal, check it when debugging request behavior.
+  signal, check it when debugging request behavior. `/health` is a pure
+  liveness probe (`{"status": "ok"}`, no dependency checks) — `/ready`
+  is the one that checks the vector store and is what Cloud Run's
+  readiness probe hits. `/config` exposes non-secret runtime flags
+  (`enable_uploads`, `model_provider`) for `ui.html` to adapt to, e.g.
+  hiding the upload form when `ENABLE_UPLOADS=false` — set this in
+  public-demo deployments to stop random callers from mutating the
+  prod knowledge base via `/upload`. All handled exceptions log via
+  `logger.error(json_payload, exc_info=True)`, not `logger.exception()`
+  — keep that convention (`G201` is ignored in `pyproject.toml` for it).
 
 **Secrets**: `config._get_secret()` reads from env first, falling back to
 GCP Secret Manager when `GCP_PROJECT_ID` is set (used in Cloud Run

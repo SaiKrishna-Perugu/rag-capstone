@@ -27,6 +27,10 @@ Cloud Deployment context.txt
 chroma_db/
 !chroma_db/.gitkeep
 
+# FastEmbed model cache (baked into the Docker image at build time instead --
+# see Dockerfile; this is just the local dev equivalent)
+.fastembed_cache/
+
 # Logs & eval outputs
 logs/
 *.log
