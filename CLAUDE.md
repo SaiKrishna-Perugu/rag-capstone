@@ -34,7 +34,7 @@ uv run pytest tests/ -v
 uv run pytest tests/test_rag.py -v                    # single file
 uv run pytest tests/test_rag.py::test_generate_answer  # single test
 
-# Eval harnesses (require a populated chroma_db/ and live API access -- not mocked)
+# Eval harnesses (require a populated Postgres vector store -- DATABASE_URL -- and live API access -- not mocked)
 uv run python eval.py          # custom LLM-as-judge: correctness + groundedness
 uv run python eval_ragas.py    # RAGAS: faithfulness, relevancy, context precision/recall
 ```
@@ -50,8 +50,30 @@ embeddings client directly outside these two files. Switching
 `MODEL_PROVIDER` between `groq` and `vertexai` in `.env` is the only change
 needed to swap providers; **the vector store is provider-specific**, so a
 switch requires `uv run python -m app.ingest --force` (mixing embedding
-spaces from different providers in one Chroma collection silently produces
-bad retrieval, not an error).
+spaces from different providers in the same Postgres `chunks` table
+silently produces bad retrieval, not an error — unless the embedding
+*dimension* also changed, e.g. Groq's 384-dim FastEmbed vs. Vertex AI's
+768-dim `text-embedding-005`, in which case pgvector rejects the insert
+outright rather than silently corrupting retrieval; see `EMBEDDING_DIMENSION`
+below and the vector store paragraph).
+
+The vector store is PostgreSQL + pgvector (`app/database.py`,
+`app/db_schema.sql`), not a local/embedded store — this is deliberate:
+Cloud Run instances are stateless with independent local disks, so a local
+vector store would mean every instance sees a different, divergent copy of
+the index. Postgres's `tsvector`/`tsquery` full-text search also means
+hybrid retrieval (`app/retrieval.py` `hybrid_retrieve()` →
+`database.hybrid_search()`) runs as a single SQL query doing vector search
++ full-text search + RRF fusion, rather than a separately maintained BM25
+index. Schema creation (`database.init_db()`) is idempotent
+(`CREATE ... IF NOT EXISTS` throughout) and runs both from `main.py`'s
+FastAPI `lifespan` startup and from `ingest.py`'s `run()` — the latter
+matters because ingestion is commonly the first command run against a
+brand-new database, before the API has ever started. `EMBEDDING_DIMENSION`
+(config default `384`) sets the `VECTOR(N)` column width at *first*
+creation only — it does not widen an existing column, so changing it after
+the schema already exists requires dropping and letting `init_db()`
+recreate the `chunks`/`semantic_cache` tables, then re-ingesting.
 
 Groq has no embeddings API, so `groq` mode uses local FastEmbed (ONNX,
 no API key, no torch) for embeddings while still using Groq for chat.
@@ -89,10 +111,19 @@ be called with the same question to compare behavior.
   `PYTEST_CURRENT_TEST` to relax the `GROQ_API_KEY`-required check.
 - `providers.py` — `get_llm()` / `get_embeddings()` factory, the only place
   that branches on `MODEL_PROVIDER`.
-- `ingest.py` — load → chunk → embed → persist to Chroma; content-hash based
-  incremental re-ingestion tracked in `chroma_db/ingest_manifest.json`
-  (unchanged files skipped, changed files' old chunks replaced, one bad
-  file is recorded/skipped rather than failing the whole batch).
+- `database.py` — PostgreSQL + pgvector connection pool
+  (`psycopg2.pool.ThreadedConnectionPool`), idempotent schema init
+  (`init_db()`, executes `db_schema.sql`), and the query functions
+  `ingest.py`/`retrieval.py`/`cache.py` call: `upsert_chunks()`,
+  `delete_chunks_by_source()`, `hybrid_search()` (vector + full-text + RRF
+  in one query), `cache_get()`/`cache_set()`. All non-critical-path
+  functions (cache) follow the fail-open pattern used elsewhere in the app.
+- `ingest.py` — load → chunk → embed → persist to PostgreSQL + pgvector
+  (via `database.py`); content-hash based incremental re-ingestion tracked
+  in `chroma_db/ingest_manifest.json` (unchanged files skipped, changed
+  files' old chunks replaced, one bad file is recorded/skipped rather than
+  failing the whole batch). `CHROMA_DIR` is kept only for this manifest
+  path — deprecated for its original purpose (the vector data itself).
 - `retrieval.py` — hybrid retrieval + LLM reranking (see module docstring
   for why an LLM reranker was chosen over a cross-encoder here).
 - `rag.py` — single-pass retrieve/generate/groundedness-check, used by both
@@ -126,9 +157,14 @@ GCP Secret Manager when `GCP_PROJECT_ID` is set (used in Cloud Run
 deployment; local dev always uses `.env`).
 
 **Deployment**: Dockerfile + `cloudrun-groq.yaml` / `cloudrun-vertexai.yaml`
-for GCP Cloud Run. Ingestion does not run at build time — `chroma_db/` must
-already exist locally (`uv run python -m app.ingest`) before building the
-image; see Dockerfile comments.
+for GCP Cloud Run. Both configs mount `DATABASE_URL` from Secret Manager
+and connect to Cloud SQL via the Auth Proxy sidecar
+(`run.googleapis.com/cloudsql-instances` annotation). Ingestion does not
+run at build time or read from anything baked into the image — it writes
+straight to the external Postgres database, so `uv run python -m app.ingest`
+can run before or after a deploy, from anywhere with network access to
+that database (locally via the Cloud SQL Auth Proxy, or from Cloud Shell);
+see README "Deploying to GCP" for the full flow.
 
 ## Testing conventions
 

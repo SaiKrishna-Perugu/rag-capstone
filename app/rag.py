@@ -5,10 +5,13 @@ grounded answer, and run a lightweight groundedness (hallucination) check.
 Kept separate from main.py so it can be imported directly by eval.py
 without spinning up the FastAPI app.
 """
+import logging
 from dataclasses import dataclass, field
 
 from app.providers import get_llm
 from app.retrieval import retrieve_with_hybrid_and_rerank
+
+logger = logging.getLogger(__name__)
 
 _ANSWER_SYSTEM_PROMPT = """You are a precise assistant that answers questions \
 using ONLY the provided context. Follow these rules strictly:
@@ -71,15 +74,25 @@ def check_groundedness(answer: str, chunks: list) -> str:
     are supported by the retrieved context. Not a substitute for a proper
     NLI-based groundedness model, but a real, working first pass -- and it's
     the kind of check most candidates skip entirely.
+
+    This is a verification pass over an answer the caller already has, so a
+    transient LLM failure here degrades to an unverified answer ("NOT_CHECKED")
+    rather than failing a request that otherwise succeeded -- the same
+    fail-open posture as the cache and reranker fallbacks.
     """
     context = _format_context(chunks)
-    llm = get_llm(temperature=0.0)
 
-    messages = [
-        ("system", _GROUNDEDNESS_SYSTEM_PROMPT),
-        ("human", f"CONTEXT:\n{context}\n\nANSWER:\n{answer}"),
-    ]
-    response = llm.invoke(messages)
+    try:
+        llm = get_llm(temperature=0.0)
+        messages = [
+            ("system", _GROUNDEDNESS_SYSTEM_PROMPT),
+            ("human", f"CONTEXT:\n{context}\n\nANSWER:\n{answer}"),
+        ]
+        response = llm.invoke(messages)
+    except Exception:
+        logger.warning("Groundedness check failed; returning answer unverified.", exc_info=True)
+        return "NOT_CHECKED"
+
     verdict = response.content.strip().upper()
     return verdict if verdict in ("GROUNDED", "UNSUPPORTED") else "UNKNOWN"
 

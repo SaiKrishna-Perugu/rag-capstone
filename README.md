@@ -17,10 +17,10 @@ evaluators, and freshness pipelines.*
 |---|---|---|
 | Ingestion | `app/ingest.py` | Multi-format (pdf/txt/md/csv/html/docx), per-file error isolation |
 | Embeddings | `app/providers.py` | Groq (FastEmbed local ONNX) or Vertex AI, config-switchable |
-| Vector search | `app/retrieval.py` `hybrid_retrieve()` | Chroma `similarity_search` |
-| **Hybrid retrieval** | `app/retrieval.py` `hybrid_retrieve()` | BM25 + vector, fused via Reciprocal Rank Fusion |
+| Vector search | `app/retrieval.py` `hybrid_retrieve()` | pgvector cosine similarity (`<=>`), via `app/database.py` |
+| **Hybrid retrieval** | `app/retrieval.py` `hybrid_retrieve()` | Postgres full-text (`tsvector`) + pgvector, fused via Reciprocal Rank Fusion in a single SQL query |
 | Grounding | `app/rag.py` `generate_answer()`, `check_groundedness()` | Strict context-only prompting + LLM-as-judge hallucination check |
-| Vector database integration | `app/ingest.py`, `app/retrieval.py` | ChromaDB; pgvector is a documented, scoped-out next step |
+| Vector database integration | `app/database.py`, `app/db_schema.sql` | PostgreSQL + pgvector (Cloud SQL in production) -- external, shared store so multiple Cloud Run instances see the same index |
 | **Rerankers** | `app/retrieval.py` `rerank()` | LLM-based listwise reranking (see file header for why, vs. cross-encoder) |
 | **Retrieval evaluators** | `eval.py`, `eval_ragas.py` | Custom LLM-as-judge + standardized RAGAS metrics (faithfulness, relevancy, precision, recall) |
 | **Freshness pipelines** | `app/ingest.py` (hash + manifest) | Incremental re-ingestion: unchanged files skipped, changed files replaced, new files added |
@@ -37,7 +37,7 @@ graph TD
         A[docs/*.pdf, *.txt, etc.] --> B(ingest.py)
         B -->|Hash check| C{Changed?}
         C -->|Yes| D[Chunk & Embed]
-        D --> E[(Chroma Vector Store)]
+        D --> E[(PostgreSQL + pgvector)]
         C -->|No| F[Skip]
     end
 
@@ -45,7 +45,7 @@ graph TD
         G[POST /ask-stream] --> H[Conversation Memory]
         H --> I{Semantic Cache}
         I -->|Hit| J[Return Cached Answer]
-        I -->|Miss| K[Hybrid Retrieval BM25 + Vector]
+        I -->|Miss| K[Hybrid Retrieval: one SQL query, tsvector + pgvector]
         K --> L[RRF Fusion]
         L --> M[LLM Reranking]
         M --> N[Grounded Generation SSE Stream]
@@ -61,11 +61,14 @@ graph TD
 `app/retrieval.py` replaces plain vector search with a two-stage pipeline,
 used by both `/ask` and `/ask-agentic` (via `app/rag.py`'s `retrieve()`):
 
-1. **Hybrid candidate retrieval** — BM25 (lexical/keyword) and vector
-   (semantic) search run over a candidate pool 3x larger than the final
-   top-k, fused with Reciprocal Rank Fusion. Catches both exact-term
-   queries (product codes, IDs -- vector search alone is often weak here)
-   and paraphrase/synonym queries (BM25 alone is weak here).
+1. **Hybrid candidate retrieval** — Postgres full-text search (`tsvector`/
+   `plainto_tsquery`, the BM25-equivalent) and pgvector similarity search
+   run over a candidate pool 3x larger than the final top-k, fused with
+   Reciprocal Rank Fusion -- all in a single SQL query (`app/database.py`
+   `hybrid_search()`), no separate index to keep in sync. Catches both
+   exact-term queries (product codes, IDs -- vector search alone is often
+   weak here) and paraphrase/synonym queries (full-text search alone is
+   weak here).
 2. **LLM reranking** — the fused candidate pool is re-scored by an LLM in
    a single listwise call, narrowing down to the final top-k actually
    passed to generation. Falls back safely to the pre-rerank order if the
@@ -104,10 +107,14 @@ graph TD
   can call both with the same question and compare behavior directly.
 
 **Design decisions:**
-- **ChromaDB, not pgvector** — chosen for zero-setup local persistence to fit
-  a tight build window. The retrieval interface (`similarity_search`) is
-  the same shape as pgvector via LangChain, so swapping the vector store
-  later is a config/adapter change, not a rewrite.
+- **PostgreSQL + pgvector, not a local vector store (e.g. ChromaDB)** —
+  Cloud Run instances are stateless with independent local disks, so a
+  local vector store means every instance sees a different, divergent
+  copy of the index. An external, shared Postgres database (Cloud SQL in
+  production) fixes that, and its `tsvector`/`tsquery` full-text search
+  lets hybrid retrieval run as one SQL query (`app/database.py`
+  `hybrid_search()`) instead of maintaining a separate, hand-rolled BM25
+  index that has to be rebuilt to stay in sync with the vector store.
 - **LLM-as-judge for both groundedness and eval correctness** — a real,
   widely-used technique for evaluating LLM outputs where exact-match scoring
   doesn't work (answers are free text, not fixed strings).
@@ -127,23 +134,41 @@ graph TD
 ```bash
 uv sync --frozen
 cp .env.example .env
-# edit .env and set your API key
+# edit .env and set your API key and DATABASE_URL
 ```
+
+Needs a reachable PostgreSQL instance with the `pgvector` extension
+available (the schema runs `CREATE EXTENSION IF NOT EXISTS vector`, which
+requires the extension to be installed on the server, not just enabled).
+For local dev, the quickest option is the official `pgvector` Docker image:
+```bash
+docker run -d --name rag-postgres -e POSTGRES_PASSWORD=dev \
+  -e POSTGRES_DB=ragdb -p 5432:5432 pgvector/pgvector:pg16
+```
+matching the default `DATABASE_URL` in `.env.example`
+(`postgresql://postgres:dev@localhost:5432/ragdb`). Tables/indexes are
+created automatically and idempotently the first time you run ingestion
+or start the API (`app/database.py` `init_db()`) -- no manual schema step.
 
 ## Usage
 
-**1. Build the index**: Run ingestion locally to build `chroma_db/`:
+**1. Build the index**: Run ingestion locally to embed documents into Postgres:
    ```bash
    uv run python -m app.ingest
    ```
 Supports `.pdf`, `.txt`, `.md`, `.csv`, `.html`, and `.docx` -- drop any mix
-of these into `docs/` (including subfolders) and re-run.
+of these into `docs/` (including subfolders) and re-run. This is also the
+first thing that needs to run against a brand-new database -- it calls
+`database.init_db()` itself (idempotent), so you don't need to start the
+API first or run any schema SQL by hand.
 
 **This is incremental by default** (the "freshness pipeline"): each file's
-content is hashed and tracked in `chroma_db/ingest_manifest.json`.
-Re-running `uv run python -m app.ingest` after adding a new file only embeds the
-new file; unchanged files are skipped entirely (no re-embedding cost), and
-a changed file has its old chunks deleted and replaced. One bad file
+content is hashed and tracked in `chroma_db/ingest_manifest.json` (the
+manifest is still a local file -- only the embeddings themselves moved to
+Postgres). Re-running `uv run python -m app.ingest` after adding a new file
+only embeds the new file; unchanged files are skipped entirely (no
+re-embedding cost), and a changed file has its old chunks deleted and
+replaced (`ON CONFLICT (source, content_hash)` in Postgres). One bad file
 (corrupt PDF, malformed doc) is recorded and skipped, not a fatal crash for
 the whole batch -- check the printed summary for `Failed:` count and details.
 
@@ -201,11 +226,26 @@ gcloud auth application-default login
 ```
 
 **Important:** the vector store's embeddings are tied to whichever provider
-created them. If you switch `MODEL_PROVIDER` after already running
-`uv run python -m app.ingest` with the other provider, re-run with `--force`
-(`uv run python -m app.ingest --force`) to re-embed everything under the new
-provider -- mixing embedding spaces from two different providers in the
-same collection silently produces bad retrieval, not an error.
+created them, and now also to a fixed vector width -- FastEmbed/Groq
+produces 384-dim embeddings, Vertex AI's `text-embedding-005` produces 768.
+`EMBEDDING_DIMENSION` in `.env` controls the `VECTOR(N)` column width that
+`db_schema.sql` is created with, but only on **first** creation (`CREATE
+TABLE IF NOT EXISTS` won't widen an existing column). So:
+- **Switching providers on a brand-new database:** set `MODEL_PROVIDER` and
+  the matching `EMBEDDING_DIMENSION` (384 or 768) in `.env` *before* the
+  first `uv run python -m app.ingest`, and the schema will be created at
+  the right width automatically.
+- **Switching providers on a database that's already been ingested into:**
+  re-run with `--force` (`uv run python -m app.ingest --force`) is *not*
+  enough by itself if the dimension also changed -- a dimension mismatch
+  fails loudly at insert time (pgvector rejects it) rather than silently
+  producing bad retrieval. Drop and let `init_db()` recreate the
+  `chunks`/`semantic_cache` tables at the new `EMBEDDING_DIMENSION`, then
+  re-ingest with `--force`. If the dimension is unchanged (e.g. testing
+  against a Vertex AI embedding model that also happens to be 384-dim),
+  `--force` alone is sufficient, same as before -- mixing embedding spaces
+  from two different providers in the same table silently produces bad
+  retrieval, not an error.
 
 ## Deploying to GCP (Cloud Run + Vertex AI)
 
@@ -225,16 +265,19 @@ gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
 gcloud services enable run.googleapis.com \
     cloudbuild.googleapis.com secretmanager.googleapis.com \
-    artifactregistry.googleapis.com
+    artifactregistry.googleapis.com sqladmin.googleapis.com
 
-# 2. Ingest documents LOCALLY first -- chroma_db/ must exist in the build
-#    context before building the image (see Dockerfile comments for why
-#    ingestion doesn't run at build time). chroma_db/ is gitignored (it's
-#    generated data) but the repo's .gcloudignore explicitly re-includes it
-#    for Cloud Build uploads specifically -- without that, the image would
-#    silently ship with an empty vector store and /ready would fail with
-#    "Not ready: '/app/chroma_db'" forever.
-uv run python -m app.ingest
+# 2. Provision Cloud SQL for PostgreSQL + pgvector -- the external, shared
+#    vector store all Cloud Run instances read/write (db-f1-micro is the
+#    smallest tier, right-sized for portfolio-project traffic)
+gcloud sql instances create rag-capstone-db \
+    --database-version=POSTGRES_16 \
+    --tier=db-f1-micro \
+    --region=us-central1
+gcloud sql databases create ragdb --instance=rag-capstone-db
+# Connect (e.g. via `gcloud sql connect rag-capstone-db --user=postgres`)
+# and enable the extension once:
+#   CREATE EXTENSION IF NOT EXISTS vector;
 
 # 3. Create Artifact Registry repository
 gcloud artifacts repositories create rag-repo \
@@ -243,27 +286,47 @@ gcloud artifacts repositories create rag-repo \
 
 # 4. Build and push the container image via Cloud Build (a few minutes --
 #    this also pre-downloads the FastEmbed embedding model into the image,
-#    see Dockerfile comments)
+#    see Dockerfile comments). Ingestion does NOT need to happen before
+#    this step anymore -- documents are embedded straight into Cloud SQL,
+#    not baked into the image.
 gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
 
 # 5. Create the service account cloudrun-groq.yaml runs as
 gcloud iam service-accounts create rag-capstone-sa \
     --display-name="RAG Capstone Cloud Run service account"
 
-# 6. Store API keys securely in Secret Manager, and grant THAT service
-#    account (not the default compute SA -- it's a different identity)
-#    access to read them
+# 6. Store secrets in Secret Manager, and grant THAT service account (not
+#    the default compute SA -- it's a different identity) access to read
+#    them. database_url points at the Cloud SQL instance via its Unix
+#    socket path, which the Cloud SQL Auth Proxy sidecar (configured via
+#    the run.googleapis.com/cloudsql-instances annotation already in
+#    cloudrun-groq.yaml) makes available at runtime.
 echo -n "your-api-key" | gcloud secrets create rag_api_key --data-file=-
 echo -n "your-groq-key" | gcloud secrets create groq_api_key --data-file=-
-gcloud secrets add-iam-policy-binding rag_api_key --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
-gcloud secrets add-iam-policy-binding groq_api_key --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+echo -n "postgresql://postgres:YOUR_DB_PASSWORD@/ragdb?host=/cloudsql/YOUR_PROJECT_ID:us-central1:rag-capstone-db" \
+    | gcloud secrets create database_url --data-file=-
+for secret in rag_api_key groq_api_key database_url; do
+  gcloud secrets add-iam-policy-binding "$secret" \
+    --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+done
+# Also let the service account connect to Cloud SQL itself
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+    --role="roles/cloudsql.client"
 
-# 7. Deploy using the declarative yaml
-# Open cloudrun-groq.yaml (if using Groq) or cloudrun-vertexai.yaml (if using Vertex AI)
-# Replace YOUR_PROJECT_ID with your actual project ID
+# 7. Deploy using the declarative yaml (edit cloudrun-groq.yaml first --
+#    replace YOUR_PROJECT_ID, including in the cloudsql-instances annotation)
 gcloud run services replace cloudrun-groq.yaml --region=us-central1
 
-# 8. Cloud Run services aren't publicly reachable by default -- allow it
+# 8. Ingest documents into Cloud SQL. Easiest from Cloud Shell (already
+#    authenticated) or locally via the Cloud SQL Auth Proxy -- either way,
+#    point DATABASE_URL at the instance and run the same ingest command;
+#    it creates the schema on first run (see "Build the index" above) and
+#    is what /ready checks a chunk count against.
+uv run python -m app.ingest
+
+# 9. Cloud Run services aren't publicly reachable by default -- allow it
 gcloud run services add-iam-policy-binding rag-capstone \
     --region=us-central1 \
     --member="allUsers" \
@@ -282,7 +345,9 @@ and send it back as `X-API-Key: <value>` on every `/ask`, `/ask-agentic`,
 ### Redeploying after code or doc changes
 
 ```bash
-uv run python -m app.ingest        # only if docs/ changed
+# only if docs/ changed -- DATABASE_URL must point at the Cloud SQL
+# instance (directly, or via the Cloud SQL Auth Proxy) for this to reach it
+uv run python -m app.ingest
 gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
 gcloud run deploy rag-capstone --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest --region=us-central1
 ```
@@ -317,9 +382,11 @@ default.
 ```text
 app/
   agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
-  cache.py      # semantic caching for repeated questions
+  cache.py      # semantic caching for repeated questions (Postgres-backed)
   config.py     # centralized env/config loading
-  ingest.py     # load -> chunk -> embed -> persist to Chroma
+  database.py   # PostgreSQL + pgvector connection pool, schema init, hybrid search
+  db_schema.sql # chunks / semantic_cache table + index definitions
+  ingest.py     # load -> chunk -> embed -> persist to PostgreSQL + pgvector
   main.py       # FastAPI endpoints (/, /upload, /ask, /ask-agentic) + UI serving + logging
   memory.py     # conversation history and contextual query rewriting
   metrics.py    # observability and prometheus-style metrics
@@ -346,6 +413,12 @@ real and working, not stubbed — but scoped down from a production system:
 
 **Implemented:**
 - End-to-end RAG: chunking, embeddings, vector storage, retrieval, grounded generation
+- **External vector store (PostgreSQL + pgvector, Cloud SQL in production)**
+  -- fixes the stateless-Cloud-Run-instance problem a local vector store
+  has (every instance would otherwise see a different, divergent local
+  copy), and its `tsvector`/`tsquery` full-text search lets hybrid
+  retrieval run as one SQL query instead of a separately maintained BM25
+  index -- see `app/database.py` and "Design decisions" above
 - **Self-correcting agentic loop** (`/ask-agentic`): grade retrieved context,
   rewrite and retry on insufficient context (capped retries), graceful
   fallback -- see `app/agent.py`
@@ -367,7 +440,10 @@ real and working, not stubbed — but scoped down from a production system:
   see "Deploying to GCP" above
 
 **Explicitly deferred (next steps, in priority order):**
-1. **pgvector** — swap ChromaDB for Postgres + pgvector for a
-   production-grade, horizontally scalable vector store (relevant once this
-   needs to scale past a single-instance Cloud Run deployment).
-2. **Asynchronous Ingestion Worker** — currently, the `/upload` endpoint runs ingestion synchronously in a thread. While this works well for demos and small files, for production at scale, document processing should be decoupled into a separate worker queue (e.g. Cloud Run Jobs + Pub/Sub) to prevent HTTP timeouts on massive files.
+1. **Asynchronous Ingestion Worker** — currently, the `/upload` endpoint runs ingestion synchronously in a thread. While this works well for demos and small files, for production at scale, document processing should be decoupled into a separate worker queue (e.g. Cloud Run Jobs + Pub/Sub) to prevent HTTP timeouts on massive files.
+2. **External session state (memory + metrics)** — conversation history
+   (`app/memory.py`) and the in-process counters in `app/metrics.py` are
+   still per-instance dicts; the same statelessness problem the vector
+   store had, just not yet fixed for these two. See
+   `docs/PRODUCTION_READINESS_PLAN.md` Phase 2 for the planned approach
+   (Firestore).

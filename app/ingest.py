@@ -1,6 +1,6 @@
 """
 Ingestion pipeline: load documents from DOCS_DIR -> split into chunks ->
-embed -> persist into a local Chroma vector store.
+embed -> persist into PostgreSQL + pgvector.
 
 Run standalone to (re)build the index:
     python -m app.ingest
@@ -26,7 +26,6 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from langchain_chroma import Chroma
 from langchain_community.document_loaders import (
     BSHTMLLoader,
     CSVLoader,
@@ -36,7 +35,7 @@ from langchain_community.document_loaders import (
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app import config
+from app import config, database
 from app.providers import get_embeddings
 
 # Extension -> loader class. Add new formats here -- everything else
@@ -105,12 +104,10 @@ def chunk_documents(documents: list) -> list:
     return splitter.split_documents(documents)
 
 
-def _get_vector_store() -> Chroma:
-    return Chroma(
-        collection_name=config.COLLECTION_NAME,
-        embedding_function=get_embeddings(),
-        persist_directory=config.CHROMA_DIR,
-    )
+def _content_hash(text: str) -> str:
+    """SHA-256 of chunk content — used as part of the upsert key to
+    detect whether a chunk has changed."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def run(force: bool = False) -> dict:
@@ -131,8 +128,14 @@ def run(force: bool = False) -> dict:
             f"Supported extensions: {supported}"
         )
 
+    # Ensure the schema exists -- this is commonly the first command run
+    # against a fresh database (before the API has ever started, so its
+    # lifespan-hook init_db() call hasn't run yet). Idempotent, so this
+    # is a fast no-op on an already-initialised database.
+    database.init_db()
+
     manifest = _load_manifest()
-    vector_store = _get_vector_store()
+    embeddings = get_embeddings()
 
     summary = {"added": [], "updated": [], "skipped_unchanged": [], "failed": []}
 
@@ -165,9 +168,24 @@ def run(force: bool = False) -> dict:
             # Remove this file's old chunks before adding the new ones,
             # so re-ingesting a changed file doesn't leave stale
             # duplicates alongside the fresh content.
-            vector_store.delete(where={"source": path})
+            database.delete_chunks_by_source(path)
 
-        vector_store.add_documents(chunks)
+        # Extract text content and metadata, then embed in batch
+        contents = [chunk.page_content for chunk in chunks]
+        metadatas = [chunk.metadata for chunk in chunks]
+        content_hashes = [_content_hash(c) for c in contents]
+
+        # Batch embed all chunks for this file
+        chunk_embeddings = embeddings.embed_documents(contents)
+
+        # Upsert into PostgreSQL
+        database.upsert_chunks(
+            source=path,
+            contents=contents,
+            embeddings=chunk_embeddings,
+            content_hashes=content_hashes,
+            metadatas=metadatas,
+        )
 
         manifest[path] = {
             "hash": current_hash,

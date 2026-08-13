@@ -22,7 +22,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app import cache, config, ingest, memory, metrics, streaming
+from app import cache, config, database, ingest, memory, metrics, streaming
 from app.agent import run_agentic_rag
 from app.middleware import APIKeyMiddleware
 from app.rag import answer_question
@@ -44,7 +44,10 @@ logger.addHandler(logging.StreamHandler())  # also print to console
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Cleanup routine to run on startup."""
+    """Startup: init DB schema, clean uploaded files. Shutdown: close DB pool."""
+    # Initialise database schema (idempotent — safe on every cold start)
+    database.init_db()
+
     docs_dir = Path(config.DOCS_DIR)
     if docs_dir.exists():
         for file_path in docs_dir.iterdir():
@@ -55,6 +58,8 @@ async def lifespan(app: FastAPI):
                 except Exception as exc:
                     logger.warning(f"Failed to delete {file_path.name}: {exc}")
     yield
+    # Shutdown: close the database connection pool cleanly
+    database.close_pool()
 
 
 app = FastAPI(
@@ -121,9 +126,7 @@ def ready() -> dict:
     """Readiness probe -- returns 200 only when the service can serve
     requests (vector store has documents loaded)."""
     try:
-        from app.retrieval import _get_vector_store
-        vs = _get_vector_store()
-        count = vs._collection.count()
+        count = database.get_chunk_count()
         if count == 0:
             raise HTTPException(status_code=503, detail="Vector store is empty -- no documents ingested.")
         return {"status": "ready", "chunks_indexed": count}

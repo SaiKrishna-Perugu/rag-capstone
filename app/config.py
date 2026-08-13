@@ -74,9 +74,15 @@ if MODEL_PROVIDER == "vertexai" and not GCP_PROJECT_ID:
         "MODEL_PROVIDER=vertexai requires GCP_PROJECT_ID to be set in .env."
     )
 
-CHROMA_DIR = os.getenv("CHROMA_DIR", "chroma_db")
+CHROMA_DIR = os.getenv("CHROMA_DIR", "chroma_db")  # deprecated — kept for backward compat
 DOCS_DIR = os.getenv("DOCS_DIR", "docs")
-COLLECTION_NAME = "capstone_rag"
+COLLECTION_NAME = "capstone_rag"  # deprecated — kept for backward compat
+
+# --- Database (Cloud SQL + pgvector) ----------------------------------------
+DATABASE_URL = _get_secret("DATABASE_URL", "")
+DATABASE_POOL_MIN = int(os.getenv("DATABASE_POOL_MIN", "2"))
+DATABASE_POOL_MAX = int(os.getenv("DATABASE_POOL_MAX", "10"))
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "384"))
 
 TOP_K = int(os.getenv("TOP_K", "4"))
 

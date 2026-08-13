@@ -5,19 +5,22 @@ WORKDIR /app
 # Install uv directly from the official image (avoids pip entirely)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+# Install OS-level dependencies for psycopg2 (libpq) -- psycopg2-binary
+# bundles its own libpq, but having the system one avoids edge cases in
+# some slim images.
+RUN apt-get update && apt-get install -y --no-install-recommends libpq5 && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock ./
 # Install project dependencies
 RUN uv sync --frozen
 
 COPY . .
 
-# NOTE: this expects chroma_db/ to already exist in the build context --
-# i.e. you've run `uv run python -m app.ingest` locally BEFORE building this
-# image. We deliberately do NOT run ingest.py during the image build:
-# that would require baking an API key into the build (visible in Cloud
-# Build logs/layers), which is worth avoiding on principle even for a
-# portfolio project. See README "Deploying to GCP (Cloud Run + Vertex AI)"
-# for the full ingest-then-build-then-deploy flow.
+# NOTE: documents are now ingested into PostgreSQL (Cloud SQL + pgvector),
+# not a local chroma_db/ directory. Run `uv run python -m app.ingest`
+# after deploying with DATABASE_URL configured, or as part of a CI/CD
+# step that has access to the database.
 
 # Pre-download the FastEmbed embedding model (used for MODEL_PROVIDER=groq
 # -- Groq has no embeddings API) into the image at build time. Without

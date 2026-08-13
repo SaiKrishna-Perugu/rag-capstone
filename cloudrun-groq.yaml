@@ -13,6 +13,8 @@ spec:
         autoscaling.knative.dev/maxScale: "10"
         # Increase concurrency per instance for async FastAPI
         autoscaling.knative.dev/targetBurstCapacity: "100"
+        # Cloud SQL Auth Proxy sidecar (auto-manages secure connections)
+        run.googleapis.com/cloudsql-instances: YOUR_PROJECT_ID:us-central1:rag-capstone-db
     spec:
       containerConcurrency: 80
       timeoutSeconds: 300
@@ -38,11 +40,14 @@ spec:
             secretKeyRef:
               name: groq_api_key
               key: "latest"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database_url
+              key: "latest"
         # Standard configs
         - name: MODEL_PROVIDER
           value: "groq"
-        - name: CHROMA_DIR
-          value: "/app/chroma_db"
         
         # Readiness/Liveness Probes for zero-downtime rollouts
         livenessProbe:
