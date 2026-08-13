@@ -50,10 +50,7 @@ def get_embeddings():
         # lightweight local ONNX-based embeddings. No API key, no torch.
         # The model (~33MB) is downloaded once on first run to a local cache.
         from langchain_community.embeddings import FastEmbedEmbeddings
-        return FastEmbedEmbeddings(
-            model_name=config.GROQ_EMBEDDING_MODEL,
-            cache_dir=config.FASTEMBED_CACHE_PATH,
-        )
+        return FastEmbedEmbeddings(model_name=config.GROQ_EMBEDDING_MODEL)
 
     if config.MODEL_PROVIDER == "vertexai":
         from langchain_google_vertexai import VertexAIEmbeddings
