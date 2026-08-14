@@ -68,6 +68,7 @@ from ragas.metrics import (
     LLMContextRecall,
     ResponseRelevancy,
 )
+from ragas.run_config import RunConfig
 
 from app.providers import get_embeddings, get_llm
 from app.rag import generate_answer, retrieve
@@ -146,11 +147,28 @@ def run_ragas_eval() -> dict:
         LLMContextRecall(llm=llm),
     ]
 
-    result = evaluate(dataset=dataset, metrics=metrics, show_progress=False)
+    # Groq's free tier doesn't tolerate RAGAS's default 16-way concurrency
+    # well -- confirmed via a live run that produced widespread timeouts.
+    # A lower worker count trades wall-clock time for reliability; RAGAS's
+    # own default raise_exceptions=False already degrades any remaining
+    # per-job failures to NaN rather than crashing the whole run.
+    result = evaluate(
+        dataset=dataset,
+        metrics=metrics,
+        show_progress=False,
+        run_config=RunConfig(max_workers=3, timeout=90),
+    )
     return result
 
 
 if __name__ == "__main__":
+    # RAGAS/pandas output can include non-ASCII characters (e.g. "->").
+    # Windows' default console encoding (cp1252) can't print those and
+    # raises UnicodeEncodeError -- confirmed via a live run that otherwise
+    # completed successfully and crashed only at this print step. Linux
+    # CI runners default to UTF-8 already, so this is a no-op there.
+    sys.stdout.reconfigure(encoding="utf-8")
+
     if any(case["question"].startswith("REPLACE ME") for case in EVAL_SET):
         print(
             "eval_ragas.py: EVAL_SET still contains placeholder questions.\n"

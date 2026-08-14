@@ -630,6 +630,23 @@
             resultsContainer.style.display = 'flex';
         }
 
+        async function pollJobStatus(jobId, intervalMs = 2000, timeoutMs = 120000) {
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs) {
+                const response = await fetch(`/jobs/${jobId}`);
+                if (!response.ok) {
+                    const errText = await response.text();
+                    throw new Error(errText || `Server returned ${response.status}`);
+                }
+                const job = await response.json();
+                if (job.status === 'done' || job.status === 'failed') {
+                    return job;
+                }
+                await new Promise(resolve => setTimeout(resolve, intervalMs));
+            }
+            throw new Error('Timed out waiting for ingestion to finish.');
+        }
+
         async function handleFileUpload(event) {
             const files = event.target.files;
             if (!files || files.length === 0) return;
@@ -649,6 +666,8 @@
             }
 
             try {
+                // /upload returns almost immediately with a job_id -- the
+                // actual ingestion happens afterward (see app/jobs.py).
                 const response = await fetch('/upload', {
                     method: 'POST',
                     body: formData
@@ -659,8 +678,18 @@
                     throw new Error(errText || `Server returned ${response.status}`);
                 }
 
-                const data = await response.json();
-                uploadStatus.innerText = data.message;
+                const { job_id } = await response.json();
+                uploadLabel.innerText = "Processing document(s)...";
+
+                const job = await pollJobStatus(job_id);
+                if (job.status === 'failed') {
+                    throw new Error(job.error || 'Ingestion failed');
+                }
+
+                const summary = job.ingest_summary || {};
+                const added = (summary.added || []).length;
+                const updated = (summary.updated || []).length;
+                uploadStatus.innerText = `Processed ${files.length} document(s): ${added} added, ${updated} updated.`;
                 uploadStatus.style.display = 'block';
             } catch (err) {
                 uploadError.innerText = "Upload failed: " + err.message;

@@ -14,16 +14,24 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app import cache, config, database, ingest, memory, metrics, streaming
+from app import cache, config, database, jobs, memory, metrics, streaming
 from app.agent import run_agentic_rag
 from app.middleware import APIKeyMiddleware
 from app.rag import answer_question
@@ -123,6 +131,10 @@ class AgenticAskResponse(BaseModel):
     latency_ms: int
 
 
+class InternalJobRequest(BaseModel):
+    job_id: str
+
+
 @app.get("/health")
 def health() -> dict:
     """Liveness probe -- checks that the FastAPI process is running and responsive."""
@@ -169,8 +181,12 @@ def get_metrics() -> Response:
 
 @app.post("/upload")
 @limiter.limit(config.RATE_LIMIT)
-async def upload_files(request: Request, files: list[UploadFile] = File(...)):
-    """Accepts multiple files, saves them to docs/uploads/, and triggers ingestion."""
+async def upload_files(
+    request: Request, background_tasks: BackgroundTasks, files: list[UploadFile] = File(...)
+):
+    """Accepts multiple files, saves them to docs/uploads/, and hands off
+    ingestion as an async job -- returns 202 + job_id immediately rather
+    than blocking on ingest.run() (see app/jobs.py)."""
     request_id = str(uuid.uuid4())
     if not config.ENABLE_UPLOADS:
         raise HTTPException(
@@ -228,16 +244,10 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         file_path.write_bytes(content)
         saved_files.append(safe_name)
 
-    logger.info(f"Saved uploaded files: {saved_files}. Triggering ingestion...")
+    logger.info(f"Saved uploaded files: {saved_files}. Creating ingestion job...")
 
-    # Run the ingestion pipeline in a thread to avoid blocking the event loop
     try:
-        summary = await asyncio.to_thread(ingest.run, force=False)
-        return {
-            "message": f"Successfully processed {len(saved_files)} files: {', '.join(saved_files)}",
-            "ingest_summary": summary,
-            "request_id": request_id,
-        }
+        job_id = await asyncio.to_thread(jobs.create_job, saved_files)
     except Exception as exc:
         metrics.record_error("upload")
         logger.error(
@@ -245,9 +255,56 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
             exc_info=True,
         )
         raise HTTPException(
-            status_code=500,
-            detail={"error": f"File saved but ingestion failed: {exc!s}", "request_id": request_id},
+            status_code=503,
+            detail={"error": f"Files saved but job tracking is unavailable: {exc!s}", "request_id": request_id},
         )
+
+    if config.GCP_PROJECT_ID:
+        # Real deployment: hand off to Cloud Tasks, which calls back into
+        # /internal/process-ingest-job (with retries) -- survives this
+        # request/instance going away.
+        await asyncio.to_thread(jobs.enqueue_cloud_task, job_id)
+    else:
+        # Local/no-GCP dev (no official Cloud Tasks emulator exists):
+        # process the job after this response is sent, via FastAPI's
+        # BackgroundTasks, instead of enqueueing a real task. Same job
+        # record, same GET /jobs/{id} contract either way.
+        background_tasks.add_task(jobs.process_job, job_id)
+
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "status": "pending", "request_id": request_id},
+    )
+
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(job_id: str) -> dict:
+    """Polled by ui.html (and anyone else holding a job_id from /upload)."""
+    try:
+        job = await asyncio.to_thread(jobs.get_job, job_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"error": f"Job tracking is unavailable: {exc!s}"})
+    if job is None:
+        raise HTTPException(status_code=404, detail={"error": f"Job {job_id} not found."})
+    return job
+
+
+@app.post("/internal/process-ingest-job")
+async def process_ingest_job(body: InternalJobRequest) -> dict:
+    """Cloud Tasks' HTTP target for real deployments (see
+    app/jobs.py::enqueue_cloud_task) -- not used by the local/no-GCP dev
+    path, which runs process_job() directly via BackgroundTasks instead
+    of going through HTTP. Behind APIKeyMiddleware like every other
+    non-public route; enqueue_cloud_task() sends the same X-API-Key
+    header Cloud Tasks needs to get past it."""
+    try:
+        await asyncio.to_thread(jobs.process_job, body.job_id)
+    except Exception as exc:
+        # 500, not a caught-and-200 -- lets Cloud Tasks retry per the
+        # queue's bounded --max-attempts policy. A later successful retry
+        # just overwrites the job back to "done" (see app/jobs.py).
+        raise HTTPException(status_code=500, detail={"error": str(exc)})
+    return {"status": "done"}
 
 
 @app.post("/ask", response_model=AskResponse)

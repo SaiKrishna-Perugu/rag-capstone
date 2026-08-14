@@ -1,0 +1,64 @@
+name: Eval Gate
+
+# Separate from ci.yml deliberately: this job makes real Groq API calls
+# and needs a real secret, unlike ci.yml's fully-mocked test job -- a
+# different risk/cost profile that shouldn't block on or share history
+# with pure lint/unit-test runs.
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    services:
+      # Ephemeral Postgres scoped to this job only -- not pointed at any
+      # real Cloud SQL instance. app.ingest's database.init_db() creates
+      # the schema on this fresh DB itself, no manual SQL step needed.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: ragdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:dev@localhost:5432/ragdb
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Ingests this repo's own docs/ into the ephemeral Postgres above --
+      # eval_ragas.py's EVAL_SET is written against exactly those files.
+      # Note: docs/ also contains tracked non-eval-relevant files
+      # (PRODUCTION_READINESS_PLAN.md, postgres_migration_changelog.md)
+      # that get ingested too -- pre-existing app.ingest behavior, not
+      # something this workflow special-cases. If retrieval quality shifts
+      # unexpectedly after adding a new docs/ file, this is why.
+      - name: Build the eval corpus
+        run: uv run python -m app.ingest
+
+      - name: Run RAGAS eval
+        run: uv run python eval_ragas.py
+
+      - name: Check eval thresholds
+        run: uv run python scripts/check_thresholds.py ragas_results.json

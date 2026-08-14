@@ -819,6 +819,23 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-tasks"
+version = "2.24.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpc-google-iam-v1" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/b2/7cfe6f0108baaaf535a8e3ccb5876f79430c2eb85f6f433e43c763dbe326/google_cloud_tasks-2.24.0.tar.gz", hash = "sha256:aa4f8764e5b157cbab81af619cc4fd9f14ebece8b69e5394a657c328a8366228", size = 370764, upload-time = "2026-08-06T06:24:45.842Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/8e/dc52d38465cc227fd8f5358984b67cc55080ed24781b99f6f7ff9d2b5e1e/google_cloud_tasks-2.24.0-py3-none-any.whl", hash = "sha256:1c82007a252d47efb4006eae5a5a0d9f6d375f917ab1c5cd80ce4a6f0ea4690d", size = 310091, upload-time = "2026-08-06T06:23:39.897Z" },
+]
+
+[[package]]
 name = "google-cloud-vectorsearch"
 version = "0.11.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2693,6 +2710,7 @@ dependencies = [
     { name = "fastembed" },
     { name = "google-cloud-firestore" },
     { name = "google-cloud-secret-manager" },
+    { name = "google-cloud-tasks" },
     { name = "langchain" },
     { name = "langchain-community" },
     { name = "langchain-google-vertexai" },
@@ -2734,6 +2752,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "google-cloud-firestore", specifier = ">=2.28.0" },
     { name = "google-cloud-secret-manager", specifier = ">=2.30.0" },
+    { name = "google-cloud-tasks", specifier = ">=2.24.0" },
     { name = "langchain", specifier = "==1.3.14" },
     { name = "langchain-community", specifier = "==0.4.2" },
     { name = "langchain-google-vertexai", specifier = "==3.2.4" },

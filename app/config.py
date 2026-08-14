@@ -89,6 +89,16 @@ EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "384"))
 FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "conversation_sessions")
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
 
+# --- Async ingestion (Cloud Tasks + Firestore job tracking) -----------------
+# Unlike memory/metrics, Firestore is REQUIRED here (not fail-open) -- job
+# tracking is the /upload contract itself, not a latency optimization. The
+# Firestore emulator (see README) covers local dev; the queue below is only
+# used when GCP_PROJECT_ID is set -- otherwise app/jobs.py processes the job
+# in-process immediately instead of enqueueing a real Cloud Task.
+CLOUD_TASKS_QUEUE = os.getenv("CLOUD_TASKS_QUEUE", "ingest-queue")
+INGEST_TARGET_URL = os.getenv("INGEST_TARGET_URL", "")
+JOB_TTL_HOURS = int(os.getenv("JOB_TTL_HOURS", "48"))
+
 # --- Metrics (OpenTelemetry) -------------------------------------------------
 # Prometheus export (GET /metrics) is always on and needs no GCP config.
 # Cloud Monitoring push is opt-in -- requires GCP_PROJECT_ID too.

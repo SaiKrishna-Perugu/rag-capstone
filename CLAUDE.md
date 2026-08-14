@@ -40,7 +40,20 @@ uv run python eval_ragas.py    # RAGAS: faithfulness, relevancy, context precisi
 ```
 
 CI (`.github/workflows/ci.yml`) runs `ruff check .` and `pytest tests/ -v` on
-every push/PR to `main`, via `uv sync --frozen`.
+every push/PR to `main`, via `uv sync --frozen`. A separate
+`.github/workflows/eval.yml` runs `eval_ragas.py` against an ephemeral,
+job-scoped `pgvector/pgvector:pg16` service container (not any real Cloud
+SQL instance) and `scripts/check_thresholds.py` on the same triggers —
+kept separate from `ci.yml` since it makes real Groq API calls and needs
+`secrets.GROQ_API_KEY`, a different risk/cost profile than the fully-mocked
+`test` job. `.github/workflows/cd.yml` (push to `main` only) automates
+what "Deploying to GCP" in README used to be a fully-manual walkthrough
+for: build → deploy to a staging Cloud Run service
+(`cloudrun-groq-staging.yaml`) → smoke test → canary-promote to
+production. It authenticates via Workload Identity Federation
+(`google-github-actions/auth`, no long-lived key) and is genuinely inert
+until the one-time GCP/GitHub setup in README's "Automated deploys" is
+completed by hand — that setup can't be done from this codebase alone.
 
 ## Architecture
 
@@ -128,6 +141,21 @@ be called with the same question to compare behavior.
   docstring). Manifest entries are written per-file, immediately after
   that file's chunks are upserted, so an interrupted run doesn't lose
   progress.
+- `jobs.py` — async ingestion job tracking, backing `/upload`'s
+  `202 {job_id}` + `GET /jobs/{job_id}` polling contract (see `main.py`
+  below). Job records live in Firestore's `ingest_jobs` collection, same
+  TTL pattern as `memory.py`. Unlike `memory.py`/`cache.py`, Firestore is
+  **not** fail-open here — job tracking is `/upload`'s actual contract,
+  not a latency optimization, so a missing/unreachable Firestore is a
+  real `RuntimeError` that `main.py` turns into a 503, not a silent
+  fallback. `process_job()` (set `processing` → run `ingest.run()` → set
+  `done`/`failed`) is the single place that defines what processing a job
+  means, called from two places depending on `GCP_PROJECT_ID`:
+  `enqueue_cloud_task()` hands it to a real Cloud Task hitting
+  `POST /internal/process-ingest-job` in production, while local dev (no
+  official Cloud Tasks emulator exists) calls it directly via FastAPI's
+  `BackgroundTasks` from the `/upload` handler itself — same job record,
+  same polling contract either way, just without a real queue locally.
 - `retrieval.py` — hybrid retrieval + LLM reranking (see module docstring
   for why an LLM reranker was chosen over a cross-encoder here).
 - `rag.py` — single-pass retrieve/generate/groundedness-check, used by both
@@ -169,20 +197,36 @@ be called with the same question to compare behavior.
   prod knowledge base via `/upload`. All handled exceptions log via
   `logger.error(json_payload, exc_info=True)`, not `logger.exception()`
   — keep that convention (`G201` is ignored in `pyproject.toml` for it).
+  `/upload` itself doesn't run ingestion inline — it saves files, creates
+  a job via `jobs.create_job()`, and returns `202 {job_id}` immediately;
+  `GET /jobs/{job_id}` and `POST /internal/process-ingest-job` (the
+  latter is Cloud Tasks' HTTP target, gated by the same `APIKeyMiddleware`
+  as everything else) complete the async contract — see `jobs.py` above.
 
 **Secrets**: `config._get_secret()` reads from env first, falling back to
 GCP Secret Manager when `GCP_PROJECT_ID` is set (used in Cloud Run
 deployment; local dev always uses `.env`).
 
 **Deployment**: Dockerfile + `cloudrun-groq.yaml` / `cloudrun-vertexai.yaml`
-for GCP Cloud Run. Both configs mount `DATABASE_URL` from Secret Manager
+for GCP Cloud Run, plus `cloudrun-groq-staging.yaml` (`cd.yml`'s staging
+target — same shape as `cloudrun-groq.yaml`, `metadata.name:
+rag-capstone-staging`, points at a separate `ragdb_staging` database on
+the same Cloud SQL instance and its own `ingest-queue-staging`, but shares
+Firestore with production — a documented simplification, not an oversight).
+Both `cloudrun-groq*.yaml` configs mount `DATABASE_URL` from Secret Manager
 and connect to Cloud SQL via the Auth Proxy sidecar
 (`run.googleapis.com/cloudsql-instances` annotation). Ingestion does not
 run at build time or read from anything baked into the image — it writes
 straight to the external Postgres database, so `uv run python -m app.ingest`
 can run before or after a deploy, from anywhere with network access to
 that database (locally via the Cloud SQL Auth Proxy, or from Cloud Shell);
-see README "Deploying to GCP" for the full flow.
+see README "Deploying to GCP" for the full flow. All three Cloud Run
+YAMLs also carry an `INGEST_TARGET_URL` placeholder for Cloud Tasks' HTTP target
+(`/internal/process-ingest-job`) — Cloud Run doesn't know its own URL
+until after first deploy, so this gets set imperatively via
+`gcloud run services update --update-env-vars` post-deploy, not templated
+into the YAML; a later `gcloud run services replace` silently resets it
+to the checked-in placeholder, so that update has to be re-run afterward.
 
 ## Testing conventions
 

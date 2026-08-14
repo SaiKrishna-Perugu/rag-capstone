@@ -22,7 +22,7 @@ evaluators, and freshness pipelines.*
 | Grounding | `app/rag.py` `generate_answer()`, `check_groundedness()` | Strict context-only prompting + LLM-as-judge hallucination check |
 | Vector database integration | `app/database.py`, `app/db_schema.sql` | PostgreSQL + pgvector (Cloud SQL in production) -- external, shared store so multiple Cloud Run instances see the same index |
 | **Rerankers** | `app/retrieval.py` `rerank()` | LLM-based listwise reranking (see file header for why, vs. cross-encoder) |
-| **Retrieval evaluators** | `eval.py`, `eval_ragas.py` | Custom LLM-as-judge + standardized RAGAS metrics (faithfulness, relevancy, precision, recall) |
+| **Retrieval evaluators** | `eval.py`, `eval_ragas.py` | Custom LLM-as-judge + standardized RAGAS metrics (faithfulness, relevancy, precision, recall) -- `eval_ragas.py` also gates CI (`.github/workflows/eval.yml`), not just run manually |
 | **Freshness pipelines** | `app/ingest.py` (hash + manifest) | Incremental re-ingestion: unchanged files skipped, changed files replaced, new files added |
 
 Also present, beyond this specific JD section: a self-correcting LangGraph
@@ -150,11 +150,14 @@ matching the default `DATABASE_URL` in `.env.example`
 created automatically and idempotently the first time you run ingestion
 or start the API (`app/database.py` `init_db()`) -- no manual schema step.
 
-**Conversation memory (Firestore) is optional for local dev** -- with no
-`GCP_PROJECT_ID` and no `FIRESTORE_EMULATOR_HOST` set, `app/memory.py`
-fails open (follow-up questions just aren't contextualized using history;
-everything else works normally). To actually exercise it locally, run the
-Firestore emulator in Docker:
+**Firestore is optional for conversation memory, but required for `/upload`.**
+With no `GCP_PROJECT_ID` and no `FIRESTORE_EMULATOR_HOST` set,
+`app/memory.py` fails open (follow-up questions just aren't
+contextualized using history; `/ask`/`/ask-agentic` work normally either
+way). `app/jobs.py` does **not** fail open the same way, though --
+job tracking is `/upload`'s actual contract (see "Asynchronous ingestion"
+above), so uploading a document needs one of these two configured. Run
+the Firestore emulator in Docker to exercise both locally:
 ```bash
 docker run -p 8080:8080 gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
   gcloud emulators firestore start --host-port=0.0.0.0:8080
@@ -286,7 +289,8 @@ gcloud config set project YOUR_PROJECT_ID
 gcloud services enable run.googleapis.com \
     cloudbuild.googleapis.com secretmanager.googleapis.com \
     artifactregistry.googleapis.com sqladmin.googleapis.com \
-    firestore.googleapis.com monitoring.googleapis.com
+    firestore.googleapis.com monitoring.googleapis.com \
+    cloudtasks.googleapis.com
 
 # 2. Provision Cloud SQL for PostgreSQL + pgvector -- the external, shared
 #    vector store all Cloud Run instances read/write (db-f1-micro is the
@@ -300,13 +304,25 @@ gcloud sql databases create ragdb --instance=rag-capstone-db
 # and enable the extension once:
 #   CREATE EXTENSION IF NOT EXISTS vector;
 
-# 2b. Provision Firestore (conversation memory) in Native mode, and set a
-#     TTL policy on expires_at -- app/memory.py sets that field on every
+# 2b. Provision Firestore (conversation memory + job tracking) in Native
+#     mode, and set a TTL policy on expires_at for BOTH collections that
+#     use it -- app/memory.py and app/jobs.py set that field on every
 #     write, but Firestore only actually deletes expired docs once this
-#     server-side policy is enabled (one-time, not something Python can do)
+#     server-side policy is enabled per collection (one-time, not
+#     something Python can do)
 gcloud firestore databases create --location=us-central1 --type=firestore-native
 gcloud firestore fields ttls update expires_at \
     --collection-group=conversation_sessions --enable-ttl
+gcloud firestore fields ttls update expires_at \
+    --collection-group=ingest_jobs --enable-ttl
+
+# 2c. Create the Cloud Tasks queue app/jobs.py enqueues async ingestion
+#     jobs onto (see "Asynchronous ingestion" above) -- max-attempts is
+#     bounded deliberately, since a whole-job failure reaching Cloud Tasks
+#     means something systemic (e.g. Postgres unreachable), not a
+#     per-file issue (those are already handled inside ingest.run()
+#     without raising)
+gcloud tasks queues create ingest-queue --location=us-central1 --max-attempts=3
 
 # 3. Create Artifact Registry repository
 gcloud artifacts repositories create rag-repo \
@@ -340,8 +356,9 @@ for secret in rag_api_key groq_api_key database_url; do
     --role="roles/secretmanager.secretAccessor"
 done
 # Also let the service account connect to Cloud SQL, read/write Firestore
-# (conversation memory), and push metrics to Cloud Monitoring
-for role in roles/cloudsql.client roles/datastore.user roles/monitoring.metricWriter; do
+# (conversation memory + job tracking), push metrics to Cloud Monitoring,
+# and enqueue Cloud Tasks
+for role in roles/cloudsql.client roles/datastore.user roles/monitoring.metricWriter roles/cloudtasks.enqueuer; do
   gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
     --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
     --role="$role"
@@ -350,6 +367,17 @@ done
 # 7. Deploy using the declarative yaml (edit cloudrun-groq.yaml first --
 #    replace YOUR_PROJECT_ID, including in the cloudsql-instances annotation)
 gcloud run services replace cloudrun-groq.yaml --region=us-central1
+
+# 7b. Cloud Run doesn't know its own URL until after this first deploy, but
+#     Cloud Tasks needs it as the target for /internal/process-ingest-job
+#     -- no way to template this into the YAML at deploy time, so it's set
+#     imperatively here. IMPORTANT: re-run this after every future
+#     `gcloud run services replace` -- that command applies the YAML
+#     verbatim, which would silently reset INGEST_TARGET_URL back to the
+#     placeholder value checked into cloudrun-groq.yaml.
+SERVICE_URL=$(gcloud run services describe rag-capstone --region=us-central1 --format='value(status.url)')
+gcloud run services update rag-capstone --region=us-central1 \
+    --update-env-vars=INGEST_TARGET_URL=$SERVICE_URL
 
 # 8. Ingest documents into Cloud SQL. Easiest from Cloud Shell (already
 #    authenticated) or locally via the Cloud SQL Auth Proxy -- either way,
@@ -365,6 +393,10 @@ gcloud run services add-iam-policy-binding rag-capstone \
     --role="roles/run.invoker"
 ```
 
+This first deploy is manual by design -- everything after it is automated
+(see "Automated deploys" below). Do this once to get a working service,
+then stop running these commands by hand.
+
 **A secret can't be created empty** (`gcloud secrets create ... --data-file=-`
 with no input errors with `INVALID_ARGUMENT: Secret Payload cannot be empty`).
 If you want the deployed app's API-key auth effectively off (open demo),
@@ -372,9 +404,14 @@ If you want the deployed app's API-key auth effectively off (open demo),
 non-empty placeholder value works the same as truly empty -- just don't
 send that header when testing. If you want it protected, use a real value
 and send it back as `X-API-Key: <value>` on every `/ask`, `/ask-agentic`,
-`/upload`, and `/metrics` call.
+`/upload`, `/jobs/{id}`, and `/metrics` call. `/internal/process-ingest-job`
+is protected the same way, but you don't need to do anything extra for
+it -- `app/jobs.py::enqueue_cloud_task()` reads `config.API_KEY` and sets
+it as a header on the Cloud Task's own HTTP request, so it authenticates
+itself automatically as long as `API_KEY` is set consistently (i.e. the
+same secret both the deployed app and its own outgoing Cloud Task use).
 
-### Redeploying after code or doc changes
+### Redeploying manually (before the CD pipeline is set up, or for debugging)
 
 ```bash
 # only if docs/ changed -- DATABASE_URL must point at the Cloud SQL
@@ -394,6 +431,115 @@ digest and creates a new revision when it differs. Reserve
 `services replace` for when you actually edit the YAML itself (new env
 var, different secret, resource limits).
 
+**Once the CD pipeline (below) is set up, stop running these commands
+against production** -- `cd.yml` deploys on every push to `main`, and a
+manual `gcloud run deploy` outside it would send that revision live
+traffic immediately, which breaks the canary rollout's assumption that
+only the pipeline controls traffic splitting (see "Automated deploys"
+below). Document ingestion (`uv run python -m app.ingest`) is **not**
+part of `cd.yml` and stays a manual, operator-triggered step either way
+-- matches this project's existing stance that ingestion is decoupled
+from deploys (see "Architecture" in `CLAUDE.md`).
+
+### Automated deploys (CD pipeline)
+
+After the one-time manual first deploy above, `.github/workflows/cd.yml`
+handles every deploy from a push to `main`: build the image → deploy to
+a staging service → smoke-test staging (`/health`, `/ready`, a real
+`/ask` call) → canary-rollout to production (10% traffic, wait, then
+100%) — automating the exact sequence documented above, plus a staging
+environment and a real (if simplified) canary step neither manual
+workflow had.
+
+**This is inert until you complete this one-time setup** -- I can't
+create or hold your GCP/GitHub credentials, so every piece below is real,
+working configuration that only activates once you run it yourself.
+
+```bash
+# Workload Identity Federation -- lets GitHub Actions authenticate to GCP
+# without a long-lived downloaded service-account key (Google's current
+# recommended pattern over JSON keys). Reuses rag-capstone-sa, already
+# created in step 5 above.
+PROJECT_ID=YOUR_PROJECT_ID
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+REPO=YOUR_GITHUB_USERNAME/rag-capstone
+
+gcloud iam workload-identity-pools create github-pool \
+  --project=$PROJECT_ID --location=global --display-name="GitHub Actions Pool"
+
+gcloud iam workload-identity-pools providers create-oidc github-provider \
+  --project=$PROJECT_ID --location=global --workload-identity-pool=github-pool \
+  --display-name="GitHub OIDC Provider" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
+  --attribute-condition="assertion.repository == '${REPO}'"
+
+gcloud iam service-accounts add-iam-policy-binding rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com \
+  --project=$PROJECT_ID --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/attribute.repository/${REPO}"
+
+# Cloud Build's runtime identity needs explicit grants -- for any GCP
+# project created on/after 2024-05-03, Cloud Build no longer auto-grants
+# its default service account broad Editor access.
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer"
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/logging.logWriter"
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/cloudbuild.builds.editor"
+
+# Staging environment: same Cloud SQL instance, a separate database within
+# it (not a second instance -- cheaper, still keeps staging traffic and
+# smoke-test uploads out of production data), and its own Cloud Tasks
+# queue (so a staging deploy's async ingestion jobs can never target the
+# wrong service).
+gcloud sql databases create ragdb_staging --instance=rag-capstone-db
+echo -n "postgresql://postgres:YOUR_DB_PASSWORD@/ragdb_staging?host=/cloudsql/${PROJECT_ID}:us-central1:rag-capstone-db" \
+  | gcloud secrets create database_url_staging --data-file=-
+gcloud secrets add-iam-policy-binding database_url_staging \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+gcloud tasks queues create ingest-queue-staging --location=us-central1 --max-attempts=3
+
+# First staging deploy (same pattern as production's first deploy above --
+# after this, cd.yml manages it)
+gcloud run services replace cloudrun-groq-staging.yaml --region=us-central1
+gcloud run services add-iam-policy-binding rag-capstone-staging \
+    --region=us-central1 --member="allUsers" --role="roles/run.invoker"
+STAGING_URL=$(gcloud run services describe rag-capstone-staging --region=us-central1 --format='value(status.url)')
+gcloud run services update rag-capstone-staging --region=us-central1 \
+    --update-env-vars=INGEST_TARGET_URL=$STAGING_URL
+uv run python -m app.ingest   # against DATABASE_URL pointed at ragdb_staging
+```
+
+**Deliberate simplification, documented not hidden:** staging shares
+Firestore (conversation memory, job tracking) with production -- Firestore
+Native mode is one database per GCP project by default, and fully
+isolating staging would need multi-database Firestore, which is out of
+scope for a portfolio project's staging environment.
+
+Then, in the GitHub repo itself (UI steps, not YAML):
+1. **Settings → Secrets and variables → Actions → Variables tab**: add
+   `GCP_PROJECT_ID` and `WIF_PROVIDER` (the full provider resource name
+   printed by the `providers create-oidc` command above --
+   `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider`).
+2. **Settings → Environments → New environment**, named exactly
+   `production` → add yourself as a required reviewer. `cd.yml`'s
+   `promote-production` job references this environment, but that
+   reference is a no-op until this environment actually exists with a
+   reviewer rule -- without it, production deploys happen unattended on
+   every push to `main`, which defeats the point of the gate. (Required
+   reviewers need a public repo or a paid plan; this repo is public, so
+   the free tier covers it.)
+3. **Settings → Branches → Branch protection rule** for `main`: require
+   the `test` (from `ci.yml`) and `eval-gate` (from `eval.yml`) status
+   checks to pass before merging. This is what makes the eval gate
+   actually *block* a bad PR rather than just report a red X after the
+   fact.
+
 **If using Vertex AI:** also enable `aiplatform.googleapis.com` in step 1
 (`gcloud services enable aiplatform.googleapis.com`). `cloudrun-vertexai.yaml`
 runs as the default compute service account (unlike `cloudrun-groq.yaml`,
@@ -405,7 +551,7 @@ requests will fail with a permissions error:
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
   --role="roles/aiplatform.user"
-for role in roles/cloudsql.client roles/datastore.user roles/monitoring.metricWriter; do
+for role in roles/cloudsql.client roles/datastore.user roles/monitoring.metricWriter roles/cloudtasks.enqueuer; do
   gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
     --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
     --role="$role"
@@ -423,6 +569,13 @@ FastEmbed/Groq's 384 -- see "Switching to Vertex AI" above) -- already set
 in the checked-in `cloudrun-vertexai.yaml`, along with `GCP_PROJECT_ID`
 and `OTEL_GCP_EXPORT` (just replace `YOUR_PROJECT_ID` with the real value).
 
+**The CD pipeline (`cd.yml`) targets the Groq path** (`cloudrun-groq.yaml`
+/ `cloudrun-groq-staging.yaml`) as built -- there's no
+`cloudrun-vertexai-staging.yaml` or Vertex AI branch in `cd.yml`. Adding
+one would follow the exact same pattern (a staging YAML + a second set of
+`deploy`/`smoke-test` steps); documented as the next step if you switch
+the deployed environment to Vertex AI, not built here.
+
 ## Project structure
 
 ```text
@@ -433,7 +586,8 @@ app/
   database.py   # PostgreSQL + pgvector connection pool, schema init, hybrid search
   db_schema.sql # chunks / semantic_cache table + index definitions
   ingest.py     # load -> chunk -> embed -> persist to PostgreSQL + pgvector
-  main.py       # FastAPI endpoints (/, /upload, /ask, /ask-agentic) + UI serving + logging
+  jobs.py       # async ingestion job tracking (Firestore) + Cloud Tasks enqueueing
+  main.py       # FastAPI endpoints (/, /upload, /jobs/{id}, /ask, /ask-agentic) + UI serving + logging
   memory.py     # conversation history (Firestore) and contextual query rewriting
   metrics.py    # OpenTelemetry metrics -- Prometheus /metrics + optional Cloud Monitoring push
   middleware.py # API key auth, CORS, rate limiting
@@ -444,10 +598,17 @@ app/
   ui.html       # frontend interface
 docs/           # source documents (sample included)
 tests/          # unit and integration tests
+scripts/
+  check_thresholds.py # CI eval-gate: fails the build if eval_ragas.py's scores drop below floor
 eval.py         # custom eval harness (LLM-as-judge, correctness + groundedness)
 eval_ragas.py   # RAGAS eval harness (faithfulness, relevancy, precision, recall)
-  cloudrun-groq.yaml    # Declarative Cloud Run configuration for Groq
-  cloudrun-vertexai.yaml # Declarative Cloud Run configuration for Vertex AI
+.github/workflows/
+  ci.yml          # lint + fully-mocked unit tests
+  eval.yml        # eval-gate: real Groq calls against an ephemeral Postgres, blocks bad PRs
+  cd.yml          # build -> deploy staging -> smoke test -> canary-promote to production
+  cloudrun-groq.yaml         # Declarative Cloud Run configuration for Groq (production)
+  cloudrun-groq-staging.yaml # Same, for the staging service cd.yml deploys to
+  cloudrun-vertexai.yaml     # Declarative Cloud Run configuration for Vertex AI
 Dockerfile
 pyproject.toml
 ```
@@ -498,6 +659,43 @@ real and working, not stubbed — but scoped down from a production system:
   Monitoring being unreachable or unconfigured degrades to "no history" /
   "local metrics only" rather than breaking requests, the same posture as
   `app/cache.py` and `check_groundedness()`.
+- **Asynchronous ingestion (Cloud Tasks + job polling)** -- `POST /upload`
+  no longer blocks the request on `ingest.run()`. It saves the files,
+  creates a job record (`app/jobs.py`, Firestore `ingest_jobs`
+  collection), and returns `202 {job_id}` almost immediately; a new
+  `GET /jobs/{job_id}` endpoint (polled by `ui.html` every ~2s) reports
+  `pending` → `processing` → `done`/`failed`. In a real deployment
+  (`GCP_PROJECT_ID` set), the actual work happens via a Cloud Task
+  calling `POST /internal/process-ingest-job`, with automatic retries if
+  it fails. Google ships no official local Cloud Tasks emulator, so
+  local dev runs the exact same job through FastAPI's `BackgroundTasks`
+  instead of a real queue -- the full `202`/poll/`done` contract is still
+  100% testable locally; only the real queue's retry/backoff behavior
+  needs a live deployment to exercise. Unlike conversation memory/cache,
+  Firestore here is a **required** dependency for `/upload` (not
+  fail-open) -- job tracking is the endpoint's contract, not a latency
+  optimization, so an unreachable Firestore is a clear `503`, not a
+  silent behavior change.
+- **Eval gate in CI + a real staging/CD pipeline** -- `.github/workflows/eval.yml`
+  runs `eval_ragas.py` against an ephemeral, job-scoped Postgres on every
+  PR and push to `main`, and `scripts/check_thresholds.py` fails the build
+  if faithfulness/relevancy/precision/recall drop below a floor set from
+  a real baseline run -- a prompt or retrieval regression now fails CI
+  instead of shipping silently. `.github/workflows/cd.yml` replaces the
+  fully-manual deploy walkthrough with build → deploy-to-staging →
+  smoke-test → canary-promote-to-production (10% traffic, then 100%),
+  authenticated via Workload Identity Federation (no long-lived
+  credentials) and gated by a GitHub environment approval before
+  production traffic shifts. See "Deploying to GCP" → "Automated deploys"
+  for the one-time setup this needs (I can't create or hold your real
+  GCP/GitHub credentials, so this ships as complete, working config that
+  stays inert until you run that setup yourself).
 
-**Explicitly deferred (next steps, in priority order):**
-1. **Asynchronous Ingestion Worker** — currently, the `/upload` endpoint runs ingestion synchronously in a thread. While this works well for demos and small files, for production at scale, document processing should be decoupled into a separate worker queue (e.g. Cloud Run Jobs + Pub/Sub) to prevent HTTP timeouts on massive files.
+**Explicitly deferred:** every item previously listed here (async
+ingestion, external session state, the vector store migration, the eval
+gate + CD pipeline) is now implemented -- see
+`docs/PRODUCTION_READINESS_PLAN.md` for what's next (real authentication,
+circuit breaker/provider failover, security hardening, cost tracking,
+load testing); it also has an honest read on which of those are actually
+worth building for a portfolio project versus just being able to describe
+correctly in an interview.

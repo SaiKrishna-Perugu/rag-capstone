@@ -1,0 +1,109 @@
+name: CD Pipeline
+
+# Runs on push to main only -- PRs are gated by ci.yml + eval.yml as
+# required status checks (once branch protection is enabled, see README
+# "Deploying to GCP" one-time setup), so a merge to main already implies
+# lint/tests/eval passed.
+#
+# INERT until the one-time GCP + GitHub setup documented in README
+# "Deploying to GCP" is completed by hand -- Workload Identity Federation,
+# the `GCP_PROJECT_ID`/`WIF_PROVIDER` repo variables, and the `production`
+# environment's required-reviewer rule all have to exist first. Until
+# then this workflow will fail at the auth step, which is the correct,
+# safe failure mode (no deploy happens) rather than a partial/confusing one.
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write   # required for Workload Identity Federation
+  contents: read
+
+env:
+  IMAGE: us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/rag-repo/rag-capstone:${{ github.sha }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+
+      # Raw gcloud CLI throughout this pipeline, matching this repo's
+      # existing convention (README "Deploying to GCP") of never wrapping
+      # deploy commands in marketplace Actions. gcloud is preinstalled on
+      # ubuntu-latest and auto-configured by the auth step above -- no
+      # setup-gcloud action needed.
+      - name: Build and push image via Cloud Build
+        run: gcloud builds submit --tag ${{ env.IMAGE }}
+
+  deploy-staging:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+
+      - name: Deploy to staging
+        run: |
+          gcloud run deploy rag-capstone-staging \
+            --image=${{ env.IMAGE }} \
+            --region=us-central1
+
+  smoke-test-staging:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+
+      - name: Smoke test staging deployment
+        run: |
+          URL=$(gcloud run services describe rag-capstone-staging --region=us-central1 --format='value(status.url)')
+          curl -sf "$URL/health"
+          curl -sf "$URL/ready"
+          curl -sf -X POST "$URL/ask" -H "Content-Type: application/json" \
+            -d '{"question": "What is the refund policy?"}' | grep -q '"groundedness"'
+
+  promote-production:
+    needs: smoke-test-staging
+    runs-on: ubuntu-latest
+    # Inert without the one-time manual step: Settings -> Environments ->
+    # New environment "production" -> add a required reviewer. Without
+    # that, `environment: production` is a no-op and this job runs
+    # unattended -- see README "Deploying to GCP".
+    environment: production
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+
+      # Canary rollout: deploy with zero traffic, shift 10% to it, wait,
+      # then promote to 100%. NOTE: --to-tags=canary=10 assumes the
+      # currently-live revision isn't already carrying traffic from a
+      # manual `gcloud run deploy` run outside this pipeline (i.e.
+      # without --no-traffic) -- once this pipeline exists, stop deploying
+      # to prod manually so that assumption keeps holding.
+      #
+      # The 120s wait is a fixed timer, not a real error-rate check -- a
+      # portfolio-scale simplification (same category as the Cloud Tasks
+      # queue's --max-attempts=3). A real rollback-on-error-spike gate
+      # would wire Cloud Monitoring alerting to this workflow; documented
+      # as the next step, not built here.
+      - name: Canary deploy to production
+        run: |
+          gcloud run deploy rag-capstone \
+            --image=${{ env.IMAGE }} \
+            --region=us-central1 --no-traffic --tag=canary
+          gcloud run services update-traffic rag-capstone --region=us-central1 --to-tags=canary=10
+          sleep 120
+          gcloud run services update-traffic rag-capstone --region=us-central1 --to-latest

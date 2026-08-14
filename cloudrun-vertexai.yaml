@@ -48,6 +48,16 @@ spec:
           value: 'false'
         - name: OTEL_GCP_EXPORT
           value: 'true'
+        - name: CLOUD_TASKS_QUEUE
+          value: 'ingest-queue'
+        # This service's own public URL -- Cloud Tasks needs it as the
+        # HTTP target for /internal/process-ingest-job. Filled in via
+        # `gcloud run services update --update-env-vars` post-deploy (not
+        # knowable at deploy time); see README "Deploying to GCP". Any
+        # later `services replace` using this file resets it to this
+        # placeholder, so re-run that update step afterward.
+        - name: INGEST_TARGET_URL
+          value: 'https://REPLACE-WITH-SERVICE-URL.run.app'
         # text-embedding-005 is 768-dim, vs. FastEmbed/Groq's 384 -- this
         # sets the VECTOR(N) column width on first schema creation (see
         # app/database.py init_db()); must be set before the first ingest

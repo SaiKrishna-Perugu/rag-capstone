@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from app import config
 
 
@@ -42,6 +44,73 @@ def test_upload_endpoint_disabled(client, monkeypatch):
     response = client.post("/upload", files=files)
     assert response.status_code == 403
     assert "disabled" in response.json()["detail"]["error"].lower()
+
+def test_upload_endpoint_success_processes_in_background_without_gcp(client, monkeypatch, tmp_path):
+    # No GCP_PROJECT_ID configured -- local/no-GCP path: the job is
+    # processed via BackgroundTasks (process_job), not a real Cloud Task.
+    # Starlette's TestClient runs background tasks synchronously as part
+    # of the request, so process_job must be mocked here or this would
+    # try to run real ingestion. DOCS_DIR is redirected to tmp_path --
+    # /upload's file-save step isn't mocked, so without this it would
+    # write a real file into the project's docs/uploads/.
+    monkeypatch.setattr(config, "GCP_PROJECT_ID", "")
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    with patch("app.jobs.create_job", return_value="job-123") as mock_create:
+        with patch("app.jobs.process_job") as mock_process:
+            files = {"files": ("test.txt", b"hello world", "text/plain")}
+            response = client.post("/upload", files=files)
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["job_id"] == "job-123"
+    assert data["status"] == "pending"
+    mock_create.assert_called_once()
+    mock_process.assert_called_once_with("job-123")
+
+def test_upload_endpoint_enqueues_cloud_task_when_gcp_configured(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "GCP_PROJECT_ID", "test-project")
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    with patch("app.jobs.create_job", return_value="job-456"):
+        with patch("app.jobs.enqueue_cloud_task") as mock_enqueue:
+            files = {"files": ("test.txt", b"hello world", "text/plain")}
+            response = client.post("/upload", files=files)
+
+    assert response.status_code == 202
+    mock_enqueue.assert_called_once_with("job-456")
+
+def test_upload_endpoint_job_tracking_unavailable(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    with patch("app.jobs.create_job", side_effect=RuntimeError("Firestore is not configured")):
+        files = {"files": ("test.txt", b"hello world", "text/plain")}
+        response = client.post("/upload", files=files)
+    assert response.status_code == 503
+
+def test_get_job_status_found(client):
+    with patch("app.jobs.get_job", return_value={"status": "done", "ingest_summary": {"added": ["a.txt"]}}):
+        response = client.get("/jobs/job-123")
+    assert response.status_code == 200
+    assert response.json()["status"] == "done"
+
+def test_get_job_status_not_found(client):
+    with patch("app.jobs.get_job", return_value=None):
+        response = client.get("/jobs/nonexistent")
+    assert response.status_code == 404
+
+def test_get_job_status_unavailable(client):
+    with patch("app.jobs.get_job", side_effect=RuntimeError("Firestore is not configured")):
+        response = client.get("/jobs/job-123")
+    assert response.status_code == 503
+
+def test_process_ingest_job_success(client):
+    with patch("app.jobs.process_job") as mock_process:
+        response = client.post("/internal/process-ingest-job", json={"job_id": "job-123"})
+    assert response.status_code == 200
+    mock_process.assert_called_once_with("job-123")
+
+def test_process_ingest_job_failure_returns_500_for_cloud_tasks_retry(client):
+    with patch("app.jobs.process_job", side_effect=RuntimeError("ingest blew up")):
+        response = client.post("/internal/process-ingest-job", json={"job_id": "job-123"})
+    assert response.status_code == 500
 
 def test_config_endpoint(client):
     response = client.get("/config")
