@@ -11,9 +11,22 @@ carrying real run-to-run variance, gating on "regressed vs. last run"
 would flap on noise rather than catch real quality drops. Floors are set
 a bit below a real local baseline run of eval_ragas.py, not guessed.
 
-THRESHOLDS below are placeholders pending that baseline run (blocked on
-Groq daily quota as of when this was written -- see docs/PRODUCTION_READINESS_PLAN.md
-Phase 4 notes) -- update them to real values before relying on this gate.
+Real baseline run (Groq's free-tier daily quota was exhausted from other
+testing, so this ran via Vertex AI for the LLM only -- FastEmbed
+embeddings and the real Postgres corpus unchanged; see eval_ragas.py's
+_RagasCompatibleEmbeddings for a real RAGAS+FastEmbed bug found and fixed
+in the process). Against a clean, CI-representative database (only the
+git-tracked docs/ files, matching what eval.yml's ephemeral Postgres
+actually ingests): faithfulness 0.875, answer_relevancy 0.821,
+llm_context_precision_without_reference 1.0, context_recall 1.0 -- 7 of 8
+questions scored at or near perfect; the 8th is EVAL_SET's deliberate
+negative test case ("What is the CEO's name?"), which correctly refuses
+to answer and so correctly scores near-zero on faithfulness/relevancy by
+design, pulling down the mean. Floors below sit meaningfully under that
+baseline -- LLM-as-judge metrics carry real run-to-run variance, and
+precision/recall hit a perfect 1.0 with zero headroom otherwise -- while
+still being real bars a genuine regression (e.g. dropping the reranker)
+would breach.
 """
 import json
 import math
@@ -21,10 +34,10 @@ import sys
 from pathlib import Path
 
 THRESHOLDS = {
-    "faithfulness": 0.5,
-    "answer_relevancy": 0.5,
-    "llm_context_precision_without_reference": 0.5,
-    "context_recall": 0.5,
+    "faithfulness": 0.6,
+    "answer_relevancy": 0.55,
+    "llm_context_precision_without_reference": 0.7,
+    "context_recall": 0.7,
 }
 
 

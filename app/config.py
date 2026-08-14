@@ -66,7 +66,11 @@ if MODEL_PROVIDER == "groq" and not GROQ_API_KEY:
 # --- GCP / Vertex AI settings -----------------------------------------------
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
-VERTEX_CHAT_MODEL = os.getenv("VERTEX_CHAT_MODEL", "gemini-2.0-flash-001")
+# "gemini-2.0-flash-001" (the old default) 404s as of this writing --
+# confirmed directly by probing the Vertex AI publisher-model endpoint,
+# not assumed; the 2.0 series appears to no longer be served for new
+# projects. "gemini-2.5-flash" confirmed working the same way.
+VERTEX_CHAT_MODEL = os.getenv("VERTEX_CHAT_MODEL", "gemini-2.5-flash")
 VERTEX_EMBEDDING_MODEL = os.getenv("VERTEX_EMBEDDING_MODEL", "text-embedding-005")
 
 if MODEL_PROVIDER == "vertexai" and not GCP_PROJECT_ID:

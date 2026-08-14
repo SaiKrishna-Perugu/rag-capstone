@@ -116,6 +116,32 @@ EVAL_SET = [
 ]
 
 
+class _RagasCompatibleEmbeddings:
+    """Thin proxy around whatever app.providers.get_embeddings() returns,
+    fixing a real RAGAS bug confirmed by reading ragas/embeddings/base.py:
+    LangchainEmbeddingsWrapper.embed_query()/embed_documents() call the
+    real embedding first (succeeds), then do
+    `getattr(self.embeddings, "model", None)` to build a telemetry event
+    -- and pydantic-validates that as a string. FastEmbedEmbeddings uses
+    `.model` for the *loaded model object* (the string name lives in
+    `.model_name` instead), so that validation always raises, discarding
+    the already-successful embedding and crashing every ResponseRelevancy
+    computation. Confirmed 100% reproducible, not intermittent -- every
+    single sample failed with the same ValidationError before this fix.
+
+    Only exposes `.model` as a plain string for RAGAS's telemetry to find;
+    everything else (embed_query, embed_documents, ...) delegates to the
+    real embeddings object untouched via __getattr__.
+    """
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+        self.model = getattr(wrapped, "model_name", None) or "unknown"
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
 def build_dataset(eval_set: list) -> EvaluationDataset:
     samples = []
     for case in eval_set:
@@ -138,7 +164,7 @@ def run_ragas_eval() -> dict:
     dataset = build_dataset(EVAL_SET)
 
     llm = LangchainLLMWrapper(get_llm(temperature=0.0))
-    embeddings = LangchainEmbeddingsWrapper(get_embeddings())
+    embeddings = LangchainEmbeddingsWrapper(_RagasCompatibleEmbeddings(get_embeddings()))
 
     metrics = [
         Faithfulness(llm=llm),
