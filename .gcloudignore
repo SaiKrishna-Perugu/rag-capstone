@@ -1,10 +1,5 @@
 #!include:.gitignore
 
-# gcloud builds submit falls back to .gitignore's rules when this file is
-# absent, which would silently drop chroma_db/ from the Cloud Build upload
-# (it's gitignored on purpose -- generated data, rebuilt via
-# `uv run python -m app.ingest`) -- but the deployed image needs the real,
-# already-ingested chroma_db/ baked in, since ingestion doesn't run at
-# build time (see Dockerfile). Force it back in for uploads specifically.
-!chroma_db/
-!chroma_db/**
+# Vector data now lives in PostgreSQL (Cloud SQL), not a local directory
+# baked into the image, so nothing needs to be force-included here anymore
+# -- the default fallback to .gitignore's rules is correct as-is.

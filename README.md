@@ -150,6 +150,22 @@ matching the default `DATABASE_URL` in `.env.example`
 created automatically and idempotently the first time you run ingestion
 or start the API (`app/database.py` `init_db()`) -- no manual schema step.
 
+**Conversation memory (Firestore) is optional for local dev** -- with no
+`GCP_PROJECT_ID` and no `FIRESTORE_EMULATOR_HOST` set, `app/memory.py`
+fails open (follow-up questions just aren't contextualized using history;
+everything else works normally). To actually exercise it locally, run the
+Firestore emulator in Docker:
+```bash
+docker run -p 8080:8080 gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+  gcloud emulators firestore start --host-port=0.0.0.0:8080
+```
+then set `FIRESTORE_EMULATOR_HOST=localhost:8080` in `.env` -- the
+`google-cloud-firestore` client auto-detects this env var and talks to
+the emulator instead of real GCP, no credentials needed. (Google is
+nudging the `:emulators` image tag toward deprecation in favor of
+`:stable` plus a `COMPONENTS=google-cloud-cli-firestore-emulator` runtime
+env var -- `:emulators` still works as of this writing; switch if it stops.)
+
 ## Usage
 
 **1. Build the index**: Run ingestion locally to embed documents into Postgres:
@@ -163,11 +179,15 @@ first thing that needs to run against a brand-new database -- it calls
 API first or run any schema SQL by hand.
 
 **This is incremental by default** (the "freshness pipeline"): each file's
-content is hashed and tracked in `chroma_db/ingest_manifest.json` (the
-manifest is still a local file -- only the embeddings themselves moved to
-Postgres). Re-running `uv run python -m app.ingest` after adding a new file
-only embeds the new file; unchanged files are skipped entirely (no
-re-embedding cost), and a changed file has its old chunks deleted and
+content is hashed and tracked in the `ingest_manifest` table -- in Postgres
+itself, alongside the chunks it describes, not a local file. That matters
+specifically because it's a *shared, external* store now: a local manifest
+file has no way of knowing it's pointed at a different (or freshly created)
+database than the one it was last run against, and would wrongly skip
+files that were never actually ingested into whatever database is
+currently in use. Re-running `uv run python -m app.ingest` after adding a
+new file only embeds the new file; unchanged files are skipped entirely
+(no re-embedding cost), and a changed file has its old chunks deleted and
 replaced (`ON CONFLICT (source, content_hash)` in Postgres). One bad file
 (corrupt PDF, malformed doc) is recorded and skipped, not a fatal crash for
 the whole batch -- check the printed summary for `Failed:` count and details.
@@ -265,7 +285,8 @@ gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
 gcloud services enable run.googleapis.com \
     cloudbuild.googleapis.com secretmanager.googleapis.com \
-    artifactregistry.googleapis.com sqladmin.googleapis.com
+    artifactregistry.googleapis.com sqladmin.googleapis.com \
+    firestore.googleapis.com monitoring.googleapis.com
 
 # 2. Provision Cloud SQL for PostgreSQL + pgvector -- the external, shared
 #    vector store all Cloud Run instances read/write (db-f1-micro is the
@@ -278,6 +299,14 @@ gcloud sql databases create ragdb --instance=rag-capstone-db
 # Connect (e.g. via `gcloud sql connect rag-capstone-db --user=postgres`)
 # and enable the extension once:
 #   CREATE EXTENSION IF NOT EXISTS vector;
+
+# 2b. Provision Firestore (conversation memory) in Native mode, and set a
+#     TTL policy on expires_at -- app/memory.py sets that field on every
+#     write, but Firestore only actually deletes expired docs once this
+#     server-side policy is enabled (one-time, not something Python can do)
+gcloud firestore databases create --location=us-central1 --type=firestore-native
+gcloud firestore fields ttls update expires_at \
+    --collection-group=conversation_sessions --enable-ttl
 
 # 3. Create Artifact Registry repository
 gcloud artifacts repositories create rag-repo \
@@ -310,10 +339,13 @@ for secret in rag_api_key groq_api_key database_url; do
     --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
     --role="roles/secretmanager.secretAccessor"
 done
-# Also let the service account connect to Cloud SQL itself
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+# Also let the service account connect to Cloud SQL, read/write Firestore
+# (conversation memory), and push metrics to Cloud Monitoring
+for role in roles/cloudsql.client roles/datastore.user roles/monitoring.metricWriter; do
+  gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
     --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-    --role="roles/cloudsql.client"
+    --role="$role"
+done
 
 # 7. Deploy using the declarative yaml (edit cloudrun-groq.yaml first --
 #    replace YOUR_PROJECT_ID, including in the cloudsql-instances annotation)
@@ -364,18 +396,32 @@ var, different secret, resource limits).
 
 **If using Vertex AI:** also enable `aiplatform.googleapis.com` in step 1
 (`gcloud services enable aiplatform.googleapis.com`). `cloudrun-vertexai.yaml`
-runs as the default compute service account, which needs the
-`roles/aiplatform.user` IAM role, or Vertex AI calls will fail with a
-permissions error:
+runs as the default compute service account (unlike `cloudrun-groq.yaml`,
+which runs as `rag-capstone-sa`), which needs `roles/aiplatform.user` for
+Vertex AI calls, plus the same Cloud SQL / Firestore / Cloud Monitoring /
+secret access that `rag-capstone-sa` was granted in step 6 above -- or
+requests will fail with a permissions error:
 ```bash
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
   --role="roles/aiplatform.user"
+for role in roles/cloudsql.client roles/datastore.user roles/monitoring.metricWriter; do
+  gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+    --role="$role"
+done
+for secret in rag_api_key database_url; do
+  gcloud secrets add-iam-policy-binding "$secret" \
+    --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+done
 ```
 (Find `YOUR_PROJECT_NUMBER` via `gcloud projects describe YOUR_PROJECT_ID`.)
-Also add `GCP_PROJECT_ID` to that YAML's `env:` block -- `app/config.py`
-requires it whenever `MODEL_PROVIDER=vertexai` and it isn't set there by
-default.
+Also set `EMBEDDING_DIMENSION=768` in that YAML's `env:` block if
+ingesting into a brand-new database (`text-embedding-005` is 768-dim vs.
+FastEmbed/Groq's 384 -- see "Switching to Vertex AI" above) -- already set
+in the checked-in `cloudrun-vertexai.yaml`, along with `GCP_PROJECT_ID`
+and `OTEL_GCP_EXPORT` (just replace `YOUR_PROJECT_ID` with the real value).
 
 ## Project structure
 
@@ -388,8 +434,8 @@ app/
   db_schema.sql # chunks / semantic_cache table + index definitions
   ingest.py     # load -> chunk -> embed -> persist to PostgreSQL + pgvector
   main.py       # FastAPI endpoints (/, /upload, /ask, /ask-agentic) + UI serving + logging
-  memory.py     # conversation history and contextual query rewriting
-  metrics.py    # observability and prometheus-style metrics
+  memory.py     # conversation history (Firestore) and contextual query rewriting
+  metrics.py    # OpenTelemetry metrics -- Prometheus /metrics + optional Cloud Monitoring push
   middleware.py # API key auth, CORS, rate limiting
   providers.py  # model provider factory (Groq / Vertex AI)
   rag.py        # single-pass retrieval, grounded generation, groundedness check
@@ -438,12 +484,20 @@ real and working, not stubbed — but scoped down from a production system:
 - **GCP Cloud Run deployment**: Dockerfile adapted for Cloud Run's dynamic
   `$PORT`, plus full `gcloud` deploy commands for both provider paths --
   see "Deploying to GCP" above
+- **External session state (Firestore + OpenTelemetry)** -- the other half
+  of the statelessness fix Phase 1 started for the vector store.
+  Conversation history (`app/memory.py`) now lives in Firestore, one
+  document per `session_id`, with a native TTL policy for automatic
+  cleanup, instead of a per-instance in-process dict -- a multi-turn
+  conversation now survives a restart or landing on a different Cloud Run
+  instance. Metrics (`app/metrics.py`) are now real OpenTelemetry
+  instruments: `GET /metrics` serves Prometheus exposition format locally
+  with zero GCP config, and optionally (`OTEL_GCP_EXPORT=true`) also
+  pushes to Cloud Monitoring so metrics are centralized across instances
+  rather than reset on every restart. Both fail open -- Firestore/Cloud
+  Monitoring being unreachable or unconfigured degrades to "no history" /
+  "local metrics only" rather than breaking requests, the same posture as
+  `app/cache.py` and `check_groundedness()`.
 
 **Explicitly deferred (next steps, in priority order):**
 1. **Asynchronous Ingestion Worker** — currently, the `/upload` endpoint runs ingestion synchronously in a thread. While this works well for demos and small files, for production at scale, document processing should be decoupled into a separate worker queue (e.g. Cloud Run Jobs + Pub/Sub) to prevent HTTP timeouts on massive files.
-2. **External session state (memory + metrics)** — conversation history
-   (`app/memory.py`) and the in-process counters in `app/metrics.py` are
-   still per-instance dicts; the same statelessness problem the vector
-   store had, just not yet fixed for these two. See
-   `docs/PRODUCTION_READINESS_PLAN.md` Phase 2 for the planned approach
-   (Firestore).

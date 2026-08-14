@@ -34,3 +34,17 @@ CREATE TABLE IF NOT EXISTS semantic_cache (
 
 CREATE INDEX IF NOT EXISTS idx_cache_embedding ON semantic_cache USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
+
+-- Ingest manifest: per-file content hash + last-ingested timestamp, used
+-- for incremental re-ingestion (skip unchanged files). Lives here rather
+-- than in a local JSON file so it can never desync from the data it
+-- describes -- a local manifest file has no way of knowing it's pointed
+-- at a different (e.g. freshly created) database than the one it was
+-- last written against, and would wrongly skip files that were never
+-- actually ingested into the database currently in use.
+CREATE TABLE IF NOT EXISTS ingest_manifest (
+    source TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    num_chunks INT NOT NULL,
+    last_ingested TIMESTAMPTZ DEFAULT now()
+);

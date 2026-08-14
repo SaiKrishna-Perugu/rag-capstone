@@ -48,13 +48,22 @@ def _get_pool() -> pool.ThreadedConnectionPool:
 
 
 @contextmanager
-def get_conn():
+def get_conn(register_types: bool = True):
     """Context manager that checks out a connection from the pool,
-    registers the pgvector type, and returns it on exit."""
+    registers the pgvector type, and returns it on exit.
+
+    register_types=False skips registering the vector type adapter --
+    needed by init_db() specifically, since register_vector() looks up
+    the `vector` type's OID in pg_type, which doesn't exist yet on a
+    brand-new database until init_db()'s own `CREATE EXTENSION IF NOT
+    EXISTS vector` has run. Every other caller needs the adapter (they
+    bind numpy arrays as query parameters) and uses the default.
+    """
     p = _get_pool()
     conn = p.getconn()
     try:
-        register_vector(conn)
+        if register_types:
+            register_vector(conn)
         yield conn
         conn.commit()
     except Exception:
@@ -88,7 +97,7 @@ def init_db() -> None:
         "{EMBEDDING_DIMENSION}", str(config.EMBEDDING_DIMENSION)
     )
 
-    with get_conn() as conn:
+    with get_conn(register_types=False) as conn:
         with conn.cursor() as cur:
             cur.execute(schema_sql)
     logger.info("Database schema initialised (idempotent).")
@@ -154,6 +163,44 @@ def delete_chunks_by_source(source: str) -> int:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM chunks WHERE source = %s", (source,))
             return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Ingest manifest (used by ingest.py for incremental re-ingestion)
+# ---------------------------------------------------------------------------
+
+def get_manifest() -> dict:
+    """Return the full ingest manifest as {source: {hash, num_chunks,
+    last_ingested}}, matching the shape the old local-JSON manifest used."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT source, content_hash, num_chunks, last_ingested FROM ingest_manifest")
+            rows = cur.fetchall()
+    return {
+        row["source"]: {
+            "hash": row["content_hash"],
+            "num_chunks": row["num_chunks"],
+            "last_ingested": row["last_ingested"].isoformat(),
+        }
+        for row in rows
+    }
+
+
+def upsert_manifest_entry(source: str, content_hash: str, num_chunks: int) -> None:
+    """Record a file as ingested. Written per-file (not batched at the end
+    of a run) so an interrupted ingest run doesn't lose progress -- a
+    restart re-checks only the files that never got a manifest entry."""
+    sql = """
+        INSERT INTO ingest_manifest (source, content_hash, num_chunks, last_ingested)
+        VALUES (%s, %s, %s, now())
+        ON CONFLICT (source) DO UPDATE SET
+            content_hash = EXCLUDED.content_hash,
+            num_chunks = EXCLUDED.num_chunks,
+            last_ingested = now()
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (source, content_hash, num_chunks))
 
 
 # ---------------------------------------------------------------------------

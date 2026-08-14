@@ -1,96 +1,95 @@
 """
-Lightweight in-memory metrics for production monitoring.
+OpenTelemetry-instrumented metrics for production monitoring.
 
-Tracks request counts, groundedness verdicts, latency percentiles, and
-error rates. Exposed via ``GET /metrics`` as JSON -- scrapeable by Cloud
-Monitoring custom metrics or any polling-based dashboard.
+Tracks request counts, groundedness verdicts, latency, and error rates as
+real OpenTelemetry instruments (Counter/Histogram) rather than a hand-rolled
+in-process dataclass -- the standard, portable instrumentation pattern, and
+usable by any OTel-compatible backend, not just this app's own /metrics
+route.
 
-These reset on container restart, which is fine for Cloud Run (stateless
-containers, autoscaled). For durable metrics across restarts, push to
-Cloud Monitoring instead of serving them.
+Two MetricReaders are registered on the MeterProvider:
+  1. PrometheusMetricReader -- always on, needs no GCP config. Backs
+     GET /metrics (Prometheus text exposition format, pulled on request
+     via prometheus_client.generate_latest() -- no separate HTTP server).
+  2. PeriodicExportingMetricReader + CloudMonitoringMetricsExporter --
+     opt-in (OTEL_GCP_EXPORT=true, requires GCP_PROJECT_ID), pushes
+     aggregates to Cloud Monitoring every 60s so metrics are centralized
+     and durable across Cloud Run instances instead of only visible
+     per-instance. Off by default -- local dev/tests need zero GCP setup.
+
+Known trade-offs, accepted deliberately:
+  - opentelemetry-exporter-gcp-monitoring is pre-1.0 (alpha) and marked
+    deprecated upstream in favor of native OTLP ingestion. Still the
+    current, working, Google-documented path as of this writing.
+  - PeriodicExportingMetricReader exports on a background timer thread.
+    Cloud Run only allocates CPU during active request handling by
+    default, so pushes may stall/batch between requests unless "CPU
+    always allocated" is enabled on the service.
 """
 
-import threading
-from collections import defaultdict
-from dataclasses import dataclass, field
+from opentelemetry import metrics as otel_metrics_api  # this module IS app.metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
 
-_lock = threading.Lock()
+from app import config
 
+_readers = [PrometheusMetricReader()]
 
-@dataclass
-class _Metrics:
-    """All counters and histograms, guarded by ``_lock``."""
-    requests_total: dict = field(default_factory=lambda: defaultdict(int))
-    groundedness_verdicts: dict = field(default_factory=lambda: defaultdict(int))
-    errors_total: dict = field(default_factory=lambda: defaultdict(int))
-    retrieval_empty_count: int = 0
-    agent_retry_total: int = 0
-    latencies_ms: list = field(default_factory=list)
+if config.OTEL_GCP_EXPORT and config.GCP_PROJECT_ID:
+    from opentelemetry.exporter.cloud_monitoring import CloudMonitoringMetricsExporter
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 
-    def snapshot(self) -> dict:
-        """Return a JSON-serializable snapshot of all metrics."""
-        latencies = sorted(self.latencies_ms) if self.latencies_ms else []
-        n = len(latencies)
+    _readers.append(
+        PeriodicExportingMetricReader(
+            CloudMonitoringMetricsExporter(project_id=config.GCP_PROJECT_ID),
+            export_interval_millis=60_000,
+        )
+    )
 
-        def percentile(p: float) -> float:
-            if not latencies:
-                return 0.0
-            idx = int(p / 100 * n)
-            return latencies[min(idx, n - 1)]
+otel_metrics_api.set_meter_provider(MeterProvider(metric_readers=_readers))
+_meter = otel_metrics_api.get_meter("rag_capstone")
 
-        return {
-            "requests_total": dict(self.requests_total),
-            "groundedness_verdicts": dict(self.groundedness_verdicts),
-            "errors_total": dict(self.errors_total),
-            "retrieval_empty_count": self.retrieval_empty_count,
-            "agent_retry_total": self.agent_retry_total,
-            "latency_ms": {
-                "count": n,
-                "p50": percentile(50),
-                "p95": percentile(95),
-                "p99": percentile(99),
-            },
-        }
-
-
-_metrics = _Metrics()
+_requests_total = _meter.create_counter(
+    "rag_requests_total", description="Requests per endpoint."
+)
+_groundedness_verdicts = _meter.create_counter(
+    "rag_groundedness_verdicts_total", description="Groundedness verdicts returned."
+)
+_errors_total = _meter.create_counter(
+    "rag_errors_total", description="Errors per endpoint."
+)
+_latency_histogram = _meter.create_histogram(
+    "rag_request_latency_ms", unit="ms", description="Request latency."
+)
+_retrieval_empty_total = _meter.create_counter(
+    "rag_retrieval_empty_total", description="Requests where retrieval returned no chunks."
+)
+_agent_retry_total = _meter.create_counter(
+    "rag_agent_retry_total", description="Agentic loop retries."
+)
 
 
-# --- Public API (thread-safe) ------------------------------------------------
+# --- Public API ---------------------------------------------------------
 
 def record_request(endpoint: str) -> None:
-    with _lock:
-        _metrics.requests_total[endpoint] += 1
+    _requests_total.add(1, {"endpoint": endpoint})
 
 
 def record_groundedness(verdict: str) -> None:
-    with _lock:
-        _metrics.groundedness_verdicts[verdict] += 1
+    _groundedness_verdicts.add(1, {"verdict": verdict})
 
 
 def record_error(endpoint: str) -> None:
-    with _lock:
-        _metrics.errors_total[endpoint] += 1
+    _errors_total.add(1, {"endpoint": endpoint})
 
 
 def record_latency(latency_ms: int) -> None:
-    with _lock:
-        _metrics.latencies_ms.append(latency_ms)
-        # Cap stored latencies to prevent unbounded memory growth.
-        if len(_metrics.latencies_ms) > 10_000:
-            _metrics.latencies_ms = _metrics.latencies_ms[-5_000:]
+    _latency_histogram.record(latency_ms)
 
 
 def record_empty_retrieval() -> None:
-    with _lock:
-        _metrics.retrieval_empty_count += 1
+    _retrieval_empty_total.add(1)
 
 
 def record_agent_retry() -> None:
-    with _lock:
-        _metrics.agent_retry_total += 1
-
-
-def get_snapshot() -> dict:
-    with _lock:
-        return _metrics.snapshot()
+    _agent_retry_total.add(1)

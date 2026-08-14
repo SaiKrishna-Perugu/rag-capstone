@@ -5,11 +5,10 @@ def test_ingest_process():
     """Verify ingest module imports and has the expected interface."""
     from app import ingest
 
-    with patch("app.ingest.database"):
-        with patch("app.ingest._load_manifest") as mock_manifest:
-            mock_manifest.return_value = {}
-            # We aren't doing a full integration test here, just checking it imports
-            assert hasattr(ingest, "run")
+    with patch("app.ingest.database") as mock_database:
+        mock_database.get_manifest.return_value = {}
+        # We aren't doing a full integration test here, just checking it imports
+        assert hasattr(ingest, "run")
 
 
 def test_ingest_chunk_documents():

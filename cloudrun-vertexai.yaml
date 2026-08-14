@@ -11,6 +11,8 @@ spec:
         autoscaling.knative.dev/minScale: '0'
         autoscaling.knative.dev/maxScale: '5'
         run.googleapis.com/startup-cpu-boost: 'true'
+        # Cloud SQL Auth Proxy sidecar (auto-manages secure connections)
+        run.googleapis.com/cloudsql-instances: YOUR_PROJECT_ID:us-central1:rag-capstone-db
     spec:
       containerConcurrency: 10
       timeoutSeconds: 300
@@ -35,10 +37,23 @@ spec:
         env:
         - name: MODEL_PROVIDER
           value: 'vertexai'
+        # Required by app/config.py for MODEL_PROVIDER=vertexai, and also
+        # by Firestore (conversation memory, app/memory.py) and the Cloud
+        # Monitoring metrics export below.
+        - name: GCP_PROJECT_ID
+          value: 'YOUR_PROJECT_ID'
         - name: GCP_LOCATION
           value: 'us-central1'
         - name: LANGSMITH_TRACING
           value: 'false'
+        - name: OTEL_GCP_EXPORT
+          value: 'true'
+        # text-embedding-005 is 768-dim, vs. FastEmbed/Groq's 384 -- this
+        # sets the VECTOR(N) column width on first schema creation (see
+        # app/database.py init_db()); must be set before the first ingest
+        # against a fresh database.
+        - name: EMBEDDING_DIMENSION
+          value: '768'
         - name: API_KEY
           valueFrom:
             secretKeyRef:
@@ -48,4 +63,9 @@ spec:
           valueFrom:
             secretKeyRef:
               name: groq_api_key
+              key: 'latest'
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database_url
               key: 'latest'

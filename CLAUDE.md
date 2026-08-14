@@ -120,10 +120,14 @@ be called with the same question to compare behavior.
   functions (cache) follow the fail-open pattern used elsewhere in the app.
 - `ingest.py` — load → chunk → embed → persist to PostgreSQL + pgvector
   (via `database.py`); content-hash based incremental re-ingestion tracked
-  in `chroma_db/ingest_manifest.json` (unchanged files skipped, changed
-  files' old chunks replaced, one bad file is recorded/skipped rather than
-  failing the whole batch). `CHROMA_DIR` is kept only for this manifest
-  path — deprecated for its original purpose (the vector data itself).
+  in the `ingest_manifest` table (unchanged files skipped, changed files'
+  old chunks replaced, one bad file is recorded/skipped rather than
+  failing the whole batch). The manifest lives in Postgres, not a local
+  file — deliberately, so it can't desync from whichever database
+  `DATABASE_URL` currently points at (see `database.py`'s module
+  docstring). Manifest entries are written per-file, immediately after
+  that file's chunks are upserted, so an interrupted run doesn't lose
+  progress.
 - `retrieval.py` — hybrid retrieval + LLM reranking (see module docstring
   for why an LLM reranker was chosen over a cross-encoder here).
 - `rag.py` — single-pass retrieve/generate/groundedness-check, used by both
@@ -131,13 +135,27 @@ be called with the same question to compare behavior.
 - `agent.py` — the self-correcting LangGraph loop described above; every
   node is wrapped with `@traceable` for LangSmith tracing (off by default,
   `LANGSMITH_TRACING=false` in `.env`).
-- `memory.py` — per-session conversation history + query contextualization.
+- `memory.py` — per-session conversation history + query contextualization,
+  backed by Firestore (one document per `session_id`, capped at 5 turns,
+  `expires_at` field for Firestore's native TTL -- the policy itself is a
+  one-time `gcloud firestore fields ttls update` call, not something the
+  code sets). Fails open: with no `GCP_PROJECT_ID` and no
+  `FIRESTORE_EMULATOR_HOST`, or on any Firestore error, behaves as if
+  there's no history rather than raising -- same posture as `cache.py`.
 - `cache.py` — semantic cache (embedding-similarity match, not exact-string)
   for repeated/similar questions.
 - `streaming.py` — SSE streaming for `/ask-stream`.
 - `middleware.py` — API key auth (`APIKeyMiddleware`; auth is disabled when
   `API_KEY` is unset), CORS, rate limiting (slowapi).
-- `metrics.py` — in-memory Prometheus-style counters exposed at `/metrics`.
+- `metrics.py` — real OpenTelemetry instruments (Counter/Histogram), not a
+  hand-rolled dataclass. `GET /metrics` always serves Prometheus
+  exposition format (`prometheus_client.generate_latest()`, no separate
+  HTTP server) with zero GCP config; setting `OTEL_GCP_EXPORT=true` (needs
+  `GCP_PROJECT_ID`) additionally pushes to Cloud Monitoring every 60s via
+  `opentelemetry-exporter-gcp-monitoring` (pre-1.0/alpha, deprecated
+  upstream in favor of native OTLP — noted as accepted debt in the module
+  docstring). `record_*()` function signatures are unchanged from the old
+  implementation, so call sites in `main.py` didn't need to change.
 - `main.py` — FastAPI app/routes; every `/ask*` request is logged as one
   structured JSON line to `logs/requests.log` (question, sources,
   groundedness, retries, latency) — this is the primary observability

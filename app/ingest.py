@@ -11,8 +11,11 @@ Covers three JD requirements directly:
   - "freshness pipelines" -- incremental re-ingestion via content hashing:
     unchanged files are skipped entirely (no re-embedding cost), changed
     files have their old chunks deleted and replaced, new files are added.
-    A manifest (chroma_db/ingest_manifest.json) tracks per-file hash and
-    last-ingested timestamp.
+    A manifest (the `ingest_manifest` table, see app/database.py) tracks
+    per-file hash and last-ingested timestamp -- it lives in the same
+    database as the chunks it describes, not a local file, so it can't
+    silently desync from whichever database DATABASE_URL currently points
+    at (e.g. a fresh Cloud SQL instance).
 
 This is deliberately separate from the API. In a real system you'd run
 ingestion as its own job (triggered on document upload, on a schedule,
@@ -20,10 +23,8 @@ or via a CLI) rather than inside the request path of a chat endpoint.
 """
 import glob
 import hashlib
-import json
 import os
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 from langchain_community.document_loaders import (
@@ -50,9 +51,6 @@ LOADER_BY_EXTENSION = {
     ".docx": Docx2txtLoader,
 }
 
-MANIFEST_FILENAME = "ingest_manifest.json"
-
-
 def _discover_files(docs_dir: str) -> list:
     """Find every file under docs_dir whose extension we have a loader for."""
     files = []
@@ -76,23 +74,6 @@ def _file_hash(path: str) -> str:
         for block in iter(lambda: f.read(65536), b""):
             h.update(block)
     return h.hexdigest()
-
-
-def _manifest_path() -> Path:
-    return Path(config.CHROMA_DIR) / MANIFEST_FILENAME
-
-
-def _load_manifest() -> dict:
-    path = _manifest_path()
-    if path.exists():
-        return json.loads(path.read_text())
-    return {}
-
-
-def _save_manifest(manifest: dict) -> None:
-    path = _manifest_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2))
 
 
 def chunk_documents(documents: list) -> list:
@@ -134,7 +115,7 @@ def run(force: bool = False) -> dict:
     # is a fast no-op on an already-initialised database.
     database.init_db()
 
-    manifest = _load_manifest()
+    manifest = database.get_manifest()
     embeddings = get_embeddings()
 
     summary = {"added": [], "updated": [], "skipped_unchanged": [], "failed": []}
@@ -187,11 +168,11 @@ def run(force: bool = False) -> dict:
             metadatas=metadatas,
         )
 
-        manifest[path] = {
-            "hash": current_hash,
-            "last_ingested": datetime.now(UTC).isoformat(),
-            "num_chunks": len(chunks),
-        }
+        # Written immediately, not batched until the end of the run, so
+        # an interrupted run (killed mid-batch, crashed on a later file)
+        # doesn't lose progress already committed to the chunks table --
+        # a restart re-checks only files that never got a manifest entry.
+        database.upsert_manifest_entry(path, current_hash, len(chunks))
         (summary["updated"] if is_changed else summary["added"]).append(path)
 
     # Manifest entries for files that no longer exist on disk are left in
@@ -200,7 +181,6 @@ def run(force: bool = False) -> dict:
     # on purpose?) and silently deleting embeddings on a glob miss is a
     # worse failure mode than a stale manifest entry. Handle removals
     # explicitly if you need that -- see README.
-    _save_manifest(manifest)
     return summary
 
 

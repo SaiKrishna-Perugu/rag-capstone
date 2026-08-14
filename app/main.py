@@ -14,9 +14,10 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -48,10 +49,17 @@ async def lifespan(app: FastAPI):
     # Initialise database schema (idempotent — safe on every cold start)
     database.init_db()
 
-    docs_dir = Path(config.DOCS_DIR)
-    if docs_dir.exists():
-        for file_path in docs_dir.iterdir():
-            if file_path.is_file() and not file_path.name.startswith("sample_"):
+    # Only clear the dedicated uploads/ subdirectory, not all of docs_dir --
+    # docs_dir also holds permanent, non-upload content (sample_* corpus
+    # files, project reference docs like PRODUCTION_READINESS_PLAN.md).
+    # Everything under uploads/ is, by construction, something /upload
+    # wrote, so it's always safe to clear here: the vectors it produced
+    # already live in the shared Postgres store, so deleting the local
+    # raw file doesn't lose data, it just resets the per-instance disk.
+    uploads_dir = Path(config.DOCS_DIR) / "uploads"
+    if uploads_dir.exists():
+        for file_path in uploads_dir.iterdir():
+            if file_path.is_file():
                 try:
                     file_path.unlink()
                     logger.info(f"Deleted uploaded file on startup: {file_path.name}")
@@ -153,15 +161,16 @@ def serve_ui():
 
 
 @app.get("/metrics")
-def get_metrics() -> dict:
-    """Returns in-memory Prometheus-style metrics as JSON."""
-    return metrics.get_snapshot()
+def get_metrics() -> Response:
+    """Prometheus text exposition format (was JSON prior to the
+    OpenTelemetry migration -- see app/metrics.py)."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/upload")
 @limiter.limit(config.RATE_LIMIT)
 async def upload_files(request: Request, files: list[UploadFile] = File(...)):
-    """Accepts multiple files, saves them to the docs/ directory, and triggers ingestion."""
+    """Accepts multiple files, saves them to docs/uploads/, and triggers ingestion."""
     request_id = str(uuid.uuid4())
     if not config.ENABLE_UPLOADS:
         raise HTTPException(
@@ -170,8 +179,13 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         )
 
     metrics.record_request("upload")
-    docs_dir = Path(config.DOCS_DIR)
-    docs_dir.mkdir(exist_ok=True)
+    # Uploads go in their own subdirectory, not directly in docs_dir --
+    # keeps them separable from permanent/reference content also living
+    # under docs_dir, so the startup cleanup above can safely clear only
+    # this subdirectory. ingest.py discovers files recursively, so this
+    # doesn't change what gets indexed.
+    docs_dir = Path(config.DOCS_DIR) / "uploads"
+    docs_dir.mkdir(parents=True, exist_ok=True)
     
     saved_files = []
 

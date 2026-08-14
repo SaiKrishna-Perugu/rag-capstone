@@ -48,6 +48,14 @@ spec:
         # Standard configs
         - name: MODEL_PROVIDER
           value: "groq"
+        # Needed even on the Groq path now -- Firestore (conversation
+        # memory, app/memory.py) and the Cloud Monitoring metrics export
+        # both require a project ID regardless of which LLM provider is
+        # in use.
+        - name: GCP_PROJECT_ID
+          value: "YOUR_PROJECT_ID"
+        - name: OTEL_GCP_EXPORT
+          value: "true"
         
         # Readiness/Liveness Probes for zero-downtime rollouts
         livenessProbe:
