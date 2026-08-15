@@ -540,6 +540,15 @@ gcloud iam service-accounts add-iam-policy-binding rag-capstone-sa@${PROJECT_ID}
 gcloud iam service-accounts add-iam-policy-binding ${PROJECT_NUMBER}-compute@developer.gserviceaccount.com \
   --project=$PROJECT_ID --role="roles/iam.serviceAccountUser" \
   --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+# With the build itself now actually running, `gcloud builds submit` still
+# errored -- this time only failing to *stream back the build's logs*
+# (confirmed the underlying build reached SUCCESS via `gcloud builds
+# describe` regardless). Streaming/polling needs Cloud Logging read
+# access; --suppress-logs does NOT fix this since completion-polling uses
+# the same read path as log printing, just logging.viewer does.
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/logging.viewer"
 
 # Staging environment: same Cloud SQL instance, a separate database within
 # it (not a second instance -- cheaper, still keeps staging traffic and

@@ -58,15 +58,18 @@ jobs:
       # impersonated, and the fresh bucket avoids the legacy-ACL default
       # bucket regardless of identity.
       #
-      # --suppress-logs: confirmed via a real run that the build itself
-      # succeeds server-side (`gcloud builds describe` showed SUCCESS) --
-      # the CLI was only failing to *stream* the build's logs back, which
-      # needs a Viewer/Owner-level role rag-capstone-sa intentionally
-      # doesn't have (least-privilege CI identity). This still runs
-      # synchronously and fails the step on a real build failure -- it
-      # just doesn't try to tail logs it isn't allowed to read.
+      # Confirmed via a real run that the build itself succeeds
+      # server-side (`gcloud builds describe` showed SUCCESS) even when
+      # the CLI errors out -- it was failing to *stream* the build's logs
+      # back (needs Cloud Logging read access), not to actually build.
+      # Tried --suppress-logs first, but that only suppresses printing --
+      # completion polling still depends on the same read access, so it
+      # failed identically. rag-capstone-sa now has roles/logging.viewer
+      # (see README) so this streams and polls for real, which also means
+      # a genuine Docker/build failure shows real logs here instead of a
+      # misleading permission error.
       - name: Build and push image via Cloud Build
-        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --billing-project=${{ vars.GCP_PROJECT_ID }} --suppress-logs
+        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --billing-project=${{ vars.GCP_PROJECT_ID }}
 
   deploy-staging:
     needs: build-and-push
