@@ -1,0 +1,81 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: rag-capstone-staging
+  labels:
+    cloud.googleapis.com/location: us-central1
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        autoscaling.knative.dev/targetBurstCapacity: "100"
+        # Same Cloud SQL instance as production -- staging uses a separate
+        # DATABASE within it (ragdb_staging), not a second instance.
+        run.googleapis.com/cloudsql-instances: YOUR_PROJECT_ID:us-central1:rag-capstone-db
+    spec:
+      containerConcurrency: 80
+      # Vertex AI (gemini-2.5-flash) is materially slower per call than
+      # Groq, and /ask makes three LLM calls in sequence (rerank, generate,
+      # groundedness check). Measured ~8s warm, ~30s on a cold start, so
+      # the default 300s request timeout has ample headroom.
+      timeoutSeconds: 300
+      serviceAccountName: rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com
+      containers:
+      - image: us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
+        ports:
+        - name: http1
+          containerPort: 8080
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: rag_api_key
+              key: "latest"
+        # Points at ragdb_staging, not the production database -- keeps
+        # staging traffic and smoke-test uploads out of production data.
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database_url_staging
+              key: "latest"
+        - name: MODEL_PROVIDER
+          value: "vertexai"
+        - name: GCP_PROJECT_ID
+          value: "YOUR_PROJECT_ID"
+        - name: GCP_LOCATION
+          value: "us-central1"
+        # text-embedding-005 is 768-dim vs FastEmbed's 384. app/config.py
+        # now derives this from MODEL_PROVIDER, so it is set here only to
+        # make the deployed value explicit and reviewable.
+        - name: EMBEDDING_DIMENSION
+          value: "768"
+        - name: OTEL_GCP_EXPORT
+          value: "true"
+        # Separate queue from production's ingest-queue so a staging
+        # deploy's async ingestion jobs can never target the wrong service.
+        # Firestore IS shared with production -- Firestore Native is one
+        # database per project by default; documented, not hidden.
+        - name: CLOUD_TASKS_QUEUE
+          value: "ingest-queue-staging"
+        # Cloud Run doesn't know its own URL until after first deploy; set
+        # post-deploy via `gcloud run services update --update-env-vars`.
+        # A later `services replace` resets it to this placeholder, so
+        # re-run that update afterward.
+        - name: INGEST_TARGET_URL
+          value: "https://REPLACE-WITH-STAGING-SERVICE-URL.run.app"
+
+        livenessProbe:
+          httpGet:
+            path: /health
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /ready
+          periodSeconds: 15

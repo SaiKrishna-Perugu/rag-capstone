@@ -84,7 +84,15 @@ DOCS_DIR = os.getenv("DOCS_DIR", "docs")
 DATABASE_URL = _get_secret("DATABASE_URL", "")
 DATABASE_POOL_MIN = int(os.getenv("DATABASE_POOL_MIN", "2"))
 DATABASE_POOL_MAX = int(os.getenv("DATABASE_POOL_MAX", "10"))
-EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "384"))
+# Defaults to whatever the selected provider actually produces: Vertex AI's
+# text-embedding-005 is 768-dim, FastEmbed's bge-small-en-v1.5 is 384. This
+# sets the VECTOR(N) column width at first schema creation (database.py
+# init_db()), and pgvector rejects a mismatched insert outright -- so
+# deriving it from MODEL_PROVIDER removes a silent footgun where switching
+# provider without also remembering this value builds a table that refuses
+# every write. Still overridable for a custom embedding model.
+_DEFAULT_EMBEDDING_DIMENSION = "768" if MODEL_PROVIDER == "vertexai" else "384"
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", _DEFAULT_EMBEDDING_DIMENSION))
 
 # --- Conversation memory (Firestore) ----------------------------------------
 # Firestore is optional -- app/memory.py fails open (no history) when

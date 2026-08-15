@@ -1,14 +1,32 @@
 name: Eval Gate
 
-# Separate from ci.yml deliberately: this job makes real Groq API calls
-# and needs a real secret, unlike ci.yml's fully-mocked test job -- a
+# Separate from ci.yml deliberately: this job makes real LLM API calls and
+# needs real credentials, unlike ci.yml's fully-mocked test job -- a
 # different risk/cost profile that shouldn't block on or share history
 # with pure lint/unit-test runs.
+#
+# Runs on Vertex AI rather than Groq. Groq's free tier is 100,000 tokens
+# per DAY across the whole account, shared with local development; a full
+# RAGAS pass (8 questions x 4 LLM-judged metrics, each re-reading the
+# retrieved context) is expensive enough that a few pushes exhausted it
+# and the gate failed with a 429 having scored nothing. Vertex AI bills
+# per token against project credits instead of rationing per day, so the
+# gate's result reflects retrieval quality rather than how much quota
+# happened to be left.
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  # Also on push to main, since this repo is developed by pushing directly
+  # to main rather than through PRs -- a PR-only trigger would mean the
+  # gate almost never runs.
+  push:
+    branches: [ "main" ]
+  # Lets a failed run be retried without an empty commit.
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for Workload Identity Federation
+  contents: read
 
 jobs:
   eval-gate:
@@ -31,10 +49,27 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:dev@localhost:5432/ragdb
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      MODEL_PROVIDER: vertexai
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_LOCATION: us-central1
+      # text-embedding-005 is 768-dim vs FastEmbed's 384. This sets the
+      # VECTOR(N) column width when init_db() first creates the schema,
+      # and pgvector rejects a mismatched insert outright -- so it has to
+      # be right BEFORE the ingest step below, not after.
+      EMBEDDING_DIMENSION: "768"
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Same keyless WIF auth as cd.yml, impersonating rag-capstone-sa --
+      # which holds roles/aiplatform.user. Without service_account this
+      # would authenticate as the bare federated principal, which has no
+      # Vertex permissions (see cd.yml's comment for that whole saga).
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: rag-capstone-sa@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
@@ -62,3 +97,13 @@ jobs:
 
       - name: Check eval thresholds
         run: uv run python scripts/check_thresholds.py ragas_results.json
+
+      # Keeps the scores from a failed gate inspectable without re-running
+      # (and re-paying for) the whole eval.
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ragas-results
+          path: ragas_results.json
+          if-no-files-found: ignore

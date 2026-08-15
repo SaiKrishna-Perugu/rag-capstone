@@ -16,7 +16,13 @@ spec:
     spec:
       containerConcurrency: 10
       timeoutSeconds: 300
-      serviceAccountName: compute@developer.gserviceaccount.com
+      # Must be rag-capstone-sa, NOT the default compute service account:
+      # rag-capstone-sa is the identity holding secretmanager.secretAccessor
+      # on the secrets mounted below, cloudsql.client for the Auth Proxy
+      # sidecar, datastore.user for Firestore, and aiplatform.user for the
+      # Vertex AI calls this config exists to make. Deploying as the compute
+      # default SA fails at startup on secret access.
+      serviceAccountName: rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com
       containers:
       - image: us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
         ports:
