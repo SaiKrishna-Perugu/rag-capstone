@@ -173,16 +173,24 @@ def run_ragas_eval() -> dict:
         LLMContextRecall(llm=llm),
     ]
 
-    # Groq's free tier doesn't tolerate RAGAS's default 16-way concurrency
-    # well -- confirmed via a live run that produced widespread timeouts.
-    # A lower worker count trades wall-clock time for reliability; RAGAS's
-    # own default raise_exceptions=False already degrades any remaining
-    # per-job failures to NaN rather than crashing the whole run.
+    # max_workers is held low because RAGAS's default 16-way concurrency
+    # overwhelms rate limits; the wall-clock cost is worth the reliability.
+    #
+    # timeout=300 (was 90): RAGAS degrades a timed-out job to NaN rather
+    # than failing loudly, and check_thresholds.py correctly treats NaN as
+    # a failure -- so a too-short timeout looks exactly like a quality
+    # collapse. That is what happened on the first Vertex run:
+    # context_precision came back NaN with every one of its jobs logging
+    # TimeoutError, while faithfulness and context_recall both scored 1.0.
+    # LLMContextPrecisionWithoutReference is the most timeout-prone metric
+    # here because it makes one LLM call per retrieved context (TOP_K=4),
+    # so its jobs do roughly 4x the work of the others within the same
+    # per-job budget.
     result = evaluate(
         dataset=dataset,
         metrics=metrics,
         show_progress=False,
-        run_config=RunConfig(max_workers=3, timeout=90),
+        run_config=RunConfig(max_workers=3, timeout=300),
     )
     return result
 
