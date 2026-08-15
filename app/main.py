@@ -58,8 +58,8 @@ async def lifespan(app: FastAPI):
     database.init_db()
 
     # Only clear the dedicated uploads/ subdirectory, not all of docs_dir --
-    # docs_dir also holds permanent, non-upload content (sample_* corpus
-    # files, project reference docs like PRODUCTION_READINESS_PLAN.md).
+    # docs_dir also holds permanent, non-upload content (the sample_*
+    # corpus files that ship with the repo).
     # Everything under uploads/ is, by construction, something /upload
     # wrote, so it's always safe to clear here: the vectors it produced
     # already live in the shared Postgres store, so deleting the local

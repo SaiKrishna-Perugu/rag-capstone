@@ -766,9 +766,7 @@ real and working, not stubbed — but scoped down from a production system:
 
 **Explicitly deferred:** every item previously listed here (async
 ingestion, external session state, the vector store migration, the eval
-gate + CD pipeline) is now implemented -- see
-`docs/PRODUCTION_READINESS_PLAN.md` for what's next (real authentication,
-circuit breaker/provider failover, security hardening, cost tracking,
-load testing); it also has an honest read on which of those are actually
-worth building for a portfolio project versus just being able to describe
-correctly in an interview.
+gate + CD pipeline) is now implemented. Still deferred: real
+authentication (per-user identity rather than one shared `API_KEY`),
+circuit breaker / provider failover, security hardening, cost tracking,
+and load testing.

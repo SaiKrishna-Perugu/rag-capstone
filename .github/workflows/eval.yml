@@ -49,11 +49,11 @@ jobs:
 
       # Ingests this repo's own docs/ into the ephemeral Postgres above --
       # eval_ragas.py's EVAL_SET is written against exactly those files.
-      # Note: docs/ also contains tracked non-eval-relevant files
-      # (PRODUCTION_READINESS_PLAN.md, postgres_migration_changelog.md)
-      # that get ingested too -- pre-existing app.ingest behavior, not
-      # something this workflow special-cases. If retrieval quality shifts
-      # unexpectedly after adding a new docs/ file, this is why.
+      # docs/ is the sample corpus and nothing else: project documentation
+      # lives outside it (see .gitignore's notes/ entry), because
+      # app.ingest globs docs/ recursively and anything dropped there
+      # becomes retrievable content that competes with the real answers.
+      # If retrieval quality shifts unexpectedly, a new docs/ file is why.
       - name: Build the eval corpus
         run: uv run python -m app.ingest
 

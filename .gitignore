@@ -1,8 +1,6 @@
 # Python environments
 venv/
 .venv/
-testenv/
-testenv2/
 
 # Python cache & artifacts
 __pycache__/
@@ -21,11 +19,12 @@ htmlcov/
 .env
 .env.*
 !.env.example
-Cloud Deployment context.txt
 
-# Vector store (rebuilt by uv run python -m app.ingest)
-chroma_db/
-!chroma_db/.gitkeep
+# Working notes, design docs, scratch writing. Deliberately OUTSIDE docs/:
+# app/ingest.py globs docs/ recursively, so anything left there becomes
+# retrievable RAG content. docs/ is the sample corpus the demo answers
+# from, not a place for project documentation.
+notes/
 
 # FastEmbed model cache (baked into the Docker image at build time instead --
 # see Dockerfile; this is just the local dev equivalent)
