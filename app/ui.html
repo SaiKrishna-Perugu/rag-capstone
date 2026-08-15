@@ -374,8 +374,26 @@
     <div class="container">
         <header>
             <h1>Agentic RAG Explorer</h1>
-            <p class="subtitle">Ask questions over your local document base. Powered by Llama 3 & LangGraph.</p>
+            <p class="subtitle">Ask questions over your local document base. Powered by Gemini &amp; LangGraph.</p>
         </header>
+
+        <!-- Every endpoint except /health and /ready sits behind
+             APIKeyMiddleware when the deployment sets API_KEY, so the UI has
+             to send X-API-Key or every call returns 401. Kept in
+             localStorage rather than baked into the page: this file is
+             served publicly, so an embedded key would be readable by anyone
+             who opened it. Hidden automatically when auth is disabled. -->
+        <div class="apikey-section" id="apikey-section" style="display:none; margin-bottom:16px;">
+            <input type="password" id="apikey-input" placeholder="API key (required by this deployment)"
+                   autocomplete="off" oninput="saveApiKey(this.value)"
+                   style="width:100%; padding:10px 14px; border-radius:8px;
+                          border:1px solid rgba(255,255,255,0.12);
+                          background:rgba(255,255,255,0.04); color:inherit;
+                          font-size:0.9rem;">
+            <div id="apikey-hint" style="font-size:0.78rem; color:var(--text-muted); margin-top:6px;">
+                Stored only in this browser. Needed for asking questions and uploading.
+            </div>
+        </div>
 
         <div class="upload-section" id="upload-section">
             <input type="file" id="file-input" onchange="handleFileUpload(event)">
@@ -448,10 +466,42 @@
         const resultsContainer = document.getElementById('results-container');
         const errorMsg = document.getElementById('error-message');
 
+        // --- API key handling -------------------------------------------
+        // The key is a per-browser value, never shipped with the page.
+        function getApiKey() {
+            return localStorage.getItem('rag_api_key') || '';
+        }
+        function saveApiKey(v) {
+            localStorage.setItem('rag_api_key', v.trim());
+        }
+        // Merge auth into any fetch's headers. Omitting the header entirely
+        // when no key is set matters: sending an empty X-API-Key is a
+        // *failed* auth attempt, while sending nothing is indistinguishable
+        // from an unauthenticated call to a service that has auth disabled.
+        function authHeaders(extra) {
+            const h = Object.assign({}, extra || {});
+            const key = getApiKey();
+            if (key) h['X-API-Key'] = key;
+            return h;
+        }
+
         // Fetch runtime configuration to dynamically configure UI
         async function initApp() {
             try {
-                const res = await fetch('/config');
+                const res = await fetch('/config', { headers: authHeaders() });
+                // 401 here means this deployment requires a key and we don't
+                // have a valid one yet -- reveal the input rather than
+                // failing silently later on the first question or upload.
+                if (res.status === 401) {
+                    const sec = document.getElementById('apikey-section');
+                    if (sec) sec.style.display = 'block';
+                    const hint = document.getElementById('apikey-hint');
+                    if (hint && getApiKey()) {
+                        hint.textContent = 'That key was rejected. Check it and try again.';
+                        hint.style.color = '#ff6b6b';
+                    }
+                    return;
+                }
                 if (res.ok) {
                     const cfg = await res.json();
                     if (!cfg.enable_uploads) {
@@ -511,7 +561,7 @@
 
                 const response = await fetch('/ask-stream', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({ question: question, check_hallucination: true, session_id: sessionId })
                 });
 
@@ -633,7 +683,7 @@
         async function pollJobStatus(jobId, intervalMs = 2000, timeoutMs = 120000) {
             const start = Date.now();
             while (Date.now() - start < timeoutMs) {
-                const response = await fetch(`/jobs/${jobId}`);
+                const response = await fetch(`/jobs/${jobId}`, { headers: authHeaders() });
                 if (!response.ok) {
                     const errText = await response.text();
                     throw new Error(errText || `Server returned ${response.status}`);
@@ -668,8 +718,11 @@
             try {
                 // /upload returns almost immediately with a job_id -- the
                 // actual ingestion happens afterward (see app/jobs.py).
+                // No Content-Type here on purpose: the browser must set it
+                // itself so the multipart boundary is generated correctly.
                 const response = await fetch('/upload', {
                     method: 'POST',
+                    headers: authHeaders(),
                     body: formData
                 });
 

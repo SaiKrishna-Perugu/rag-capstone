@@ -17,8 +17,18 @@ CREATE TABLE IF NOT EXISTS chunks (
     ingested_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+-- HNSW, not IVFFLAT. IVFFLAT clusters existing rows into `lists` centroids
+-- at BUILD time, and init_db() runs before anything is ingested -- so the
+-- index was always built on an empty table, leaving degenerate centroids.
+-- With the default ivfflat.probes=1 a query then scans a single nearly-empty
+-- list: measured directly, a 12-candidate request against a 30-row table
+-- returned 2 rows, silently starving the vector half of hybrid retrieval and
+-- making answers depend on whether full-text search alone happened to hit.
+-- HNSW builds an incrementally-maintained graph with no training step, so
+-- creating it before the data exists is fine -- which is exactly what this
+-- idempotent create-on-startup schema does.
+DROP INDEX IF EXISTS idx_chunks_embedding;
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING gin (content_tsv);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_source_hash ON chunks (source, content_hash);
 
@@ -32,8 +42,11 @@ CREATE TABLE IF NOT EXISTS semantic_cache (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_cache_embedding ON semantic_cache USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+-- Same reasoning as idx_chunks_embedding_hnsw above. It matters more here
+-- if anything: the cache starts empty by definition, so an IVFFLAT index
+-- over it was guaranteed to be built with no rows to cluster.
+DROP INDEX IF EXISTS idx_cache_embedding;
+CREATE INDEX IF NOT EXISTS idx_cache_embedding_hnsw ON semantic_cache USING hnsw (embedding vector_cosine_ops);
 
 -- Ingest manifest: per-file content hash + last-ingested timestamp, used
 -- for incremental re-ingestion (skip unchanged files). Lives here rather
