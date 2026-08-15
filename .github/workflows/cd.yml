@@ -57,8 +57,16 @@ jobs:
       # above) -- harmless now that rag-capstone-sa is genuinely
       # impersonated, and the fresh bucket avoids the legacy-ACL default
       # bucket regardless of identity.
+      #
+      # --suppress-logs: confirmed via a real run that the build itself
+      # succeeds server-side (`gcloud builds describe` showed SUCCESS) --
+      # the CLI was only failing to *stream* the build's logs back, which
+      # needs a Viewer/Owner-level role rag-capstone-sa intentionally
+      # doesn't have (least-privilege CI identity). This still runs
+      # synchronously and fails the step on a real build failure -- it
+      # just doesn't try to tail logs it isn't allowed to read.
       - name: Build and push image via Cloud Build
-        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --billing-project=${{ vars.GCP_PROJECT_ID }}
+        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --billing-project=${{ vars.GCP_PROJECT_ID }} --suppress-logs
 
   deploy-staging:
     needs: build-and-push
