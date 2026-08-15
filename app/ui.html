@@ -466,6 +466,12 @@
         const resultsContainer = document.getElementById('results-container');
         const errorMsg = document.getElementById('error-message');
 
+        // Client-side mirror of the server's upload limits, overwritten by
+        // /config at load. These are a UX affordance only -- app/main.py
+        // enforces the real limits, since anything here is trivially
+        // bypassed by posting to /upload directly.
+        const UPLOAD_LIMITS = { files: 5, sizeMb: 50 };
+
         // --- API key handling -------------------------------------------
         // The key is a per-browser value, never shipped with the page.
         function getApiKey() {
@@ -511,6 +517,19 @@
                             uploadSection.style.borderStyle = 'solid';
                             uploadSection.style.borderColor = 'rgba(255,255,255,0.08)';
                             uploadSection.style.padding = '12px 20px';
+                        }
+                    } else {
+                        // Publish the server's limits so handleFileUpload can
+                        // reject an oversized selection instantly, and state
+                        // them on the label so nobody discovers them by
+                        // waiting for a failed upload.
+                        UPLOAD_LIMITS.files = cfg.max_upload_files || UPLOAD_LIMITS.files;
+                        UPLOAD_LIMITS.sizeMb = cfg.max_upload_size_mb || UPLOAD_LIMITS.sizeMb;
+                        const label = document.getElementById('upload-label');
+                        if (label) {
+                            label.textContent =
+                                `+ Upload documents (PDF, TXT, MD, CSV) — up to `
+                                + `${UPLOAD_LIMITS.files} files, ${UPLOAD_LIMITS.sizeMb}MB each`;
                         }
                     }
                 }
@@ -704,6 +723,29 @@
             const uploadLabel = document.getElementById('upload-label');
             const uploadStatus = document.getElementById('upload-status');
             const uploadError = document.getElementById('upload-error');
+
+            // Fail fast on limits the server would reject anyway, so the
+            // user isn't left waiting on an upload that cannot succeed.
+            const showLimitError = (msg) => {
+                uploadError.innerText = msg;
+                uploadError.style.display = 'block';
+                uploadStatus.style.display = 'none';
+                event.target.value = '';   // let them re-pick the same file
+            };
+            if (files.length > UPLOAD_LIMITS.files) {
+                showLimitError(
+                    `Too many files (${files.length}). Max ${UPLOAD_LIMITS.files} per upload.`);
+                return;
+            }
+            const maxBytes = UPLOAD_LIMITS.sizeMb * 1024 * 1024;
+            for (let i = 0; i < files.length; i++) {
+                if (files[i].size > maxBytes) {
+                    showLimitError(
+                        `"${files[i].name}" is ${(files[i].size / 1024 / 1024).toFixed(1)}MB. `
+                        + `Max ${UPLOAD_LIMITS.sizeMb}MB per file.`);
+                    return;
+                }
+            }
 
             uploadLabel.innerText = `Uploading ${files.length} document(s)...`;
             uploadStatus.style.display = 'none';

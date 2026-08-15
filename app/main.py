@@ -162,6 +162,11 @@ def get_ui_config() -> dict:
     return {
         "enable_uploads": config.ENABLE_UPLOADS,
         "model_provider": config.MODEL_PROVIDER,
+        # Surfaced so the UI can state the limits before someone picks a
+        # file, rather than letting them discover them via a 400/413 after
+        # waiting for an upload to fail.
+        "max_upload_files": config.MAX_UPLOAD_FILES,
+        "max_upload_size_mb": config.MAX_UPLOAD_SIZE_MB,
     }
 
 
@@ -193,6 +198,44 @@ async def upload_files(
             status_code=403,
             detail={"error": "Uploads are disabled in this environment.", "request_id": request_id},
         )
+
+    # Reject the whole batch up front rather than partway through the loop
+    # below, which would otherwise leave the first N files already written
+    # to disk and queued for ingestion.
+    if len(files) > config.MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Too many files ({len(files)}). "
+                    f"Max {config.MAX_UPLOAD_FILES} per upload."
+                ),
+                "request_id": request_id,
+            },
+        )
+
+    # Ceiling on the shared corpus, for deployments that accept uploads from
+    # anonymous visitors. Checked before writing anything; a full corpus is a
+    # refusal, not a partial ingest. Fails open on a database error -- the
+    # cap is abuse mitigation, not a correctness invariant, and a transient
+    # DB blip shouldn't reject a legitimate upload.
+    if config.MAX_CORPUS_CHUNKS > 0:
+        try:
+            current = database.get_chunk_count()
+        except Exception as e:
+            logger.warning(f"Corpus size check failed, allowing upload: {e}")
+            current = 0
+        if current >= config.MAX_CORPUS_CHUNKS:
+            raise HTTPException(
+                status_code=507,
+                detail={
+                    "error": (
+                        "The demo knowledge base is full "
+                        f"({current} chunks). Uploads are paused until it is reset."
+                    ),
+                    "request_id": request_id,
+                },
+            )
 
     metrics.record_request("upload")
     # Uploads go in their own subdirectory, not directly in docs_dir --

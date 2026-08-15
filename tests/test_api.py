@@ -45,6 +45,46 @@ def test_upload_endpoint_disabled(client, monkeypatch):
     assert response.status_code == 403
     assert "disabled" in response.json()["detail"]["error"].lower()
 
+
+def test_upload_rejects_too_many_files(client, monkeypatch):
+    """The batch is refused whole. The per-file size cap says nothing about
+    how many files arrive, so without this a single request could carry
+    hundreds of small ones into a publicly-writable demo corpus."""
+    monkeypatch.setattr(config, "MAX_UPLOAD_FILES", 2)
+    files = [("files", (f"doc{i}.txt", b"hello", "text/plain")) for i in range(3)]
+    response = client.post("/upload", files=files)
+    assert response.status_code == 400
+    assert "Too many files" in response.json()["detail"]["error"]
+
+
+def test_upload_rejects_when_corpus_full(client, monkeypatch):
+    """Refused before anything is written -- a full corpus must not produce
+    a partial ingest."""
+    monkeypatch.setattr(config, "MAX_CORPUS_CHUNKS", 10)
+    monkeypatch.setattr("app.main.database.get_chunk_count", lambda: 10)
+    files = {"files": ("test.txt", b"hello", "text/plain")}
+    response = client.post("/upload", files=files)
+    assert response.status_code == 507
+    assert "full" in response.json()["detail"]["error"].lower()
+
+
+def test_upload_corpus_check_fails_open(client, monkeypatch, tmp_path):
+    """A database blip must not reject a legitimate upload: the cap is abuse
+    mitigation, not a correctness invariant."""
+    monkeypatch.setattr(config, "MAX_CORPUS_CHUNKS", 10)
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "GCP_PROJECT_ID", "")
+
+    def _boom():
+        raise RuntimeError("database unreachable")
+
+    monkeypatch.setattr("app.main.database.get_chunk_count", _boom)
+    with patch("app.jobs.create_job", return_value="job-123"):
+        with patch("app.jobs.process_job"):
+            files = {"files": ("test.txt", b"hello", "text/plain")}
+            response = client.post("/upload", files=files)
+    assert response.status_code == 202
+
 def test_upload_endpoint_success_processes_in_background_without_gcp(client, monkeypatch, tmp_path):
     # No GCP_PROJECT_ID configured -- local/no-GCP path: the job is
     # processed via BackgroundTasks (process_job), not a real Cloud Task.

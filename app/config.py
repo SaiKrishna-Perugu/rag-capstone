@@ -133,6 +133,16 @@ CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
 RATE_LIMIT = os.getenv("RATE_LIMIT", "20/minute")
 ENABLE_UPLOADS = os.getenv("ENABLE_UPLOADS", "true").lower() == "true"
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+# Number of files accepted per /upload request. The per-file size cap
+# above says nothing about how MANY files arrive, so without this a single
+# request could carry hundreds of small ones.
+MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "5"))
+# Ceiling on total indexed chunks, enforced before accepting an upload.
+# 0 disables it. This exists because an openly-writable demo corpus grows
+# without bound, and corpus bloat is not merely a storage cost -- retrieval
+# quality degrades measurably as unrelated content crowds out the real
+# answers, and every ingested chunk costs an embedding call.
+MAX_CORPUS_CHUNKS = int(os.getenv("MAX_CORPUS_CHUNKS", "0"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
 
 # --- LLM Resilience -------------------------------------------------------
