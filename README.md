@@ -614,40 +614,38 @@ Then, in the GitHub repo itself (UI steps, not YAML):
    fact.
 
 **If using Vertex AI:** also enable `aiplatform.googleapis.com` in step 1
-(`gcloud services enable aiplatform.googleapis.com`). `cloudrun-vertexai.yaml`
-runs as the default compute service account (unlike `cloudrun-groq.yaml`,
-which runs as `rag-capstone-sa`), which needs `roles/aiplatform.user` for
-Vertex AI calls, plus the same Cloud SQL / Firestore / Cloud Monitoring /
-secret access that `rag-capstone-sa` was granted in step 6 above -- or
-requests will fail with a permissions error:
+(`gcloud services enable aiplatform.googleapis.com`), and grant the
+service account permission to call it:
 ```bash
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --member="serviceAccount:rag-capstone-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/aiplatform.user"
-for role in roles/cloudsql.client roles/datastore.user roles/monitoring.metricWriter roles/cloudtasks.enqueuer; do
-  gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-    --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
-    --role="$role"
-done
-for secret in rag_api_key database_url; do
-  gcloud secrets add-iam-policy-binding "$secret" \
-    --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
-    --role="roles/secretmanager.secretAccessor"
-done
 ```
-(Find `YOUR_PROJECT_NUMBER` via `gcloud projects describe YOUR_PROJECT_ID`.)
-Also set `EMBEDDING_DIMENSION=768` in that YAML's `env:` block if
-ingesting into a brand-new database (`text-embedding-005` is 768-dim vs.
-FastEmbed/Groq's 384 -- see "Switching to Vertex AI" above) -- already set
-in the checked-in `cloudrun-vertexai.yaml`, along with `GCP_PROJECT_ID`
-and `OTEL_GCP_EXPORT` (just replace `YOUR_PROJECT_ID` with the real value).
+That single grant is all that's needed: `cloudrun-vertexai.yaml` and
+`cloudrun-vertexai-staging.yaml` run as `rag-capstone-sa`, the same
+identity as the Groq configs, so they inherit the Cloud SQL / Firestore /
+Cloud Monitoring / Secret Manager access granted in step 6. (Earlier
+versions of `cloudrun-vertexai.yaml` ran as the default compute service
+account, which holds none of those grants and fails at startup on secret
+access -- fixed, but check the `serviceAccountName` if you're working
+from an older copy.)
 
-**The CD pipeline (`cd.yml`) targets the Groq path** (`cloudrun-groq.yaml`
-/ `cloudrun-groq-staging.yaml`) as built -- there's no
-`cloudrun-vertexai-staging.yaml` or Vertex AI branch in `cd.yml`. Adding
-one would follow the exact same pattern (a staging YAML + a second set of
-`deploy`/`smoke-test` steps); documented as the next step if you switch
-the deployed environment to Vertex AI, not built here.
+`EMBEDDING_DIMENSION` no longer needs setting by hand: `app/config.py`
+derives it from `MODEL_PROVIDER` (768 for Vertex AI's
+`text-embedding-005`, 384 for FastEmbed). The Vertex YAMLs still set it
+explicitly so the deployed value is visible in review. It fixes the
+`VECTOR(N)` column width at first schema creation and pgvector rejects
+mismatched inserts, so **switching an existing database between providers
+means dropping and recreating `chunks`/`semantic_cache`/`ingest_manifest`,
+not just re-ingesting** -- see "Switching model providers" above.
+
+**Both provider paths are deployable through `cd.yml`.** The pipeline
+deploys by image tag (`gcloud run deploy --image`), which updates only the
+container and preserves each service's existing env/secret configuration --
+so whichever provider a service was last configured with is what it keeps.
+The YAMLs are for the first deploy or a deliberate reconfiguration via
+`gcloud run services replace`; remember that `replace` applies the file
+verbatim and will reset `INGEST_TARGET_URL` to its placeholder.
 
 ## Project structure
 
