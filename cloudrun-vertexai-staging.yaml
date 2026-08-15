@@ -50,6 +50,13 @@ spec:
           value: "YOUR_PROJECT_ID"
         - name: GCP_LOCATION
           value: "us-central1"
+        # Pinned explicitly rather than relying on the config default, so
+        # the model actually serving traffic is visible in review. flash-lite
+        # is ~3x cheaper on input / ~6x on output than gemini-2.5-flash and
+        # ~2x faster; /ask makes three LLM calls per request, so the
+        # multiplier is real.
+        - name: VERTEX_CHAT_MODEL
+          value: "gemini-2.5-flash-lite"
         # text-embedding-005 is 768-dim vs FastEmbed's 384. app/config.py
         # now derives this from MODEL_PROVIDER, so it is set here only to
         # make the deployed value explicit and reviewable.
