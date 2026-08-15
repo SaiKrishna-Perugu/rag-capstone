@@ -48,9 +48,16 @@ jobs:
       # the bucket" even after being granted storage.objectAdmin,
       # serviceusage.serviceUsageConsumer, and storage.admin. A fresh
       # bucket (gcloud creates it automatically if it doesn't exist)
-      # defaults to modern IAM and just works.
+      # defaults to modern IAM -- but a fresh bucket alone didn't clear the
+      # error either, still under genuine WIF auth (an --impersonate-service-account
+      # test of the same fresh bucket had misleadingly passed -- impersonated
+      # user credentials carry an implicit quota project that a raw WIF
+      # external_account credential does not). --billing-project pins the
+      # project gcloud bills/attributes quota to explicitly, which is what
+      # the "serviceusage.services.use" permission check was actually
+      # missing under WIF.
       - name: Build and push image via Cloud Build
-        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source
+        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --billing-project=${{ vars.GCP_PROJECT_ID }}
 
   deploy-staging:
     needs: build-and-push
