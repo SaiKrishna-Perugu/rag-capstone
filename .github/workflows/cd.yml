@@ -19,6 +19,17 @@ permissions:
   id-token: write   # required for Workload Identity Federation
   contents: read
 
+# Without this, a run that is parked at the promote-production approval
+# gate stays alive indefinitely while newer commits land -- and approving
+# it later deploys ITS commit's image, silently rolling production
+# backwards. That happened for real: an older run was approved 43 seconds
+# after a newer one finished deploying, reverting production to a build
+# that predated a UI fix. Superseding runs on the same branch now cancel
+# the stale one, so the gate can only ever ship the newest thing.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE: us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/rag-repo/rag-capstone:${{ github.sha }}
   # google-github-actions/auth's `service_account` input is what actually
