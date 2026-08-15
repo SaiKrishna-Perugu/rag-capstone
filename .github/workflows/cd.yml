@@ -100,12 +100,21 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ env.SERVICE_ACCOUNT }}
 
+      # /health and /ready are in middleware.py's _PUBLIC_PATHS, but /ask is
+      # not -- staging mounts API_KEY from the rag_api_key secret, so an
+      # unauthenticated POST /ask returns 401, not an answer. Pull the same
+      # key from Secret Manager (rag-capstone-sa already has
+      # secretmanager.secretAccessor on it) and mask it so it can't leak
+      # into the workflow log.
       - name: Smoke test staging deployment
         run: |
           URL=$(gcloud run services describe rag-capstone-staging --region=us-central1 --format='value(status.url)')
+          API_KEY=$(gcloud secrets versions access latest --secret=rag_api_key)
+          echo "::add-mask::$API_KEY"
           curl -sf "$URL/health"
           curl -sf "$URL/ready"
           curl -sf -X POST "$URL/ask" -H "Content-Type: application/json" \
+            -H "X-API-Key: $API_KEY" \
             -d '{"question": "What is the refund policy?"}' | grep -q '"groundedness"'
 
   promote-production:

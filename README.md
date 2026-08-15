@@ -295,14 +295,20 @@ gcloud services enable run.googleapis.com \
 # 2. Provision Cloud SQL for PostgreSQL + pgvector -- the external, shared
 #    vector store all Cloud Run instances read/write (db-f1-micro is the
 #    smallest tier, right-sized for portfolio-project traffic)
+#    --edition=ENTERPRISE is required, not optional: Cloud SQL now defaults
+#    new instances to ENTERPRISE_PLUS, which rejects shared-core tiers with
+#    "Invalid Tier (db-f1-micro) for (ENTERPRISE_PLUS) Edition". Confirmed
+#    by hitting it directly.
 gcloud sql instances create rag-capstone-db \
     --database-version=POSTGRES_16 \
+    --edition=ENTERPRISE \
     --tier=db-f1-micro \
-    --region=us-central1
+    --region=us-central1 \
+    --root-password=YOUR_DB_PASSWORD
 gcloud sql databases create ragdb --instance=rag-capstone-db
-# Connect (e.g. via `gcloud sql connect rag-capstone-db --user=postgres`)
-# and enable the extension once:
-#   CREATE EXTENSION IF NOT EXISTS vector;
+# No manual `CREATE EXTENSION vector` step needed -- app/db_schema.sql
+# already runs it (idempotently) as part of database.init_db(), which
+# fires on both API startup and `python -m app.ingest`.
 
 # 2b. Provision Firestore (conversation memory + job tracking) in Native
 #     mode, and set a TTL policy on expires_at for BOTH collections that
@@ -568,7 +574,11 @@ gcloud secrets add-iam-policy-binding database_url_staging \
 gcloud tasks queues create ingest-queue-staging --location=us-central1 --max-attempts=3
 
 # First staging deploy (same pattern as production's first deploy above --
-# after this, cd.yml manages it)
+# after this, cd.yml manages it). Edit cloudrun-groq-staging.yaml first:
+# replace YOUR_PROJECT_ID (including in the cloudsql-instances annotation),
+# and check the image tag -- the file pins `:latest`, which may be an old
+# build. Pin a specific commit-SHA tag from Artifact Registry if so;
+# cd.yml deploys SHA tags, so `:latest` can silently lag behind main.
 gcloud run services replace cloudrun-groq-staging.yaml --region=us-central1
 gcloud run services add-iam-policy-binding rag-capstone-staging \
     --region=us-central1 --member="allUsers" --role="roles/run.invoker"
