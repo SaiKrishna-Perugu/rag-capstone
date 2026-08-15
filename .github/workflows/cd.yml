@@ -61,15 +61,18 @@ jobs:
       # Confirmed via a real run that the build itself succeeds
       # server-side (`gcloud builds describe` showed SUCCESS) even when
       # the CLI errors out -- it was failing to *stream* the build's logs
-      # back (needs Cloud Logging read access), not to actually build.
-      # Tried --suppress-logs first, but that only suppresses printing --
-      # completion polling still depends on the same read access, so it
-      # failed identically. rag-capstone-sa now has roles/logging.viewer
-      # (see README) so this streams and polls for real, which also means
-      # a genuine Docker/build failure shows real logs here instead of a
-      # misleading permission error.
+      # back. Tried --suppress-logs (doesn't help -- completion-polling
+      # uses the same read path as printing), roles/logging.viewer, and
+      # even the primitive roles/viewer on rag-capstone-sa -- all failed
+      # identically. Same root cause as the source-staging bucket: gcloud
+      # streams from its auto-created *default logs bucket*, which
+      # (like the old default source-staging bucket) predates Uniform
+      # Bucket-Level Access and uses legacy ACLs that don't honor project
+      # IAM grants regardless of role. --gcs-log-dir reroutes logs to our
+      # own bucket (reusing the same modern one from --gcs-source-staging-dir)
+      # the same way --gcs-source-staging-dir already fixed the upload side.
       - name: Build and push image via Cloud Build
-        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --billing-project=${{ vars.GCP_PROJECT_ID }}
+        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --gcs-log-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/logs --billing-project=${{ vars.GCP_PROJECT_ID }}
 
   deploy-staging:
     needs: build-and-push

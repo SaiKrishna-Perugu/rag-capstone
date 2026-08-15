@@ -543,15 +543,16 @@ gcloud iam service-accounts add-iam-policy-binding ${PROJECT_NUMBER}-compute@dev
 # With the build itself now actually running, `gcloud builds submit` still
 # errored -- this time only failing to *stream back the build's logs*
 # (confirmed the underlying build reached SUCCESS via `gcloud builds
-# describe` regardless). --suppress-logs does NOT fix this, since
-# completion-polling uses the same read path as log printing. The error
-# text is literal ("must be Viewer/Owner of the project") -- this check
-# only recognizes the primitive roles/viewer, not granular roles: granting
-# roles/logging.viewer alone (a more narrowly-scoped attempt, tried first)
-# did not clear it; roles/viewer did.
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/viewer"
+# describe` regardless). Neither --suppress-logs, roles/logging.viewer,
+# nor even the primitive roles/viewer fixed it (all three tried, in that
+# order) -- turned out to be the exact same root cause as the
+# source-staging bucket earlier: gcloud's auto-created *default logs
+# bucket* also predates Uniform Bucket-Level Access and uses legacy ACLs
+# that don't honor project IAM grants at all, regardless of role. Fixed
+# in cd.yml by adding --gcs-log-dir pointed at the same fresh bucket
+# --gcs-source-staging-dir already uses -- not an IAM change. roles/viewer
+# is broader than this project needs; keeping it isn't necessary, but
+# it's harmless if already applied.
 
 # Staging environment: same Cloud SQL instance, a separate database within
 # it (not a second instance -- cheaper, still keeps staging traffic and
