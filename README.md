@@ -530,6 +530,16 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 gcloud iam service-accounts add-iam-policy-binding rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com \
   --project=$PROJECT_ID --role="roles/iam.serviceAccountUser" \
   --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+# Once impersonation was actually wired up (see above), `gcloud builds
+# submit` got past the bucket upload and hit a *different* PERMISSION_DENIED:
+# rag-capstone-sa (the caller submitting the build) also needs to be
+# allowed to act as the identity Cloud Build itself runs the build as --
+# which defaults to the project's Compute Engine default service account
+# (this is the same 2024-05-03 behavior change noted above: Cloud Build no
+# longer auto-provisions a dedicated build SA with broad Editor access).
+gcloud iam service-accounts add-iam-policy-binding ${PROJECT_NUMBER}-compute@developer.gserviceaccount.com \
+  --project=$PROJECT_ID --role="roles/iam.serviceAccountUser" \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # Staging environment: same Cloud SQL instance, a separate database within
 # it (not a second instance -- cheaper, still keeps staging traffic and
