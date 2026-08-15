@@ -77,6 +77,20 @@ spec:
         # against a fresh database.
         - name: EMBEDDING_DIMENSION
           value: '768'
+        # PUBLIC DEMO NOTE: the live production service intentionally runs
+        # WITHOUT this secret and with ENABLE_UPLOADS=false, so anyone with
+        # the URL can ask questions while nobody can mutate the corpus.
+        # APIKeyMiddleware disables itself entirely when API_KEY is empty,
+        # which would also leave /upload open -- ENABLE_UPLOADS=false is
+        # what actually closes it (main.py returns 403 before touching the
+        # request body), so the two settings belong together.
+        #
+        # Applying this file with `gcloud run services replace` re-mounts
+        # the secret and re-enables auth, locking visitors out of the demo.
+        # To restore the public configuration afterward:
+        #   gcloud run services update rag-capstone --region=us-central1 \
+        #     --remove-secrets=API_KEY --update-env-vars=ENABLE_UPLOADS=false
+        # (Same reset caveat as INGEST_TARGET_URL below.)
         - name: API_KEY
           valueFrom:
             secretKeyRef:
