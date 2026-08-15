@@ -506,6 +506,30 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 # (--gcs-source-staging-dir) instead of that legacy-ACL default -- gcloud
 # creates it automatically on first use with modern IAM, which the grant
 # above then actually applies to.
+#
+# IMPORTANT: none of the grants above have any effect unless cd.yml's
+# google-github-actions/auth steps also pass `service_account:
+# rag-capstone-sa@...`. Without that input, the action uses Direct
+# Workload Identity Federation -- authenticating as the raw federated
+# principal itself, not rag-capstone-sa -- so every grant on
+# rag-capstone-sa is silently inert. This was confirmed the hard way:
+# `gcloud builds submit` kept failing identically across five different
+# fixes (three IAM roles, a fresh bucket, --billing-project) until
+# service_account: was added to actually impersonate the SA that held
+# those grants. Testing via `gcloud ... --impersonate-service-account`
+# is not a faithful stand-in for this -- it impersonates correctly and
+# so can pass while the real WIF-only path still fails.
+#
+# gcloud run deploy (used by deploy-staging and promote-production) needs
+# two more grants beyond what step 6 gave rag-capstone-sa for running the
+# service: permission to call the Cloud Run Admin API, and permission to
+# actAs itself as the runtime identity a new revision deploys with.
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/run.admin"
+gcloud iam service-accounts add-iam-policy-binding rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com \
+  --project=$PROJECT_ID --role="roles/iam.serviceAccountUser" \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # Staging environment: same Cloud SQL instance, a separate database within
 # it (not a second instance -- cheaper, still keeps staging traffic and

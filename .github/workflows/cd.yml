@@ -21,6 +21,18 @@ permissions:
 
 env:
   IMAGE: us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/rag-repo/rag-capstone:${{ github.sha }}
+  # google-github-actions/auth's `service_account` input is what actually
+  # makes it impersonate rag-capstone-sa via the roles/iam.workloadIdentityUser
+  # binding set up in README -- omitting it (as every prior version of this
+  # workflow did) makes the action use Direct Workload Identity Federation
+  # instead: the raw federated principal, not rag-capstone-sa. That's why
+  # every IAM grant made to rag-capstone-sa (storage.objectAdmin,
+  # serviceusage.serviceUsageConsumer, storage.admin, a fresh source bucket,
+  # --billing-project) had zero effect on the real run -- none of them were
+  # ever the identity making the calls. Confirmed by the fact that
+  # `--impersonate-service-account` testing (which genuinely impersonates)
+  # passed while the real WIF-authenticated run kept failing identically.
+  SERVICE_ACCOUNT: rag-capstone-sa@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
 
 jobs:
   build-and-push:
@@ -32,6 +44,7 @@ jobs:
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
 
       # Raw gcloud CLI throughout this pipeline, matching this repo's
       # existing convention (README "Deploying to GCP") of never wrapping
@@ -39,23 +52,11 @@ jobs:
       # ubuntu-latest and auto-configured by the auth step above -- no
       # setup-gcloud action needed.
       #
-      # --gcs-source-staging-dir points source uploads at a dedicated
-      # bucket instead of gcloud's auto-created default (<project>_cloudbuild).
-      # That default bucket was created years ago under legacy ACLs
-      # (projectEditor/projectOwner/projectViewer), which don't reliably
-      # honor IAM role grants for a WIF-federated identity -- confirmed
-      # directly: rag-capstone-sa kept hitting "forbidden from accessing
-      # the bucket" even after being granted storage.objectAdmin,
-      # serviceusage.serviceUsageConsumer, and storage.admin. A fresh
-      # bucket (gcloud creates it automatically if it doesn't exist)
-      # defaults to modern IAM -- but a fresh bucket alone didn't clear the
-      # error either, still under genuine WIF auth (an --impersonate-service-account
-      # test of the same fresh bucket had misleadingly passed -- impersonated
-      # user credentials carry an implicit quota project that a raw WIF
-      # external_account credential does not). --billing-project pins the
-      # project gcloud bills/attributes quota to explicitly, which is what
-      # the "serviceusage.services.use" permission check was actually
-      # missing under WIF.
+      # --gcs-source-staging-dir + --billing-project are kept even though
+      # they turned out not to be the real fix (see SERVICE_ACCOUNT comment
+      # above) -- harmless now that rag-capstone-sa is genuinely
+      # impersonated, and the fresh bucket avoids the legacy-ACL default
+      # bucket regardless of identity.
       - name: Build and push image via Cloud Build
         run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source --billing-project=${{ vars.GCP_PROJECT_ID }}
 
@@ -67,6 +68,7 @@ jobs:
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
 
       - name: Deploy to staging
         run: |
@@ -82,6 +84,7 @@ jobs:
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
 
       - name: Smoke test staging deployment
         run: |
@@ -104,6 +107,7 @@ jobs:
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
 
       # Canary rollout: deploy with zero traffic, shift 10% to it, wait,
       # then promote to 100%. NOTE: --to-tags=canary=10 assumes the
