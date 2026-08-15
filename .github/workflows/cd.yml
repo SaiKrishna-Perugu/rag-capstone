@@ -38,8 +38,19 @@ jobs:
       # deploy commands in marketplace Actions. gcloud is preinstalled on
       # ubuntu-latest and auto-configured by the auth step above -- no
       # setup-gcloud action needed.
+      #
+      # --gcs-source-staging-dir points source uploads at a dedicated
+      # bucket instead of gcloud's auto-created default (<project>_cloudbuild).
+      # That default bucket was created years ago under legacy ACLs
+      # (projectEditor/projectOwner/projectViewer), which don't reliably
+      # honor IAM role grants for a WIF-federated identity -- confirmed
+      # directly: rag-capstone-sa kept hitting "forbidden from accessing
+      # the bucket" even after being granted storage.objectAdmin,
+      # serviceusage.serviceUsageConsumer, and storage.admin. A fresh
+      # bucket (gcloud creates it automatically if it doesn't exist)
+      # defaults to modern IAM and just works.
       - name: Build and push image via Cloud Build
-        run: gcloud builds submit --tag ${{ env.IMAGE }}
+        run: gcloud builds submit --tag ${{ env.IMAGE }} --gcs-source-staging-dir=gs://${{ vars.GCP_PROJECT_ID }}-cd-source/source
 
   deploy-staging:
     needs: build-and-push

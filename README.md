@@ -490,6 +490,22 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
   --role="roles/cloudbuild.builds.editor"
+# rag-capstone-sa also needs to be able to consume project quota/billing
+# and manage storage -- confirmed by direct trial: gcloud builds submit
+# kept failing with "forbidden from accessing the bucket" for a WIF-
+# federated identity even after the three grants above, because
+# gcloud's auto-created default source-staging bucket (<project>_cloudbuild)
+# was created under legacy ACLs that don't reliably honor IAM role grants.
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/serviceusage.serviceUsageConsumer"
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:rag-capstone-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/storage.admin"
+# cd.yml's Cloud Build step points source uploads at a fresh bucket
+# (--gcs-source-staging-dir) instead of that legacy-ACL default -- gcloud
+# creates it automatically on first use with modern IAM, which the grant
+# above then actually applies to.
 
 # Staging environment: same Cloud SQL instance, a separate database within
 # it (not a second instance -- cheaper, still keeps staging traffic and
