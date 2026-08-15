@@ -106,22 +106,37 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
         ("system", _RERANK_SYSTEM_PROMPT),
         ("human", f"QUESTION:\n{question}\n\nCANDIDATES:\n{numbered}"),
     ]
-    response = llm.invoke(messages).content.strip()
 
     try:
+        # llm.invoke() must be INSIDE the try: it was previously outside,
+        # so a transient provider failure (timeout, rate limit, connection
+        # reset) propagated out of rerank() and took down the whole
+        # retrieval call instead of degrading to RRF order. That defeats
+        # the point of having a fallback at all, and it is not theoretical
+        # -- a CI eval run logged ~11 TimeoutErrors against Groq in a
+        # single pass.
+        response = llm.invoke(messages).content.strip()
         order = json.loads(response)
-        reranked = [candidates[i - 1] for i in order if 1 <= i <= len(candidates)]
+        # The prompt asks for a JSON array, but nothing guarantees one:
+        # a dict, bare string, or number all parse fine as JSON and then
+        # blow up on `1 <= i` (TypeError) or iteration -- neither of which
+        # the old except-tuple caught.
+        if not isinstance(order, list):
+            raise TypeError(f"expected a JSON array, got {type(order).__name__}")
+        ranks = [i for i in order if isinstance(i, int) and 1 <= i <= len(candidates)]
+        reranked = [candidates[i - 1] for i in ranks]
         # Guard against a malformed/partial response silently dropping
         # candidates -- fall back to the pre-rerank order for anything
         # the LLM didn't include.
-        seen = set(order)
+        seen = set(ranks)
         reranked += [c for i, c in enumerate(candidates, start=1) if i not in seen]
         return reranked[:top_k]
-    except (json.JSONDecodeError, ValueError, IndexError):
+    except Exception as e:
         # Reranking is a quality optimization, not a correctness
-        # requirement -- if the LLM returns something unparseable, fall
-        # back to the pre-rerank (RRF-fused) order rather than failing
-        # the whole request.
+        # requirement -- on any failure fall back to the pre-rerank
+        # (RRF-fused) order rather than failing the whole request. Same
+        # fail-open posture as check_groundedness() in app/rag.py.
+        logger.warning(f"rerank failed ({type(e).__name__}: {e}); using RRF order")
         return candidates[:top_k]
 
 
