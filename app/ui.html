@@ -377,6 +377,28 @@
             <p class="subtitle">Ask questions over your local document base. Powered by Gemini &amp; LangGraph.</p>
         </header>
 
+        <!-- Optional sign-in. Deliberately NOT a wall: the page, questions
+             and uploads all work signed-out. Signing in only raises the
+             upload ceiling. Hidden entirely unless /config reports Firebase
+             is configured, so an unconfigured deployment never shows a
+             button that cannot work. -->
+        <div id="auth-bar" style="display:none; margin-bottom:16px; display:none;
+                    align-items:center; gap:12px; font-size:0.88rem;">
+            <button id="signin-btn" onclick="signIn()"
+                    style="padding:8px 16px; border-radius:8px; cursor:pointer;
+                           border:1px solid rgba(255,255,255,0.15);
+                           background:rgba(255,255,255,0.06); color:inherit;">
+                Sign in with Google
+            </button>
+            <span id="auth-status" style="color:var(--text-muted);"></span>
+            <button id="signout-btn" onclick="signOutUser()"
+                    style="display:none; padding:6px 12px; border-radius:8px;
+                           cursor:pointer; border:1px solid rgba(255,255,255,0.15);
+                           background:transparent; color:var(--text-muted);">
+                Sign out
+            </button>
+        </div>
+
         <!-- Every endpoint except /health and /ready sits behind
              APIKeyMiddleware when the deployment sets API_KEY, so the UI has
              to send X-API-Key or every call returns 401. Kept in
@@ -472,6 +494,70 @@
         // bypassed by posting to /upload directly.
         const UPLOAD_LIMITS = { files: 5, sizeMb: 50 };
 
+        // --- Optional Firebase sign-in ----------------------------------
+        // Loaded lazily from CDN only when /config says Firebase is
+        // configured, so an unconfigured deployment pays no script cost and
+        // shows no sign-in affordance at all.
+        let _idToken = null;      // current Firebase ID token, or null
+        let _firebaseAuth = null;
+
+        async function initFirebase(cfg) {
+            if (!cfg || !cfg.api_key) return;   // not configured: stay anonymous
+            try {
+                const [{ initializeApp }, authMod] = await Promise.all([
+                    import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
+                    import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js'),
+                ]);
+                const app = initializeApp({
+                    apiKey: cfg.api_key,
+                    authDomain: cfg.auth_domain,
+                    projectId: cfg.project_id,
+                });
+                _firebaseAuth = authMod;
+                const auth = authMod.getAuth(app);
+                document.getElementById('auth-bar').style.display = 'flex';
+
+                authMod.onAuthStateChanged(auth, async (user) => {
+                    // Re-reads /config on every state change so the displayed
+                    // upload ceiling reflects what the SERVER will actually
+                    // allow this caller, rather than a guess made here.
+                    _idToken = user ? await user.getIdToken() : null;
+                    renderAuthState(user);
+                    await refreshConfig();
+                });
+            } catch (e) {
+                // Sign-in is an enhancement; if its SDK fails to load the
+                // demo must still work anonymously.
+                console.warn('Firebase sign-in unavailable:', e);
+            }
+        }
+
+        function renderAuthState(user) {
+            const status = document.getElementById('auth-status');
+            const signinBtn = document.getElementById('signin-btn');
+            const signoutBtn = document.getElementById('signout-btn');
+            if (user) {
+                status.textContent = `Signed in as ${user.email}`;
+                signinBtn.style.display = 'none';
+                signoutBtn.style.display = 'inline-block';
+            } else {
+                status.textContent = '';
+                signinBtn.style.display = 'inline-block';
+                signoutBtn.style.display = 'none';
+            }
+        }
+
+        async function signIn() {
+            if (!_firebaseAuth) return;
+            const auth = _firebaseAuth.getAuth();
+            await _firebaseAuth.signInWithPopup(auth, new _firebaseAuth.GoogleAuthProvider());
+        }
+
+        async function signOutUser() {
+            if (!_firebaseAuth) return;
+            await _firebaseAuth.signOut(_firebaseAuth.getAuth());
+        }
+
         // --- API key handling -------------------------------------------
         // The key is a per-browser value, never shipped with the page.
         function getApiKey() {
@@ -488,11 +574,23 @@
             const h = Object.assign({}, extra || {});
             const key = getApiKey();
             if (key) h['X-API-Key'] = key;
+            // Firebase identity is independent of the API key: the key (when
+            // set) controls whether you may reach the service at all, the
+            // bearer token controls how much you may upload. Both, either,
+            // or neither can be present.
+            if (_idToken) h['Authorization'] = `Bearer ${_idToken}`;
             return h;
         }
 
+        // Re-fetches /config after a sign-in or sign-out so the limits shown
+        // are the ones the server will apply to the caller as they now are.
+        async function refreshConfig() {
+            await initApp({ skipFirebaseInit: true });
+        }
+
         // Fetch runtime configuration to dynamically configure UI
-        async function initApp() {
+        async function initApp(opts) {
+            opts = opts || {};
             try {
                 const res = await fetch('/config', { headers: authHeaders() });
                 // 401 here means this deployment requires a key and we don't
@@ -527,10 +625,20 @@
                         UPLOAD_LIMITS.sizeMb = cfg.max_upload_size_mb || UPLOAD_LIMITS.sizeMb;
                         const label = document.getElementById('upload-label');
                         if (label) {
-                            label.textContent =
-                                `+ Upload documents (PDF, TXT, MD, CSV) — up to `
-                                + `${UPLOAD_LIMITS.files} files, ${UPLOAD_LIMITS.sizeMb}MB each`;
+                            let text = `+ Upload documents (PDF, TXT, MD, CSV) — up to `
+                                     + `${UPLOAD_LIMITS.files} files, ${UPLOAD_LIMITS.sizeMb}MB each`;
+                            // Advertise the upgrade rather than hiding it, so
+                            // signing in has a visible reason to exist.
+                            if (!cfg.authenticated && cfg.firebase && cfg.firebase.api_key
+                                && cfg.authed_max_upload_files > UPLOAD_LIMITS.files) {
+                                text += ` (sign in for ${cfg.authed_max_upload_files} files,`
+                                      + ` ${cfg.authed_max_upload_size_mb}MB)`;
+                            }
+                            label.textContent = text;
                         }
+                    }
+                    if (!opts.skipFirebaseInit) {
+                        initFirebase(cfg.firebase);
                     }
                 }
             } catch (e) {
@@ -673,15 +781,36 @@
                     const fileName = src.source.split(/[\/\\]/).pop();
                     const pageText = src.page !== null ? `Pg ${src.page}` : '';
                     
+                    // Built with createElement/textContent rather than an
+                    // innerHTML template. src.source is an UPLOADED FILENAME
+                    // and src.excerpt is uploaded document text -- both are
+                    // attacker-controlled on a demo that accepts anonymous
+                    // uploads. The previous template interpolated the
+                    // filename raw into an attribute, so a name like
+                    // `x" onmouseover="alert(1).txt` became stored XSS
+                    // against every later visitor whose question retrieved
+                    // that document. textContent cannot introduce markup, so
+                    // there is no escaping to get subtly wrong here.
                     const card = document.createElement('div');
                     card.className = 'source-card';
-                    card.innerHTML = `
-                        <div class="source-title">
-                            <span title="${src.source}">${fileName}</span>
-                            <span class="source-page">${pageText}</span>
-                        </div>
-                        <div class="source-excerpt">${src.excerpt.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
-                    `;
+
+                    const titleRow = document.createElement('div');
+                    titleRow.className = 'source-title';
+                    const nameSpan = document.createElement('span');
+                    nameSpan.title = src.source;        // property, not markup
+                    nameSpan.textContent = fileName;
+                    const pageSpan = document.createElement('span');
+                    pageSpan.className = 'source-page';
+                    pageSpan.textContent = pageText;
+                    titleRow.appendChild(nameSpan);
+                    titleRow.appendChild(pageSpan);
+
+                    const excerpt = document.createElement('div');
+                    excerpt.className = 'source-excerpt';
+                    excerpt.textContent = src.excerpt;
+
+                    card.appendChild(titleRow);
+                    card.appendChild(excerpt);
                     grid.appendChild(card);
                 });
             } else {

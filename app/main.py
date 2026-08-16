@@ -31,9 +31,9 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app import cache, config, database, jobs, memory, metrics, streaming
+from app import auth, cache, config, database, jobs, memory, metrics, streaming
 from app.agent import run_agentic_rag
-from app.middleware import APIKeyMiddleware
+from app.middleware import APIKeyMiddleware, IdentityMiddleware
 from app.rag import answer_question
 
 # --- Structured logging setup -------------------------------------------------
@@ -98,6 +98,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(APIKeyMiddleware)
+# Registered after APIKeyMiddleware so it runs FIRST (Starlette applies
+# middleware in reverse registration order). Identity is therefore resolved
+# before the API-key gate, which matters only for ordering clarity -- the two
+# are independent, and IdentityMiddleware never rejects anything.
+app.add_middleware(IdentityMiddleware)
 
 
 class AskRequest(BaseModel):
@@ -157,16 +162,33 @@ def ready() -> dict:
 
 
 @app.get("/config")
-def get_ui_config() -> dict:
+def get_ui_config(request: Request) -> dict:
     """Returns runtime configuration for the web UI."""
+    identity = getattr(request.state, "identity", auth.ANONYMOUS)
+    max_files, max_mb = auth.upload_limits(identity)
     return {
         "enable_uploads": config.ENABLE_UPLOADS,
         "model_provider": config.MODEL_PROVIDER,
-        # Surfaced so the UI can state the limits before someone picks a
-        # file, rather than letting them discover them via a 400/413 after
-        # waiting for an upload to fail.
-        "max_upload_files": config.MAX_UPLOAD_FILES,
-        "max_upload_size_mb": config.MAX_UPLOAD_SIZE_MB,
+        # The limits that apply to THIS caller, so the UI states the real
+        # ceiling before someone picks a file rather than letting them
+        # discover it via a 400/413 after waiting for an upload to fail.
+        "max_upload_files": max_files,
+        "max_upload_size_mb": max_mb,
+        "authenticated": identity.is_authenticated,
+        "user_email": identity.email,
+        # Advertised so the UI can show what signing in would gain. Shown
+        # even to anonymous callers -- that's the point of surfacing it.
+        "authed_max_upload_files": config.MAX_UPLOAD_FILES_AUTHED,
+        "authed_max_upload_size_mb": config.MAX_UPLOAD_SIZE_MB_AUTHED,
+        # Public by design (Firebase web API keys are identifiers, not
+        # credentials). Empty when Firebase isn't configured, which is how
+        # the UI knows to hide sign-in entirely rather than render a button
+        # that cannot work.
+        "firebase": {
+            "api_key": config.FIREBASE_WEB_API_KEY,
+            "auth_domain": config.FIREBASE_AUTH_DOMAIN,
+            "project_id": config.FIREBASE_PROJECT_ID if config.FIREBASE_WEB_API_KEY else "",
+        },
     }
 
 
@@ -199,17 +221,19 @@ async def upload_files(
             detail={"error": "Uploads are disabled in this environment.", "request_id": request_id},
         )
 
+    # Signed-in callers get raised ceilings; anonymous visitors keep the
+    # public defaults so the demo still works without an account.
+    identity = getattr(request.state, "identity", auth.ANONYMOUS)
+    max_files, max_size_mb = auth.upload_limits(identity)
+
     # Reject the whole batch up front rather than partway through the loop
     # below, which would otherwise leave the first N files already written
     # to disk and queued for ingestion.
-    if len(files) > config.MAX_UPLOAD_FILES:
+    if len(files) > max_files:
         raise HTTPException(
             status_code=400,
             detail={
-                "error": (
-                    f"Too many files ({len(files)}). "
-                    f"Max {config.MAX_UPLOAD_FILES} per upload."
-                ),
+                "error": f"Too many files ({len(files)}). Max {max_files} per upload.",
                 "request_id": request_id,
             },
         )
@@ -258,6 +282,23 @@ async def upload_files(
                 detail={"error": f"Invalid filename: {file.filename}", "request_id": request_id},
             )
 
+        # The filename is stored as the chunk's `source` and echoed back in
+        # /ask responses, where the UI renders it. Path(...).name stops
+        # traversal but happily preserves HTML metacharacters, so a name
+        # like `x" onmouseover="alert(1).txt` passes the traversal and
+        # extension checks and becomes stored XSS for every later visitor
+        # whose question retrieves that document. The UI escapes on render
+        # too; this is the server half of that defence, and the half that
+        # also protects any non-browser consumer of the API.
+        if any(c in safe_name for c in '<>"\'&'):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Filename may not contain < > \" ' or & characters.",
+                    "request_id": request_id,
+                },
+            )
+
         # Validate file extension against supported loaders
         suffix = Path(safe_name).suffix.lower()
         supported = {".pdf", ".txt", ".md", ".csv", ".html", ".htm", ".docx"}
@@ -272,13 +313,13 @@ async def upload_files(
 
         content = await file.read()
 
-        # Check file size
-        max_bytes = config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        # Check file size against this caller's ceiling, not the global one.
+        max_bytes = max_size_mb * 1024 * 1024
         if len(content) > max_bytes:
             raise HTTPException(
                 status_code=413,
                 detail={
-                    "error": f"File {safe_name} too large ({len(content) / 1024 / 1024:.1f}MB). Max: {config.MAX_UPLOAD_SIZE_MB}MB.",
+                    "error": f"File {safe_name} too large ({len(content) / 1024 / 1024:.1f}MB). Max: {max_size_mb}MB.",
                     "request_id": request_id,
                 },
             )
@@ -373,6 +414,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
         logger.info(json.dumps({
             "request_id": request_id,
             "event": "ask",
+            # Phase 5.2: "who asked this" is answerable now. The uid, not
+            # the email -- a stable identifier without accumulating personal
+            # data in logs. "anonymous" for unauthenticated visitors.
+            "user": getattr(request.state, "identity", auth.ANONYMOUS).log_value,
             "cache": "HIT",
             "question": body.question,
             "answer": cached_hit["answer"],
@@ -414,6 +459,7 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     logger.info(json.dumps({
         "request_id": request_id,
         "event": "ask",
+        "user": getattr(request.state, "identity", auth.ANONYMOUS).log_value,
         "question": body.question,
         "contextualized_query": contextualized_q,
         "answer": result.answer,

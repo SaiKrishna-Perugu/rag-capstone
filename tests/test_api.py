@@ -46,6 +46,37 @@ def test_upload_endpoint_disabled(client, monkeypatch):
     assert "disabled" in response.json()["detail"]["error"].lower()
 
 
+def test_upload_rejects_html_metacharacters_in_filename(client):
+    """Stored-XSS guard. The filename is persisted as the chunk's `source`
+    and echoed back by /ask, where the UI renders it. Path(...).name blocks
+    traversal but preserves quotes and angle brackets, so a name like
+    `x" onmouseover="alert(1).txt` clears both the traversal and extension
+    checks. The UI escapes on render too; this is the server half.
+
+    Uses angle brackets rather than a quote because httpx strips `"` from
+    the multipart filename parameter before it ever reaches the server --
+    the server-side check covers both, but only one is expressible through
+    this client."""
+    files = {"files": ("evil<img src=x onerror=alert(1)>.txt", b"hello", "text/plain")}
+    response = client.post("/upload", files=files)
+    assert response.status_code == 400
+    assert "may not contain" in response.json()["detail"]["error"]
+
+
+def test_anonymous_upload_still_works(client, monkeypatch, tmp_path):
+    """The load-bearing guarantee of the additive-auth design: adding
+    identity must never turn a working anonymous upload into a rejection.
+    If this test fails, the public demo is broken regardless of what else
+    passes."""
+    monkeypatch.setattr(config, "GCP_PROJECT_ID", "")
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    with patch("app.jobs.create_job", return_value="job-anon"):
+        with patch("app.jobs.process_job"):
+            files = {"files": ("notes.txt", b"hello world", "text/plain")}
+            response = client.post("/upload", files=files)   # no auth headers
+    assert response.status_code == 202
+
+
 def test_upload_rejects_too_many_files(client, monkeypatch):
     """The batch is refused whole. The per-file size cap says nothing about
     how many files arrive, so without this a single request could carry

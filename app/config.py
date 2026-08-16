@@ -143,6 +143,26 @@ MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "5"))
 # quality degrades measurably as unrelated content crowds out the real
 # answers, and every ingested chunk costs an embedding call.
 MAX_CORPUS_CHUNKS = int(os.getenv("MAX_CORPUS_CHUNKS", "0"))
+
+# --- Optional Firebase identity (app/auth.py) -------------------------------
+# Additive, never a gate: signing in raises the upload ceiling below, it is
+# not what grants access. With FIREBASE_PROJECT_ID unset the whole feature is
+# inert -- tokens are ignored, everyone is anonymous, and the UI hides its
+# sign-in button. That keeps this deployable as a public demo by default.
+#
+# Defaults to GCP_PROJECT_ID because a Firebase project IS a GCP project;
+# the token audience is the project ID.
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "") or GCP_PROJECT_ID
+# These two are safe to serve to the browser via /config. Firebase web API
+# keys are public identifiers by design, not credentials -- access is
+# controlled by Firebase security rules and authorized domains, not by
+# keeping this string secret.
+FIREBASE_WEB_API_KEY = os.getenv("FIREBASE_WEB_API_KEY", "")
+FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN", "")
+# Raised ceilings for signed-in callers. Anonymous visitors keep the limits
+# above, so the demo stays usable without an account.
+MAX_UPLOAD_FILES_AUTHED = int(os.getenv("MAX_UPLOAD_FILES_AUTHED", "10"))
+MAX_UPLOAD_SIZE_MB_AUTHED = int(os.getenv("MAX_UPLOAD_SIZE_MB_AUTHED", "10"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
 
 # --- LLM Resilience -------------------------------------------------------
