@@ -67,6 +67,18 @@ _retrieval_empty_total = _meter.create_counter(
 _agent_retry_total = _meter.create_counter(
     "rag_agent_retry_total", description="Agentic loop retries."
 )
+_llm_tokens_total = _meter.create_counter(
+    "rag_llm_tokens_total", description="LLM tokens consumed, by model and direction."
+)
+# Counter, not a gauge: a monotonic total is what lets a dashboard derive
+# spend rate over any window. Recorded in micro-USD as an integer because
+# OpenTelemetry counters are integral and a single flash-lite call costs
+# far less than one cent -- summing floats-rounded-to-zero would report
+# nothing at all.
+_llm_cost_micro_usd_total = _meter.create_counter(
+    "rag_llm_cost_micro_usd_total",
+    description="Estimated LLM spend in millionths of a USD, by model.",
+)
 
 
 # --- Public API ---------------------------------------------------------
@@ -93,3 +105,12 @@ def record_empty_retrieval() -> None:
 
 def record_agent_retry() -> None:
     _agent_retry_total.add(1)
+
+
+def record_llm_usage(
+    model: str, input_tokens: int, output_tokens: int, cost_usd: float
+) -> None:
+    """Token counts and estimated spend for one LLM call."""
+    _llm_tokens_total.add(input_tokens, {"model": model, "direction": "input"})
+    _llm_tokens_total.add(output_tokens, {"model": model, "direction": "output"})
+    _llm_cost_micro_usd_total.add(round(cost_usd * 1_000_000), {"model": model})

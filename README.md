@@ -261,6 +261,20 @@ the form) — use it if you want a read-only demo. Note that unsetting
 `API_KEY` also disables auth on `/upload`, so those two settings belong
 together.
 
+**Log retention.** `app/main.py` writes one structured JSON line per
+`/ask*` request including the verbatim question and answer, which on a
+public demo is user-generated content from anonymous visitors. The
+`_Default` Cloud Logging bucket is set to **14 days** rather than the
+30-day default — ample for debugging a demo, half the window in which that
+content is retained, and free either way (Cloud Logging only bills for
+retention *beyond* 30 days):
+```bash
+gcloud logging buckets update _Default --location=global --retention-days=14
+```
+Retention limits how long the content is kept; it does not redact it.
+Actual PII redaction (Cloud DLP on the logged copy) is a separate,
+still-open item.
+
 **Enabling sign-in** (entirely optional; the demo works without it): in the
 Firebase console, add a Web App to the same GCP project, enable the Google
 provider, add your Cloud Run domain under *Authentication → Settings →
@@ -691,6 +705,7 @@ app/
   auth.py       # optional Firebase identity -- additive, raises upload limits, never gates
   cache.py      # semantic caching for repeated questions (Postgres-backed)
   config.py     # centralized env/config loading
+  cost.py       # per-request LLM token/cost attribution, broken down by pipeline stage
   database.py   # PostgreSQL + pgvector connection pool, schema init, hybrid search
   db_schema.sql # chunks / semantic_cache table + index definitions
   ingest.py     # load -> chunk -> embed -> persist to PostgreSQL + pgvector

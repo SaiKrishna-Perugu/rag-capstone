@@ -80,7 +80,7 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
         context = _format_context(chunks)
         
         # 4. Stream LLM Response
-        llm = get_llm(temperature=0.0)
+        llm = get_llm(temperature=0.0, stage="generate_stream")
         messages = [
             ("system", "You are a precise assistant that answers questions using ONLY the provided context. Follow these rules strictly:\n1. Base your answer only on the context below. Do not use outside knowledge.\n2. If the context does not contain enough information to answer, say exactly: \"I don't have enough information in the provided documents to answer that.\"\n3. Keep answers concise and factual.\n4. Do not fabricate sources, numbers, or details not present in the context."),
             ("human", f"QUESTION:\n{contextualized_q}\n\nCONTEXT:\n{context}"),

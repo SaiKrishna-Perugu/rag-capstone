@@ -31,7 +31,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app import auth, cache, config, database, jobs, memory, metrics, streaming
+from app import auth, cache, config, cost, database, jobs, memory, metrics, streaming
 from app.agent import run_agentic_rag
 from app.middleware import APIKeyMiddleware, IdentityMiddleware
 from app.rag import answer_question
@@ -396,6 +396,9 @@ async def process_ingest_job(body: InternalJobRequest) -> dict:
 async def ask(request: Request, body: AskRequest) -> AskResponse:
     request_id = str(uuid.uuid4())
     metrics.record_request("ask")
+    # Begin per-request cost accumulation. Context-local, so concurrent
+    # requests can't attribute each other's tokens -- see app/cost.py.
+    cost.start_request()
     start = time.perf_counter()
 
     # --- Conversation Memory: Contextualize Question ----------------------
@@ -466,6 +469,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
         "groundedness": result.groundedness,
         "num_sources": len(result.sources),
         "latency_ms": latency_ms,
+        # Phase 8: what this request actually cost, broken down by pipeline
+        # stage. /ask makes three LLM calls, so the breakdown is the useful
+        # part -- it shows whether reranking earns its share.
+        **cost.current().as_log_fields(),
     }))
 
     # Cache the successful result for future similar questions

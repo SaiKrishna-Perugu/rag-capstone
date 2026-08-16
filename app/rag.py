@@ -58,7 +58,10 @@ def _format_context(chunks: list) -> str:
 
 def generate_answer(question: str, chunks: list) -> str:
     context = _format_context(chunks)
-    llm = get_llm(temperature=0.0)
+    # `stage` labels this call in the per-request cost breakdown, so
+    # generation can be compared against reranking and the groundedness
+    # check rather than all three blurring into one total.
+    llm = get_llm(temperature=0.0, stage="generate")
 
     messages = [
         ("system", _ANSWER_SYSTEM_PROMPT),
@@ -83,7 +86,7 @@ def check_groundedness(answer: str, chunks: list) -> str:
     context = _format_context(chunks)
 
     try:
-        llm = get_llm(temperature=0.0)
+        llm = get_llm(temperature=0.0, stage="groundedness")
         messages = [
             ("system", _GROUNDEDNESS_SYSTEM_PROMPT),
             ("human", f"CONTEXT:\n{context}\n\nANSWER:\n{answer}"),

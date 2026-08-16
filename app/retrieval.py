@@ -101,7 +101,7 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
     numbered = "\n\n".join(
         f"[{i+1}] {doc.page_content[:500]}" for i, doc in enumerate(candidates)
     )
-    llm = get_llm(temperature=0.0)
+    llm = get_llm(temperature=0.0, stage="rerank")
     messages = [
         ("system", _RERANK_SYSTEM_PROMPT),
         ("human", f"QUESTION:\n{question}\n\nCANDIDATES:\n{numbered}"),

@@ -208,6 +208,18 @@ be called with the same question to compare behavior.
   there's no history rather than raising -- same posture as `cache.py`.
 - `cache.py` — semantic cache (embedding-similarity match, not exact-string)
   for repeated/similar questions.
+- `cost.py` — per-request LLM cost attribution. Pricing is USD per 1M
+  tokens and **goes stale** — every entry is overridable by env
+  (`RAG_PRICE_<MODEL>_IN` / `_OUT`) so a correction needs no code change,
+  and the authoritative number is always Cloud Billing. Accumulates via
+  `contextvars`, not a module global, so concurrent requests can't bill
+  each other. `providers.py` wraps every LLM in `_CostTrackingLLM`, which
+  covers `invoke()` and `astream()` — a new invocation path would go
+  unmeasured, so add an override there if one appears. Unknown models
+  price at zero rather than guessing. Measured on a real `/ask`:
+  **rerank is the most expensive stage (~47%), more than generation**,
+  because it feeds 12 candidate passages to the LLM where generation gets
+  only the final 4.
 - `streaming.py` — SSE streaming for `/ask-stream`.
 - `middleware.py` — two deliberately opposite postures, plus CORS and rate
   limiting (slowapi). `APIKeyMiddleware` **gates**: a wrong `X-API-Key` is a
