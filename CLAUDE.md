@@ -44,16 +44,36 @@ every push/PR to `main`, via `uv sync --frozen`. A separate
 `.github/workflows/eval.yml` runs `eval_ragas.py` against an ephemeral,
 job-scoped `pgvector/pgvector:pg16` service container (not any real Cloud
 SQL instance) and `scripts/check_thresholds.py` on the same triggers —
-kept separate from `ci.yml` since it makes real Groq API calls and needs
-`secrets.GROQ_API_KEY`, a different risk/cost profile than the fully-mocked
-`test` job. `.github/workflows/cd.yml` (push to `main` only) automates
-what "Deploying to GCP" in README used to be a fully-manual walkthrough
-for: build → deploy to a staging Cloud Run service
-(`cloudrun-groq-staging.yaml`) → smoke test → canary-promote to
-production. It authenticates via Workload Identity Federation
-(`google-github-actions/auth`, no long-lived key) and is genuinely inert
-until the one-time GCP/GitHub setup in README's "Automated deploys" is
-completed by hand — that setup can't be done from this codebase alone.
+kept separate from `ci.yml` since it makes real, paid LLM calls, a
+different risk/cost profile than the fully-mocked `test` job. It runs on
+**Vertex AI** via the same keyless WIF auth as `cd.yml`: Groq's free tier
+is 100k tokens/day account-wide, shared with local development, and a few
+pushes exhausted it — the gate then failed with a 429 having scored
+nothing, which is a quota result masquerading as a quality one. It also
+uploads `ragas_results.json` as an artifact so a failed gate stays
+inspectable without re-running (and re-paying for) the eval.
+
+Two failure modes here are easy to misread, both hit for real: RAGAS
+degrades a timed-out job to **NaN**, and `check_thresholds.py` correctly
+treats NaN as failure — so a too-short `RunConfig(timeout=)` looks exactly
+like a quality collapse unless you read the per-job logs.
+`LLMContextPrecisionWithoutReference` is the most timeout-prone metric
+because it makes one LLM call per retrieved context.
+
+`.github/workflows/cd.yml` (push to `main` only) automates what "Deploying
+to GCP" in README used to be a fully-manual walkthrough for: build →
+deploy to the staging Cloud Run service → smoke test → canary-promote to
+production behind a required-reviewer `production` environment. It
+authenticates via Workload Identity Federation
+(`google-github-actions/auth`, no long-lived key) — and note the
+`service_account:` input is what makes it impersonate `rag-capstone-sa`;
+without it the action authenticates as the bare federated principal, and
+every IAM grant made to that service account is silently inert. It carries
+a `concurrency` group with `cancel-in-progress`, because a run parked at
+the approval gate otherwise deploys *its* commit's image when approved
+later, rolling production backwards — that happened. The whole workflow is
+inert until the one-time GCP/GitHub setup in README's "Automated deploys"
+is completed by hand; that setup can't be done from this codebase alone.
 
 ## Architecture
 
@@ -83,10 +103,26 @@ index. Schema creation (`database.init_db()`) is idempotent
 FastAPI `lifespan` startup and from `ingest.py`'s `run()` — the latter
 matters because ingestion is commonly the first command run against a
 brand-new database, before the API has ever started. `EMBEDDING_DIMENSION`
-(config default `384`) sets the `VECTOR(N)` column width at *first*
-creation only — it does not widen an existing column, so changing it after
-the schema already exists requires dropping and letting `init_db()`
-recreate the `chunks`/`semantic_cache` tables, then re-ingesting.
+is **derived from `MODEL_PROVIDER`** (768 for Vertex AI's
+`text-embedding-005`, 384 for Groq/FastEmbed) rather than defaulting to a
+fixed number, so switching provider can't silently build a table that
+rejects every write; override it only for a custom embedding model. It
+sets the `VECTOR(N)` column width at *first* creation only — it does not
+widen an existing column, so changing it after the schema exists requires
+dropping `chunks`/`semantic_cache`/`ingest_manifest` and letting
+`init_db()` recreate them, then re-ingesting. Drop the manifest too, or
+the next ingest skips every file as "unchanged" and leaves the tables
+empty.
+
+The vector index is **HNSW, not IVFFLAT**, and this is load-bearing:
+IVFFLAT clusters existing rows into centroids at *build* time, but
+`init_db()` runs before anything is ingested, so it was always built on an
+empty table. With the default `ivfflat.probes=1` a query then scanned a
+single near-empty list — measured directly, a 12-candidate request against
+a 30-row table returned 2 rows, starving the vector half of hybrid
+retrieval and making answers depend on whether full-text search alone
+happened to hit. HNSW needs no training step, so building it before the
+data exists is fine. Don't "optimize" it back to IVFFLAT.
 
 Groq has no embeddings API, so `groq` mode uses local FastEmbed (ONNX,
 no API key, no torch) for embeddings while still using Groq for chat.
@@ -173,8 +209,22 @@ be called with the same question to compare behavior.
 - `cache.py` — semantic cache (embedding-similarity match, not exact-string)
   for repeated/similar questions.
 - `streaming.py` — SSE streaming for `/ask-stream`.
-- `middleware.py` — API key auth (`APIKeyMiddleware`; auth is disabled when
-  `API_KEY` is unset), CORS, rate limiting (slowapi).
+- `middleware.py` — two deliberately opposite postures, plus CORS and rate
+  limiting (slowapi). `APIKeyMiddleware` **gates**: a wrong `X-API-Key` is a
+  401, and it disables itself entirely when `API_KEY` is unset.
+  `IdentityMiddleware` **enriches**: it resolves an optional Firebase token
+  and has no rejection path at all. Keep them separate — collapsing them
+  into one "auth" layer is how the public demo accidentally gets walled off.
+- `auth.py` — optional Firebase identity, deliberately *additive*. A valid
+  token raises the caller's upload ceiling
+  (`MAX_UPLOAD_FILES_AUTHED`/`MAX_UPLOAD_SIZE_MB_AUTHED`); an absent,
+  expired, or malformed one silently yields `ANONYMOUS` with the public
+  limits, so a stale token in a browser tab degrades that visitor rather
+  than locking them out. Verification uses `google-auth`'s
+  `verify_firebase_token` — already an indirect dependency via
+  `google-cloud-firestore`, so no `firebase-admin`. Inert with
+  `FIREBASE_PROJECT_ID` unset: everyone is anonymous and the UI hides
+  sign-in.
 - `metrics.py` — real OpenTelemetry instruments (Counter/Histogram), not a
   hand-rolled dataclass. `GET /metrics` always serves Prometheus
   exposition format (`prometheus_client.generate_latest()`, no separate
@@ -190,38 +240,65 @@ be called with the same question to compare behavior.
   signal, check it when debugging request behavior. `/health` is a pure
   liveness probe (`{"status": "ok"}`, no dependency checks) — `/ready`
   is the one that checks the vector store and is what Cloud Run's
-  readiness probe hits. `/config` exposes non-secret runtime flags
-  (`enable_uploads`, `model_provider`) for `ui.html` to adapt to, e.g.
-  hiding the upload form when `ENABLE_UPLOADS=false` — set this in
-  public-demo deployments to stop random callers from mutating the
-  prod knowledge base via `/upload`. All handled exceptions log via
-  `logger.error(json_payload, exc_info=True)`, not `logger.exception()`
-  — keep that convention (`G201` is ignored in `pyproject.toml` for it).
+  readiness probe hits. `/config` exposes non-secret runtime flags for
+  `ui.html` to adapt to: `enable_uploads`, `model_provider`, the upload
+  limits **as they apply to the calling identity**, and the public Firebase
+  web config (an identifier, not a credential). `ENABLE_UPLOADS=false`
+  makes `/upload` return 403 outright, not merely hide the form. All
+  handled exceptions log via `logger.error(json_payload, exc_info=True)`,
+  not `logger.exception()` — keep that convention (`G201` is ignored in
+  `pyproject.toml` for it).
   `/upload` itself doesn't run ingestion inline — it saves files, creates
   a job via `jobs.create_job()`, and returns `202 {job_id}` immediately;
   `GET /jobs/{job_id}` and `POST /internal/process-ingest-job` (the
   latter is Cloud Tasks' HTTP target, gated by the same `APIKeyMiddleware`
   as everything else) complete the async contract — see `jobs.py` above.
+  Because production accepts uploads from anonymous visitors, `/upload` is
+  bounded on three axes checked *before* anything is written (a rejected
+  batch must not leave the first N files already saved and queued):
+  `MAX_UPLOAD_FILES` per request, `MAX_UPLOAD_SIZE_MB` per file, and
+  `MAX_CORPUS_CHUNKS` total indexed chunks (0 disables; returns 507 when
+  full). The corpus cap **fails open** on a database error — it is abuse
+  mitigation, not a correctness invariant. Filenames are rejected if they
+  contain HTML metacharacters: the filename is stored as the chunk's
+  `source` and echoed back by `/ask`, so an unescaped one was a real
+  stored-XSS vector. `ui.html` builds source cards with
+  `createElement`/`textContent` for the same reason — don't reintroduce an
+  `innerHTML` template there.
 
 **Secrets**: `config._get_secret()` reads from env first, falling back to
 GCP Secret Manager when `GCP_PROJECT_ID` is set (used in Cloud Run
 deployment; local dev always uses `.env`).
 
-**Deployment**: Dockerfile + `cloudrun-groq.yaml` / `cloudrun-vertexai.yaml`
-for GCP Cloud Run, plus `cloudrun-groq-staging.yaml` (`cd.yml`'s staging
-target — same shape as `cloudrun-groq.yaml`, `metadata.name:
-rag-capstone-staging`, points at a separate `ragdb_staging` database on
-the same Cloud SQL instance and its own `ingest-queue-staging`, but shares
-Firestore with production — a documented simplification, not an oversight).
-Both `cloudrun-groq*.yaml` configs mount `DATABASE_URL` from Secret Manager
+**Deployment**: Dockerfile + one Cloud Run YAML per provider/environment —
+`cloudrun-groq.yaml`, `cloudrun-groq-staging.yaml`,
+`cloudrun-vertexai.yaml`, `cloudrun-vertexai-staging.yaml`. Staging in
+either provider means `metadata.name: rag-capstone-staging`, a separate
+`ragdb_staging` database on the same Cloud SQL instance, and its own
+`ingest-queue-staging` — but shared Firestore with production, a
+documented simplification, not an oversight.
+
+**What is actually deployed right now** (verify with `gcloud`, don't infer
+from this file): both services run **Vertex AI**
+(`gemini-2.5-flash-lite`, `text-embedding-005`, 768-dim). Production is a
+**public demo** — no `API_KEY`, so `APIKeyMiddleware` disables itself and
+anyone with the URL can ask questions and upload within the limits above.
+Staging keeps its API key as the place to test authenticated behaviour.
+The YAMLs still mount `API_KEY`, so a `gcloud run services replace`
+against production re-enables auth and locks visitors out; the restore
+command is recorded in `cloudrun-vertexai.yaml` next to that env var.
+`cd.yml` deploys by image tag, which preserves each service's existing
+env/secret configuration, so it never changes provider on its own.
+
+The `cloudrun-*.yaml` configs mount `DATABASE_URL` from Secret Manager
 and connect to Cloud SQL via the Auth Proxy sidecar
 (`run.googleapis.com/cloudsql-instances` annotation). Ingestion does not
 run at build time or read from anything baked into the image — it writes
 straight to the external Postgres database, so `uv run python -m app.ingest`
 can run before or after a deploy, from anywhere with network access to
 that database (locally via the Cloud SQL Auth Proxy, or from Cloud Shell);
-see README "Deploying to GCP" for the full flow. All three Cloud Run
-YAMLs also carry an `INGEST_TARGET_URL` placeholder for Cloud Tasks' HTTP target
+see README "Deploying to GCP" for the full flow. Every Cloud Run
+YAML also carries an `INGEST_TARGET_URL` placeholder for Cloud Tasks' HTTP target
 (`/internal/process-ingest-job`) — Cloud Run doesn't know its own URL
 until after first deploy, so this gets set imperatively via
 `gcloud run services update --update-env-vars` post-deploy, not templated

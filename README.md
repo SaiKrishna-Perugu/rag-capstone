@@ -233,6 +233,42 @@ was needed). See the compatibility note at the top of `eval_ragas.py` if
 open version conflict between `ragas` and recent `langchain-community`
 releases, worked around with a small shim, not a bug in this code.
 
+## Access model (public demo vs. private deployment)
+
+Two independent controls, deliberately not merged into one "auth" setting:
+
+| Control | Effect |
+|---|---|
+| `API_KEY` set | `APIKeyMiddleware` **gates** everything except `/health`, `/ready`, `/docs`, `/openapi.json`, `/redoc`, `/`. Unset (default) disables it entirely. |
+| Firebase configured | `IdentityMiddleware` **enriches**: a signed-in caller gets raised upload limits. It never rejects anything. |
+
+The deployed production service runs as a **public demo**: no `API_KEY`, so
+anyone with the URL can ask questions and upload within these bounds.
+
+| Limit | Anonymous | Signed in |
+|---|---|---|
+| Files per upload | `MAX_UPLOAD_FILES` (3) | `MAX_UPLOAD_FILES_AUTHED` (10) |
+| Size per file | `MAX_UPLOAD_SIZE_MB` (2) | `MAX_UPLOAD_SIZE_MB_AUTHED` (10) |
+| Total corpus | `MAX_CORPUS_CHUNKS` — 507 when full, 0 disables | same |
+
+All three are enforced in `app/main.py` *before* any file is written, so a
+rejected batch never leaves the first few already saved and queued. The
+browser-side equivalents in `ui.html` are a UX affordance only — anything
+client-side is bypassed by posting to `/upload` directly.
+
+`ENABLE_UPLOADS=false` makes `/upload` return 403 outright (not merely hide
+the form) — use it if you want a read-only demo. Note that unsetting
+`API_KEY` also disables auth on `/upload`, so those two settings belong
+together.
+
+**Enabling sign-in** (entirely optional; the demo works without it): in the
+Firebase console, add a Web App to the same GCP project, enable the Google
+provider, add your Cloud Run domain under *Authentication → Settings →
+Authorized domains*, then set `FIREBASE_WEB_API_KEY` and
+`FIREBASE_AUTH_DOMAIN`. With them unset the feature is inert and the UI
+hides its sign-in button. The web API key is a public identifier, not a
+credential — access is controlled by authorized domains, not secrecy.
+
 ## Switching to Vertex AI (instead of Groq)
 
 All LLM/embeddings calls go through `app/providers.py`, so this is a config
@@ -652,6 +688,7 @@ verbatim and will reset `INGEST_TARGET_URL` to its placeholder.
 ```text
 app/
   agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
+  auth.py       # optional Firebase identity -- additive, raises upload limits, never gates
   cache.py      # semantic caching for repeated questions (Postgres-backed)
   config.py     # centralized env/config loading
   database.py   # PostgreSQL + pgvector connection pool, schema init, hybrid search
@@ -661,7 +698,7 @@ app/
   main.py       # FastAPI endpoints (/, /upload, /jobs/{id}, /ask, /ask-agentic) + UI serving + logging
   memory.py     # conversation history (Firestore) and contextual query rewriting
   metrics.py    # OpenTelemetry metrics -- Prometheus /metrics + optional Cloud Monitoring push
-  middleware.py # API key auth, CORS, rate limiting
+  middleware.py # API key gate + optional Firebase identity, CORS, rate limiting
   providers.py  # model provider factory (Groq / Vertex AI)
   rag.py        # single-pass retrieval, grounded generation, groundedness check
   retrieval.py  # hybrid retrieval + LLM reranking
@@ -675,7 +712,7 @@ eval.py         # custom eval harness (LLM-as-judge, correctness + groundedness)
 eval_ragas.py   # RAGAS eval harness (faithfulness, relevancy, precision, recall)
 .github/workflows/
   ci.yml          # lint + fully-mocked unit tests
-  eval.yml        # eval-gate: real Groq calls against an ephemeral Postgres, blocks bad PRs
+  eval.yml        # eval-gate: real Vertex AI calls against an ephemeral Postgres, blocks bad PRs
   cd.yml          # build -> deploy staging -> smoke test -> canary-promote to production
   cloudrun-groq.yaml         # Declarative Cloud Run configuration for Groq (production)
   cloudrun-groq-staging.yaml # Same, for the staging service cd.yml deploys to
