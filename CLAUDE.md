@@ -159,7 +159,32 @@ be called with the same question to compare behavior.
 - `config.py` — all env/config loading; detects CI via `CI`/`GITHUB_ACTIONS`/
   `PYTEST_CURRENT_TEST` to relax the `GROQ_API_KEY`-required check.
 - `providers.py` — `get_llm()` / `get_embeddings()` factory, the only place
-  that branches on `MODEL_PROVIDER`.
+  that branches on `MODEL_PROVIDER`. `get_llm()` returns
+  `_ResilientLLM(_CostTrackingLLM(client))` — cost tracking sits *inside*
+  failover so a fallback-served call is priced against the model that
+  actually ran. **`get_embeddings()` deliberately never fails over**: the
+  pgvector store is built in one provider's embedding space (768-dim
+  Vertex vs 384-dim FastEmbed), so embedding a query with the other
+  provider is either rejected outright or silently returns nonsense
+  neighbours. A degraded chat provider is recoverable; a broken retrieval
+  path is not.
+- `circuit.py` — circuit breaker for LLM providers. Standard
+  closed/open/half-open machine keyed by **provider name**, not by
+  `get_llm()`'s `(temperature, stage)` cache key — otherwise one
+  provider's health would be split across up to 16 independent copies and
+  never reach the threshold. Counts **consecutive** failures (any success
+  resets), which is what lets it filter noise without needing to tell a
+  provider outage from a bad request — Groq and Vertex raise entirely
+  different exception types for both. It sits *outside* LangChain's retry,
+  so each counted failure is already `LLM_MAX_RETRIES` upstream attempts.
+  State is per-process: each Cloud Run instance learns about an outage
+  independently, a deliberate trade against putting a network round-trip
+  on every LLM call. Failover (`LLM_FALLBACK_PROVIDER`) is opt-in and
+  separate from the breaker, which is always on — failing fast is worth
+  having with or without somewhere to fail over to. Streaming only fails
+  over when the primary breaks **before the first token**; re-routing
+  mid-stream would restart the answer and the reader would watch it
+  duplicate itself.
 - `database.py` — PostgreSQL + pgvector connection pool
   (`psycopg2.pool.ThreadedConnectionPool`), idempotent schema init
   (`init_db()`, executes `db_schema.sql`), and the query functions
@@ -213,9 +238,10 @@ be called with the same question to compare behavior.
   (`RAG_PRICE_<MODEL>_IN` / `_OUT`) so a correction needs no code change,
   and the authoritative number is always Cloud Billing. Accumulates via
   `contextvars`, not a module global, so concurrent requests can't bill
-  each other. `providers.py` wraps every LLM in `_CostTrackingLLM`, which
-  covers `invoke()` and `astream()` — a new invocation path would go
-  unmeasured, so add an override there if one appears. Unknown models
+  each other. `providers.py` wraps every LLM in `_CostTrackingLLM` (and
+  that in `_ResilientLLM`), which covers `invoke()` and `astream()` — a
+  new invocation path would go unmeasured *and* unprotected by the circuit
+  breaker, so add an override to both proxies if one appears. Unknown models
   price at zero rather than guessing. Measured on a real `/ask`:
   **rerank is the most expensive stage (~47%), more than generation**,
   because it feeds 12 candidate passages to the LLM where generation gets

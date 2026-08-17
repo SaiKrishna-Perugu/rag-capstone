@@ -79,6 +79,17 @@ _llm_cost_micro_usd_total = _meter.create_counter(
     "rag_llm_cost_micro_usd_total",
     description="Estimated LLM spend in millionths of a USD, by model.",
 )
+# Counted once per trip, not once per failed call while open -- otherwise
+# the number measures traffic during an outage rather than how often the
+# provider actually broke.
+_llm_circuit_opened_total = _meter.create_counter(
+    "rag_llm_circuit_opened_total",
+    description="Times a provider's circuit breaker tripped open.",
+)
+_llm_failover_total = _meter.create_counter(
+    "rag_llm_failover_total",
+    description="LLM calls served by the fallback provider instead of the primary.",
+)
 
 
 # --- Public API ---------------------------------------------------------
@@ -114,3 +125,13 @@ def record_llm_usage(
     _llm_tokens_total.add(input_tokens, {"model": model, "direction": "input"})
     _llm_tokens_total.add(output_tokens, {"model": model, "direction": "output"})
     _llm_cost_micro_usd_total.add(round(cost_usd * 1_000_000), {"model": model})
+
+
+def record_circuit_opened(provider: str) -> None:
+    """A provider's circuit breaker tripped (app/circuit.py)."""
+    _llm_circuit_opened_total.add(1, {"provider": provider})
+
+
+def record_llm_failover(from_provider: str, to_provider: str) -> None:
+    """A call was served by the fallback provider instead of the primary."""
+    _llm_failover_total.add(1, {"from": from_provider, "to": to_provider})

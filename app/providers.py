@@ -11,13 +11,39 @@ Supported providers:
   - "vertexai" -- uses GCP_PROJECT_ID / GCP_LOCATION, config.VERTEX_CHAT_MODEL /
                   VERTEX_EMBEDDING_MODEL. Requires `gcloud auth application-default
                   login` locally, or a service account when deployed on GCP.
+
+get_llm() returns a client wrapped in two proxies, both of which exist
+because this is the one place that already knows which provider is in play:
+
+  _ResilientLLM(_CostTrackingLLM(real client))
+
+_CostTrackingLLM records tokens and estimated spend (app/cost.py).
+_ResilientLLM applies the circuit breaker (app/circuit.py) and, when
+LLM_FALLBACK_PROVIDER is configured, routes to the other provider while the
+primary's circuit is open -- the payoff for having built this abstraction
+in the first place, since an outage no longer needs a manual redeploy with
+a different MODEL_PROVIDER. Cost tracking sits *inside* failover so a call
+served by the fallback is priced against the model that actually ran.
+
+**Embeddings never fail over, and that is not an oversight.** The pgvector
+store is built in one provider's embedding space -- 768-dim
+text-embedding-005 for Vertex AI, 384-dim FastEmbed for Groq (see
+config.EMBEDDING_DIMENSION). Embedding a query with the other provider
+would either be rejected outright by pgvector on the dimension mismatch or,
+where dimensions happen to agree, silently return nonsense neighbours. A
+degraded chat provider is recoverable; a corrupted or unusable retrieval
+path is not. So get_embeddings() stays pinned to MODEL_PROVIDER, and a
+failover run keeps retrieving with the primary's embeddings while
+generating with the fallback's chat model.
 """
 import logging
 from functools import lru_cache
 
-from app import config, cost, metrics
+from app import circuit, config, cost, metrics
 
 logger = logging.getLogger(__name__)
+
+_VALID_PROVIDERS = ("groq", "vertexai")
 
 
 class _CostTrackingLLM:
@@ -76,16 +102,13 @@ class _CostTrackingLLM:
         return getattr(self._wrapped, name)
 
 
-@lru_cache(maxsize=16)
-def get_llm(temperature: float = 0.0, stage: str = "llm"):
-    """`stage` labels this client's calls in the per-request cost breakdown
-    (see app/cost.py) -- "rerank", "generate", "groundedness". It is a
-    parameter rather than a chained builder so that tests patching
-    `get_llm` keep receiving their configured mock directly, which is the
-    mocking convention used throughout tests/."""
-    if config.MODEL_PROVIDER == "groq":
+def _build_raw_client(provider: str, temperature: float):
+    """Construct a provider's chat client. Returns (client, model_name) --
+    the model name is needed separately for cost attribution, which must
+    follow whichever provider actually served the call."""
+    if provider == "groq":
         from langchain_groq import ChatGroq
-        return _CostTrackingLLM(
+        return (
             ChatGroq(
                 model=config.GROQ_CHAT_MODEL,
                 api_key=config.GROQ_API_KEY,
@@ -94,12 +117,11 @@ def get_llm(temperature: float = 0.0, stage: str = "llm"):
                 timeout=config.LLM_REQUEST_TIMEOUT,
             ),
             config.GROQ_CHAT_MODEL,
-            stage,
         )
 
-    if config.MODEL_PROVIDER == "vertexai":
+    if provider == "vertexai":
         from langchain_google_vertexai import ChatVertexAI
-        return _CostTrackingLLM(
+        return (
             ChatVertexAI(
                 model_name=config.VERTEX_CHAT_MODEL,
                 project=config.GCP_PROJECT_ID,
@@ -109,10 +131,200 @@ def get_llm(temperature: float = 0.0, stage: str = "llm"):
                 timeout=config.LLM_REQUEST_TIMEOUT,
             ),
             config.VERTEX_CHAT_MODEL,
-            stage,
         )
 
-    raise ValueError(f"Unknown MODEL_PROVIDER: {config.MODEL_PROVIDER}")
+    raise ValueError(f"Unknown MODEL_PROVIDER: {provider}")
+
+
+def _build_client(provider: str, temperature: float, stage: str) -> "_CostTrackingLLM":
+    raw, model = _build_raw_client(provider, temperature)
+    return _CostTrackingLLM(raw, model, stage)
+
+
+def _resolve_fallback_provider() -> str | None:
+    """The provider to fail over to, or None if failover is off/unusable.
+
+    Misconfiguration disables failover with a warning rather than raising.
+    Failover is a resilience add-on; refusing to start the whole service
+    over a bad value for it would be a worse failure than running without
+    it -- and it would turn a typo in an optional env var into an outage.
+    """
+    name = config.LLM_FALLBACK_PROVIDER
+    if not name:
+        return None
+
+    if name not in _VALID_PROVIDERS:
+        logger.warning(
+            f"LLM_FALLBACK_PROVIDER={name!r} is not one of {_VALID_PROVIDERS}; "
+            "failover disabled."
+        )
+        return None
+
+    if name == config.MODEL_PROVIDER:
+        logger.warning(
+            f"LLM_FALLBACK_PROVIDER={name!r} matches MODEL_PROVIDER; failing over "
+            "to the same provider would achieve nothing. Failover disabled."
+        )
+        return None
+
+    # Credentials are checked here, not on first use: a fallback that turns
+    # out to be unusable mid-outage is the worst possible moment to find
+    # out, and this way the warning lands in the logs at startup instead.
+    if name == "groq" and not config.GROQ_API_KEY:
+        logger.warning("LLM_FALLBACK_PROVIDER=groq but GROQ_API_KEY is unset; failover disabled.")
+        return None
+    if name == "vertexai" and not config.GCP_PROJECT_ID:
+        logger.warning("LLM_FALLBACK_PROVIDER=vertexai but GCP_PROJECT_ID is unset; failover disabled.")
+        return None
+
+    return name
+
+
+class _ResilientLLM:
+    """Circuit breaker + optional cross-provider failover around a client.
+
+    Three outcomes per call:
+
+    * Circuit closed (or probing) and the call succeeds -- pass straight
+      through, reset the breaker.
+    * Circuit closed and the call fails -- count the failure, then serve
+      from the fallback if one is configured, else re-raise.
+    * Circuit open -- skip the primary entirely. Serve from the fallback,
+      or raise CircuitOpenError immediately. This is the fail-fast case
+      the breaker exists for: no retries, no 60s timeout, no held thread.
+
+    Anything other than invoke()/astream() falls through __getattr__ to the
+    primary untouched -- same caveat as _CostTrackingLLM, a new invocation
+    path would bypass both the breaker and cost tracking.
+    """
+
+    def __init__(self, primary, primary_provider: str, fallback_provider: str | None,
+                 temperature: float, stage: str):
+        self._primary = primary
+        self._primary_provider = primary_provider
+        self._fallback_provider = fallback_provider
+        self._temperature = temperature
+        self._stage = stage
+        self._fallback = None
+
+    def _get_fallback(self):
+        """Built on first need, not up front: most deployments never fail
+        over, and constructing the second client eagerly would authenticate
+        against a provider that may never be called."""
+        if self._fallback_provider is None:
+            return None
+        if self._fallback is None:
+            try:
+                self._fallback = _build_client(
+                    self._fallback_provider, self._temperature, self._stage
+                )
+            except Exception as exc:
+                # Don't let this mask the real problem -- the caller is
+                # already handling a primary failure, and that exception is
+                # the more useful one to propagate.
+                logger.error(
+                    f"Fallback provider {self._fallback_provider!r} could not be "
+                    f"constructed: {exc}",
+                    exc_info=True,
+                )
+                return None
+        return self._fallback
+
+    def _on_primary_failure(self, breaker, exc: Exception) -> None:
+        logger.warning(
+            f"LLM call to {self._primary_provider!r} failed "
+            f"({type(exc).__name__}: {exc})"
+        )
+        if breaker.record_failure():
+            metrics.record_circuit_opened(self._primary_provider)
+
+    def _fallback_for_open_circuit(self):
+        """Fallback client to use while the circuit is open, or raise."""
+        fallback = self._get_fallback()
+        if fallback is None:
+            raise circuit.CircuitOpenError(
+                f"Circuit for provider {self._primary_provider!r} is open; "
+                "failing fast instead of calling it."
+            )
+        metrics.record_llm_failover(self._primary_provider, self._fallback_provider)
+        return fallback
+
+    def invoke(self, *args, **kwargs):
+        breaker = circuit.get_breaker(self._primary_provider)
+
+        if not breaker.allow_request():
+            return self._fallback_for_open_circuit().invoke(*args, **kwargs)
+
+        try:
+            result = self._primary.invoke(*args, **kwargs)
+        except Exception as exc:
+            self._on_primary_failure(breaker, exc)
+            fallback = self._get_fallback()
+            if fallback is None:
+                raise
+            metrics.record_llm_failover(self._primary_provider, self._fallback_provider)
+            return fallback.invoke(*args, **kwargs)
+
+        breaker.record_success()
+        return result
+
+    async def astream(self, *args, **kwargs):
+        breaker = circuit.get_breaker(self._primary_provider)
+
+        if not breaker.allow_request():
+            async for chunk in self._fallback_for_open_circuit().astream(*args, **kwargs):
+                yield chunk
+            return
+
+        yielded_any = False
+        try:
+            async for chunk in self._primary.astream(*args, **kwargs):
+                yielded_any = True
+                yield chunk
+        except Exception as exc:
+            self._on_primary_failure(breaker, exc)
+            # Once tokens have reached the client there is no transparent
+            # recovery: the fallback would start the answer from the top and
+            # the reader would watch the response restart mid-sentence.
+            # Only a failure before the first token can be re-routed
+            # invisibly. After that, re-raise and let streaming.py emit its
+            # SSE error payload.
+            if yielded_any:
+                raise
+            fallback = self._get_fallback()
+            if fallback is None:
+                raise
+            metrics.record_llm_failover(self._primary_provider, self._fallback_provider)
+            async for chunk in fallback.astream(*args, **kwargs):
+                yield chunk
+            return
+
+        breaker.record_success()
+
+    def __getattr__(self, name):
+        return getattr(self._primary, name)
+
+
+@lru_cache(maxsize=16)
+def get_llm(temperature: float = 0.0, stage: str = "llm"):
+    """`stage` labels this client's calls in the per-request cost breakdown
+    (see app/cost.py) -- "rerank", "generate", "groundedness". It is a
+    parameter rather than a chained builder so that tests patching
+    `get_llm` keep receiving their configured mock directly, which is the
+    mocking convention used throughout tests/.
+
+    The primary client is built eagerly here, so an unknown MODEL_PROVIDER
+    still surfaces as a ValueError from this call rather than being
+    deferred to the first invoke().
+    """
+    primary = _build_client(config.MODEL_PROVIDER, temperature, stage)
+    return _ResilientLLM(
+        primary,
+        config.MODEL_PROVIDER,
+        _resolve_fallback_provider(),
+        temperature,
+        stage,
+    )
 
 
 @lru_cache(maxsize=1)

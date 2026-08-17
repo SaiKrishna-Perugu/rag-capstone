@@ -704,6 +704,7 @@ app/
   agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
   auth.py       # optional Firebase identity -- additive, raises upload limits, never gates
   cache.py      # semantic caching for repeated questions (Postgres-backed)
+  circuit.py    # circuit breaker for LLM providers (backs failover in providers.py)
   config.py     # centralized env/config loading
   cost.py       # per-request LLM token/cost attribution, broken down by pipeline stage
   database.py   # PostgreSQL + pgvector connection pool, schema init, hybrid search
@@ -814,9 +815,31 @@ real and working, not stubbed — but scoped down from a production system:
   GCP/GitHub credentials, so this ships as complete, working config that
   stays inert until you run that setup yourself).
 
-**Explicitly deferred:** every item previously listed here (async
+- **Circuit breaker + automatic provider failover** (`app/circuit.py`,
+  `app/providers.py`) — without one, every request rediscovers a provider
+  outage the slow way: `LLM_MAX_RETRIES=3` at a 60s timeout, three LLM
+  calls per `/ask`, each holding a worker thread. After
+  `LLM_CIRCUIT_FAILURE_THRESHOLD` *consecutive* failures the provider is
+  skipped entirely for a cooldown, then probed once to recover. Counting
+  consecutive failures (rather than a rate) is what makes it safe without
+  a provider-specific exception taxonomy — any success resets the count,
+  so an isolated bad request can never trip it. Setting
+  `LLM_FALLBACK_PROVIDER` additionally routes chat calls to the *other*
+  provider while the circuit is open, which is the payoff for having
+  built `get_llm()` as a real abstraction: an outage no longer needs a
+  redeploy with a different `MODEL_PROVIDER`. Verified live end-to-end —
+  Groq with a deliberately invalid key failed for real, the circuit
+  opened after N 401s, and subsequent calls were answered by Vertex AI
+  with cost correctly attributed to the model that actually ran.
+  Embeddings deliberately never fail over (the pgvector store is built in
+  one provider's embedding space). Off by default: enabling it means this
+  deployment must hold working credentials for both providers.
+
+**Explicitly deferred:** most items previously listed here — async
 ingestion, external session state, the vector store migration, the eval
-gate + CD pipeline) is now implemented. Still deferred: real
-authentication (per-user identity rather than one shared `API_KEY`),
-circuit breaker / provider failover, security hardening, cost tracking,
-and load testing.
+gate + CD pipeline, optional per-user identity (`app/auth.py`),
+per-request cost attribution (`app/cost.py`), and circuit breaker /
+provider failover (`app/circuit.py`) — are now implemented. Still
+deferred: the remaining security hardening (prompt-injection screening,
+and Cloud DLP redaction of the questions/answers written to logs — log
+retention and the UI XSS fix are done), and load testing.

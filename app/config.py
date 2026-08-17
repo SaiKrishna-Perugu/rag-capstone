@@ -169,6 +169,24 @@ MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
 
+# Circuit breaker (app/circuit.py). Always active -- failing fast on a dead
+# provider is worth having on its own, with or without a fallback below.
+# The threshold counts *consecutive* failures as seen outside LangChain's
+# own retry, so each one is already LLM_MAX_RETRIES upstream attempts:
+# the default 3 is roughly 9 real attempts before the circuit opens.
+LLM_CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "3"))
+LLM_CIRCUIT_COOLDOWN_SECONDS = int(os.getenv("LLM_CIRCUIT_COOLDOWN_SECONDS", "30"))
+
+# Automatic failover: which provider get_llm() should route *chat* calls to
+# while MODEL_PROVIDER's circuit is open. "groq", "vertexai", or empty to
+# disable. Off by default and opt-in on purpose -- enabling it means this
+# deployment must also hold working credentials for the other provider, and
+# silently inferring that from a stray GROQ_API_KEY being present would be a
+# surprising way to start spending money with a second vendor.
+#
+# Embeddings deliberately do NOT fail over; see app/providers.py.
+LLM_FALLBACK_PROVIDER = os.getenv("LLM_FALLBACK_PROVIDER", "").lower()
+
 # --- LangSmith tracing ---------------------------------------------------
 # LangChain/LangGraph auto-trace every LLM call once these env vars are
 # set -- no code changes needed for that part. The @traceable decorators
