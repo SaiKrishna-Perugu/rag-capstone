@@ -165,6 +165,35 @@ MAX_UPLOAD_FILES_AUTHED = int(os.getenv("MAX_UPLOAD_FILES_AUTHED", "10"))
 MAX_UPLOAD_SIZE_MB_AUTHED = int(os.getenv("MAX_UPLOAD_SIZE_MB_AUTHED", "10"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
 
+# --- Security hardening (app/security.py) ----------------------------------
+# Prompt-injection screening. Regex-only, so it costs no tokens and no
+# network round-trip -- on by default because a blocked request is refused
+# BEFORE retrieval, which makes it cheaper than answering, not dearer.
+# Patterns are tuned for precision over recall: this is a public demo, so
+# refusing a real question is worse than missing a borderline one.
+ENABLE_INJECTION_SCREENING = os.getenv("ENABLE_INJECTION_SCREENING", "true").lower() == "true"
+
+# PII redaction of logged questions/answers via Cloud DLP. OFF by default:
+# it needs GCP_PROJECT_ID, the DLP API enabled, and it adds one API call to
+# each /ask* request before the log line is written. Turn it on wherever
+# real users type real things -- production does, local dev does not.
+ENABLE_PII_REDACTION = os.getenv("ENABLE_PII_REDACTION", "false").lower() == "true"
+# PERSON_NAME and STREET_ADDRESS are deliberately absent: both fire on
+# ordinary product/company nouns in a support corpus, and a log where every
+# other word is [PERSON_NAME] is not a log anyone will read.
+# Findings below this confidence are ignored. POSSIBLE, not LIKELY: this is
+# a privacy control, so over-redaction (an order number masked as an SSN) is
+# a cheaper mistake than under-redaction (a real one kept for 14 days).
+# Measured against the real API -- at LIKELY, IP_ADDRESS findings (which come
+# back as POSSIBLE) were silently dropped.
+DLP_MIN_LIKELIHOOD = os.getenv("DLP_MIN_LIKELIHOOD", "POSSIBLE").upper()
+DLP_INFO_TYPES = [
+    t.strip() for t in os.getenv(
+        "DLP_INFO_TYPES",
+        "EMAIL_ADDRESS,PHONE_NUMBER,CREDIT_CARD_NUMBER,US_SOCIAL_SECURITY_NUMBER,IBAN_CODE,IP_ADDRESS",
+    ).split(",") if t.strip()
+]
+
 # --- LLM Resilience -------------------------------------------------------
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))

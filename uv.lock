@@ -735,6 +735,22 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-dlp"
+version = "3.38.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/99/44/ff993b77d75bae4222532a59e8e4d47e7b03b77921420b91c3aac9423244/google_cloud_dlp-3.38.0.tar.gz", hash = "sha256:05c76584beb60b305c13dc51321a7d01e6e3ec31ddf105f18d50f2f834f7b684", size = 279466, upload-time = "2026-06-22T23:21:07.206Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d9/3f/19a057685df49d1cc77cb62960d6f7cf720712cdd26776b15a5514888c46/google_cloud_dlp-3.38.0-py3-none-any.whl", hash = "sha256:16d43a425decfbbe47c100fcafdf0bbd013d9702969f1e6e1c63825ba2619b29", size = 225240, upload-time = "2026-06-22T23:18:44.103Z" },
+]
+
+[[package]]
 name = "google-cloud-firestore"
 version = "2.28.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2708,6 +2724,7 @@ dependencies = [
     { name = "docx2txt" },
     { name = "fastapi" },
     { name = "fastembed" },
+    { name = "google-cloud-dlp" },
     { name = "google-cloud-firestore" },
     { name = "google-cloud-secret-manager" },
     { name = "google-cloud-tasks" },
@@ -2750,6 +2767,7 @@ requires-dist = [
     { name = "docx2txt", specifier = "==0.9" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "fastembed", specifier = ">=0.8.0" },
+    { name = "google-cloud-dlp", specifier = ">=3.27.0" },
     { name = "google-cloud-firestore", specifier = ">=2.28.0" },
     { name = "google-cloud-secret-manager", specifier = ">=2.30.0" },
     { name = "google-cloud-tasks", specifier = ">=2.24.0" },

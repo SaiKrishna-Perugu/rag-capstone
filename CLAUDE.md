@@ -263,6 +263,23 @@ be called with the same question to compare behavior.
   `google-cloud-firestore`, so no `firebase-admin`. Inert with
   `FIREBASE_PROJECT_ID` unset: everyone is anonymous and the UI hides
   sign-in.
+- `security.py` — prompt-injection screening + Cloud DLP PII redaction, in
+  three parts with three different postures. `screen_question()` **gates**
+  (400 before retrieval, so a refused request costs zero tokens) and runs
+  on the *raw* question, before contextualization — screening the rewritten
+  query would let the rewrite launder the payload. `screen_answer()`
+  **repairs** (replaces an answer containing this app's own system-prompt
+  fingerprints) and is the only mitigation that still applies to *indirect*
+  injection arriving via an uploaded document, since it checks the effect
+  rather than the input. `redact_log_fields()` **fails closed** — the one
+  deliberate exception to this codebase's fail-open norm, because degrading
+  to "log it raw" writes exactly the PII it exists to remove. Consequence
+  worth knowing: enabling `ENABLE_PII_REDACTION` without
+  `gcloud services enable dlp.googleapis.com` turns every logged
+  question/answer into `[redaction unavailable]`. On `/ask-stream` output
+  screening cannot suppress anything (tokens already sent), so it instead
+  refuses to *cache* a leaked answer, which stops one success being
+  replayed to later visitors.
 - `metrics.py` — real OpenTelemetry instruments (Counter/Histogram), not a
   hand-rolled dataclass. `GET /metrics` always serves Prometheus
   exposition format (`prometheus_client.generate_latest()`, no separate

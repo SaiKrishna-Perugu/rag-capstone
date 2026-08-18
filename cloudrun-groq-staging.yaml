@@ -50,6 +50,14 @@ spec:
               name: database_url_staging
               key: "latest"
         # Standard configs
+        # Regex-only screening; no tokens, no extra latency.
+        - name: ENABLE_INJECTION_SCREENING
+          value: "true"
+        # Deliberately false: this fails CLOSED, so turning it on before
+        # running `gcloud services enable dlp.googleapis.com` replaces every
+        # logged question/answer with "[redaction unavailable]".
+        - name: ENABLE_PII_REDACTION
+          value: "false"
         - name: MODEL_PROVIDER
           value: "groq"
         - name: GCP_PROJECT_ID

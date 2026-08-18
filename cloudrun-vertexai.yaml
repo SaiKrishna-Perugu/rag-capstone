@@ -41,6 +41,14 @@ spec:
           failureThreshold: 3
           periodSeconds: 10
         env:
+        # Regex-only screening; no tokens, no extra latency.
+        - name: ENABLE_INJECTION_SCREENING
+          value: "true"
+        # Deliberately false: this fails CLOSED, so turning it on before
+        # running `gcloud services enable dlp.googleapis.com` replaces every
+        # logged question/answer with "[redaction unavailable]".
+        - name: ENABLE_PII_REDACTION
+          value: "false"
         - name: MODEL_PROVIDER
           value: 'vertexai'
         # Required by app/config.py for MODEL_PROVIDER=vertexai, and also

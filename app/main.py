@@ -31,7 +31,18 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app import auth, cache, config, cost, database, jobs, memory, metrics, streaming
+from app import (
+    auth,
+    cache,
+    config,
+    cost,
+    database,
+    jobs,
+    memory,
+    metrics,
+    security,
+    streaming,
+)
 from app.agent import run_agentic_rag
 from app.middleware import APIKeyMiddleware, IdentityMiddleware
 from app.rag import answer_question
@@ -401,6 +412,25 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     cost.start_request()
     start = time.perf_counter()
 
+    # --- Prompt-injection screening ---------------------------------------
+    # Deliberately first: before contextualization, before the cache, before
+    # retrieval. A refused request should cost nothing, and screening a
+    # rewritten question rather than the one actually typed would let the
+    # rewrite launder the payload.
+    verdict = security.screen_question(body.question)
+    if verdict.flagged:
+        metrics.record_injection_blocked(verdict.reason)
+        logger.warning(json.dumps({
+            "request_id": request_id, "event": "injection_blocked", "endpoint": "ask",
+            "reason": verdict.reason,
+            "user": getattr(request.state, "identity", auth.ANONYMOUS).log_value,
+        }))
+        raise HTTPException(
+            status_code=400,
+            detail={"error": security.REFUSAL_MESSAGE, "reason": verdict.reason,
+                    "request_id": request_id},
+        )
+
     # --- Conversation Memory: Contextualize Question ----------------------
     contextualized_q = await asyncio.to_thread(
         memory.contextualize_question, body.session_id, body.question
@@ -422,8 +452,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             # data in logs. "anonymous" for unauthenticated visitors.
             "user": getattr(request.state, "identity", auth.ANONYMOUS).log_value,
             "cache": "HIT",
-            "question": body.question,
-            "answer": cached_hit["answer"],
+            **security.redact_log_fields({
+                "question": body.question,
+                "answer": cached_hit["answer"],
+            }),
             "similarity_score": cached_hit["similarity_score"],
             "latency_ms": latency_ms,
             # Not always zero: with a session_id, contextualize_question()
@@ -462,13 +494,27 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     if not result.sources:
         metrics.record_empty_retrieval()
 
+    # Output screening: catches the case input screening cannot, where the
+    # payload arrived inside an ingested document rather than the question.
+    answer_verdict = security.screen_answer(result.answer)
+    if answer_verdict.flagged:
+        metrics.record_prompt_leak()
+        logger.warning(json.dumps({
+            "request_id": request_id, "event": "prompt_leak_suppressed",
+            "endpoint": "ask", "reason": answer_verdict.reason,
+        }))
+        result.answer = security.LEAKED_PROMPT_REPLACEMENT
+        result.groundedness = "NOT_CHECKED"
+
     logger.info(json.dumps({
         "request_id": request_id,
         "event": "ask",
         "user": getattr(request.state, "identity", auth.ANONYMOUS).log_value,
-        "question": body.question,
-        "contextualized_query": contextualized_q,
-        "answer": result.answer,
+        **security.redact_log_fields({
+            "question": body.question,
+            "contextualized_query": contextualized_q,
+            "answer": result.answer,
+        }),
         "groundedness": result.groundedness,
         "num_sources": len(result.sources),
         "latency_ms": latency_ms,
@@ -522,6 +568,21 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     cost.start_request()
     start = time.perf_counter()
 
+    # Same screening as /ask, and worth more here: the agentic loop makes
+    # the most LLM calls per request, so a refused payload avoids the most.
+    verdict = security.screen_question(body.question)
+    if verdict.flagged:
+        metrics.record_injection_blocked(verdict.reason)
+        logger.warning(json.dumps({
+            "request_id": request_id, "event": "injection_blocked",
+            "endpoint": "ask-agentic", "reason": verdict.reason,
+        }))
+        raise HTTPException(
+            status_code=400,
+            detail={"error": security.REFUSAL_MESSAGE, "reason": verdict.reason,
+                    "request_id": request_id},
+        )
+
     # --- Conversation Memory: Contextualize Question ----------------------
     contextualized_q = await asyncio.to_thread(
         memory.contextualize_question, body.session_id, body.question
@@ -538,8 +599,10 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
             "request_id": request_id,
             "event": "ask-agentic",
             "cache": "HIT",
-            "question": body.question,
-            "answer": cached_hit["answer"],
+            **security.redact_log_fields({
+                "question": body.question,
+                "answer": cached_hit["answer"],
+            }),
             "similarity_score": cached_hit["similarity_score"],
             "latency_ms": latency_ms,
             **cost.current().as_log_fields(),
@@ -582,13 +645,25 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     if not final_state["sources"]:
         metrics.record_empty_retrieval()
 
+    answer_verdict = security.screen_answer(final_state["answer"])
+    if answer_verdict.flagged:
+        metrics.record_prompt_leak()
+        logger.warning(json.dumps({
+            "request_id": request_id, "event": "prompt_leak_suppressed",
+            "endpoint": "ask-agentic", "reason": answer_verdict.reason,
+        }))
+        final_state["answer"] = security.LEAKED_PROMPT_REPLACEMENT
+        final_state["groundedness"] = "NOT_CHECKED"
+
     logger.info(json.dumps({
         "request_id": request_id,
         "event": "ask-agentic",
-        "question": body.question,
-        "contextualized_query": contextualized_q,
+        **security.redact_log_fields({
+            "question": body.question,
+            "contextualized_query": contextualized_q,
+            "answer": final_state["answer"],
+        }),
         "final_query": final_state["current_query"],
-        "answer": final_state["answer"],
         "groundedness": final_state["groundedness"],
         "retries_used": final_state["retry_count"],
         "num_sources": len(final_state["sources"]),

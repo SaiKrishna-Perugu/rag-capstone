@@ -92,6 +92,16 @@ _llm_failover_total = _meter.create_counter(
 )
 
 
+_injection_blocked_total = _meter.create_counter(
+    "rag_injection_blocked_total",
+    description="Requests refused by prompt-injection screening, by reason.",
+)
+_prompt_leak_total = _meter.create_counter(
+    "rag_prompt_leak_total",
+    description="Answers suppressed because they echoed this app's system prompt.",
+)
+
+
 # --- Public API ---------------------------------------------------------
 
 def record_request(endpoint: str) -> None:
@@ -135,3 +145,13 @@ def record_circuit_opened(provider: str) -> None:
 def record_llm_failover(from_provider: str, to_provider: str) -> None:
     """A call was served by the fallback provider instead of the primary."""
     _llm_failover_total.add(1, {"from": from_provider, "to": to_provider})
+
+
+def record_injection_blocked(reason: str) -> None:
+    """A question was refused by input screening (app/security.py)."""
+    _injection_blocked_total.add(1, {"reason": reason})
+
+
+def record_prompt_leak() -> None:
+    """An answer was suppressed for containing system-prompt text."""
+    _prompt_leak_total.add(1)

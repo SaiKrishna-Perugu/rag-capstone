@@ -717,6 +717,7 @@ app/
   middleware.py # API key gate + optional Firebase identity, CORS, rate limiting
   providers.py  # model provider factory (Groq / Vertex AI)
   rag.py        # single-pass retrieval, grounded generation, groundedness check
+  security.py   # prompt-injection screening + Cloud DLP PII redaction of logs
   retrieval.py  # hybrid retrieval + LLM reranking
   streaming.py  # Server-Sent Events (SSE) streaming
   ui.html       # frontend interface
@@ -835,11 +836,24 @@ real and working, not stubbed — but scoped down from a production system:
   one provider's embedding space). Off by default: enabling it means this
   deployment must hold working credentials for both providers.
 
+- **Security hardening** (`app/security.py`) — prompt-injection screening
+  refuses a crafted payload with a 400 *before* retrieval, so an attack
+  costs zero LLM calls; output screening catches the case input screening
+  cannot, where the payload arrived inside an uploaded document rather than
+  the question. Logged questions and answers are de-identified through
+  **Cloud DLP** (`ENABLE_PII_REDACTION`, off by default) — this matters
+  because production is a public demo logging text typed by anonymous
+  visitors. That control deliberately **fails closed**, the one exception
+  to this codebase's fail-open norm: if DLP is unreachable the field is
+  written as `[redaction unavailable]` rather than raw, because falling
+  back to raw would write exactly the data the control exists to remove.
+  Enabling it therefore requires `gcloud services enable dlp.googleapis.com`
+  first, or you trade your request logs for nothing.
+
 **Explicitly deferred:** most items previously listed here — async
 ingestion, external session state, the vector store migration, the eval
 gate + CD pipeline, optional per-user identity (`app/auth.py`),
 per-request cost attribution (`app/cost.py`), and circuit breaker /
 provider failover (`app/circuit.py`) — are now implemented. Still
-deferred: the remaining security hardening (prompt-injection screening,
-and Cloud DLP redaction of the questions/answers written to logs — log
-retention and the UI XSS fix are done), and load testing.
+deferred: **load testing** (Phase 9) and multi-tenancy (Phase 10,
+deliberately skipped).

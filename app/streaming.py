@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 
-from app import cache, cost, memory, metrics
+from app import cache, cost, memory, metrics, security
 from app.providers import get_llm
 from app.rag import _format_context, check_groundedness, retrieve
 
@@ -29,7 +29,19 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
     # log write, or those three would each see a different accumulator.
     cost.start_request()
     start = time.perf_counter()
-    
+
+    # Screened before the SSE stream opens, so a refused request is a clean
+    # error payload rather than a half-streamed answer that stops mid-token.
+    verdict = security.screen_question(question)
+    if verdict.flagged:
+        metrics.record_injection_blocked(verdict.reason)
+        logger.warning(json.dumps({
+            "request_id": request_id, "event": "injection_blocked",
+            "endpoint": "ask-stream", "reason": verdict.reason,
+        }))
+        yield f"data: {json.dumps({'error': security.REFUSAL_MESSAGE, 'reason': verdict.reason, 'request_id': request_id})}\n\n"
+        return
+
     try:
         # 1. Contextualize the question based on chat history
         contextualized_q = await asyncio.to_thread(
@@ -50,8 +62,10 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
                 "request_id": request_id,
                 "event": "ask-stream",
                 "cache": "HIT",
-                "question": question,
-                "answer": cached_hit["answer"],
+                **security.redact_log_fields({
+                    "question": question,
+                    "answer": cached_hit["answer"],
+                }),
                 "similarity_score": cached_hit["similarity_score"],
                 "latency_ms": latency_ms,
                 # Not always zero -- contextualize_question() may have made
@@ -112,7 +126,20 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
             return
             
         final_answer = "".join(full_answer)
-        
+
+        # Output screening on a stream is necessarily after the fact: the
+        # tokens have already reached the reader, so there is nothing to
+        # suppress. What it can still do is refuse to CACHE a leaked answer
+        # (below) and record it, so one successful injection does not get
+        # replayed to every later visitor asking a similar question.
+        leak = security.screen_answer(final_answer)
+        if leak.flagged:
+            metrics.record_prompt_leak()
+            logger.warning(json.dumps({
+                "request_id": request_id, "event": "prompt_leak_suppressed",
+                "endpoint": "ask-stream", "reason": leak.reason,
+            }))
+
         # 5. Check groundedness post-generation
         groundedness = await asyncio.to_thread(check_groundedness, final_answer, chunks)
         
@@ -126,7 +153,8 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
             for c in chunks
         ]
         
-        await asyncio.to_thread(cache.set_cached_answer, contextualized_q, final_answer, groundedness)
+        if not leak.flagged:
+            await asyncio.to_thread(cache.set_cached_answer, contextualized_q, final_answer, groundedness)
         if session_id:
             await asyncio.to_thread(memory.add_to_history, session_id, question, final_answer)
             
@@ -139,9 +167,11 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
         logger.info(json.dumps({
             "request_id": request_id,
             "event": "ask-stream",
-            "question": question,
-            "contextualized_query": contextualized_q,
-            "answer": final_answer,
+            **security.redact_log_fields({
+                "question": question,
+                "contextualized_query": contextualized_q,
+                "answer": final_answer,
+            }),
             "groundedness": groundedness,
             "num_sources": len(sources),
             "latency_ms": latency_ms,
