@@ -66,8 +66,12 @@ class AgentState(TypedDict):
     sources: list
 
 
-def _get_grading_llm():
-    return get_llm(temperature=0.0)
+def _get_grading_llm(stage: str):
+    """`stage` labels these calls in the per-request cost breakdown. The
+    agentic loop's whole cost story is how much the grade/rewrite retries
+    add on top of a plain /ask, and an unlabelled client puts both into one
+    generic "llm" bucket where that is exactly what you cannot see."""
+    return get_llm(temperature=0.0, stage=stage)
 
 
 # --- Graph nodes ---------------------------------------------------------
@@ -84,7 +88,7 @@ def node_grade(state: AgentState) -> AgentState:
         return {**state, "grade": "INSUFFICIENT"}
 
     context = _format_context(state["chunks"])
-    llm = _get_grading_llm()
+    llm = _get_grading_llm("grade")
     messages = [
         ("system", _GRADE_SYSTEM_PROMPT),
         ("human", f"QUESTION:\n{state['original_question']}\n\nCONTEXT:\n{context}"),
@@ -96,7 +100,7 @@ def node_grade(state: AgentState) -> AgentState:
 
 @traceable(name="agent.rewrite_query", run_type="chain")
 def node_rewrite_query(state: AgentState) -> AgentState:
-    llm = _get_grading_llm()
+    llm = _get_grading_llm("rewrite")
     messages = [
         ("system", _REWRITE_SYSTEM_PROMPT),
         ("human", (f"ORIGINAL QUESTION:\n{state['original_question']}\n\n"

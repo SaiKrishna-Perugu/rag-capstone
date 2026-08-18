@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 
-from app import cache, memory, metrics
+from app import cache, cost, memory, metrics
 from app.providers import get_llm
 from app.rag import _format_context, check_groundedness, retrieve
 
@@ -22,6 +22,12 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
     """
     request_id = str(uuid.uuid4())
     metrics.record_request("ask-stream")
+    # Started HERE, inside the generator, not in main.py's route handler.
+    # cost.py accumulates in a ContextVar, and an async generator runs in
+    # the context of whoever resumes it -- so the set must happen in the
+    # same body that later does the retrieval, the astream() call, and the
+    # log write, or those three would each see a different accumulator.
+    cost.start_request()
     start = time.perf_counter()
     
     try:
@@ -48,6 +54,9 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
                 "answer": cached_hit["answer"],
                 "similarity_score": cached_hit["similarity_score"],
                 "latency_ms": latency_ms,
+                # Not always zero -- contextualize_question() may have made
+                # an LLM call before the cache was consulted.
+                **cost.current().as_log_fields(),
             }))
             
             # Yield the entire cached answer as a single token for simplicity,
@@ -136,6 +145,9 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
             "groundedness": groundedness,
             "num_sources": len(sources),
             "latency_ms": latency_ms,
+            # astream() usage lands here via _CostTrackingLLM, which merges
+            # streamed chunks so the final message carries the totals.
+            **cost.current().as_log_fields(),
         }))
         
         final_payload = {

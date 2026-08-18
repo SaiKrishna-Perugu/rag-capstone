@@ -426,6 +426,9 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             "answer": cached_hit["answer"],
             "similarity_score": cached_hit["similarity_score"],
             "latency_ms": latency_ms,
+            # Not always zero: with a session_id, contextualize_question()
+            # has already made an LLM call before the cache was consulted.
+            **cost.current().as_log_fields(),
         }))
         return AskResponse(
             question=body.question,
@@ -512,6 +515,11 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     """
     request_id = str(uuid.uuid4())
     metrics.record_request("ask-agentic")
+    # Same context-local accumulator as /ask. The agentic loop makes MORE
+    # LLM calls than /ask, not fewer -- grade and rewrite run per retry on
+    # top of generate/groundedness -- so this is the endpoint whose cost is
+    # least predictable and most worth recording.
+    cost.start_request()
     start = time.perf_counter()
 
     # --- Conversation Memory: Contextualize Question ----------------------
@@ -534,6 +542,7 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
             "answer": cached_hit["answer"],
             "similarity_score": cached_hit["similarity_score"],
             "latency_ms": latency_ms,
+            **cost.current().as_log_fields(),
         }))
         return AgenticAskResponse(
             question=body.question,
@@ -584,6 +593,7 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
         "retries_used": final_state["retry_count"],
         "num_sources": len(final_state["sources"]),
         "latency_ms": latency_ms,
+        **cost.current().as_log_fields(),
     }))
 
     # Cache the successful result for future similar questions

@@ -163,3 +163,11 @@ jobs:
           gcloud run services update-traffic rag-capstone --region=us-central1 --to-tags=canary=10
           sleep 120
           gcloud run services update-traffic rag-capstone --region=us-central1 --to-latest
+          # --to-latest moves TRAFFIC but leaves the tag attached, so the
+          # revision now serving 100% of production keeps answering on
+          # canary---<service>.run.app too. Production is a public demo with
+          # no API key, so that is a second live URL whose name claims to be
+          # a pre-release canary -- a trap for anyone (or any smoke test)
+          # who trusts the name. The tag is reassigned on the next deploy
+          # either way; this just stops it meaning the wrong thing in between.
+          gcloud run services update-traffic rag-capstone --region=us-central1 --remove-tags=canary

@@ -119,7 +119,10 @@ def contextualize_question(session_id: str, question: str) -> str:
 
     messages.append(HumanMessage(content=question))
 
-    llm = get_llm(temperature=0.0)
+    # Labelled so contextualization shows up as its own line in the cost
+    # breakdown -- it runs BEFORE the semantic cache is consulted, so it is
+    # the one stage that still costs money on an otherwise-free cache hit.
+    llm = get_llm(temperature=0.0, stage="contextualize")
     response = llm.invoke(messages)
 
     # The LLM returns the rewritten standalone question
