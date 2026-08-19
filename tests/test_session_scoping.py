@@ -300,3 +300,38 @@ def test_removal_requires_a_session(client):
         resp = client.delete("/documents/report.pdf")
     assert resp.status_code == 404
     del_chunks.assert_not_called()
+
+
+# --- Corpus cap counts live chunks, not dead ones ------------------------
+
+def test_chunk_count_excludes_expired_by_default():
+    """The cap must not be consumed by documents that expired days ago and
+    nobody can retrieve. Retrieval already filters on expires_at, but the
+    rows persist until a sweep deletes them -- and no sweep is guaranteed to
+    be configured, so counting them meant /upload could start returning 507
+    over invisible data."""
+    captured = {}
+
+    class Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, sql, params=None): captured["sql"] = sql
+        def fetchone(self): return (0,)
+
+    conn = MagicMock()
+    conn.cursor.return_value = Cur()
+    ctx = MagicMock()
+    ctx.__enter__ = lambda s: conn
+    ctx.__exit__ = lambda s, *a: False
+
+    with patch("app.database.get_conn", return_value=ctx):
+        database.get_chunk_count()
+    assert "expires_at IS NULL OR expires_at > now()" in captured["sql"]
+
+    with patch("app.database.get_conn", return_value=ctx):
+        database.get_chunk_count(session_id="sess-A")
+    assert "expires_at" in captured["sql"] and "session_id = %s" in captured["sql"]
+
+    with patch("app.database.get_conn", return_value=ctx):
+        database.get_chunk_count(include_expired=True)
+    assert "expires_at" not in captured["sql"]

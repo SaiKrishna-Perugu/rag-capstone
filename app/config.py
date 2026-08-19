@@ -125,7 +125,11 @@ JOB_TTL_HOURS = int(os.getenv("JOB_TTL_HOURS", "48"))
 UPLOAD_TTL_HOURS = int(os.getenv("UPLOAD_TTL_HOURS", "24"))
 # Per-session ceiling on indexed chunks, so one visitor cannot consume the
 # whole MAX_CORPUS_CHUNKS budget and lock everyone else out. 0 disables.
-MAX_SESSION_CHUNKS = int(os.getenv("MAX_SESSION_CHUNKS", "100"))
+# 100 was too tight: at CHUNK_SIZE=800 a single moderate PDF can exceed it,
+# so a visitor's first legitimate upload could be their last. Note the cap is
+# checked BEFORE a batch is written, so it bounds accumulation across uploads
+# rather than the size of any one upload.
+MAX_SESSION_CHUNKS = int(os.getenv("MAX_SESSION_CHUNKS", "300"))
 
 # --- Metrics (OpenTelemetry) -------------------------------------------------
 # Prometheus export (GET /metrics) is always on and needs no GCP config.
@@ -152,6 +156,14 @@ MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "5"))
 # without bound, and corpus bloat is not merely a storage cost -- retrieval
 # quality degrades measurably as unrelated content crowds out the real
 # answers, and every ingested chunk costs an embedding call.
+# Counts LIVE chunks only (database.get_chunk_count excludes expired rows),
+# so capacity returns on expiry whether or not the cleanup sweep ever runs.
+#
+# This can be generous now. The original rationale was retrieval quality --
+# unrelated uploads crowding out real answers -- but session scoping means a
+# visitor only ever retrieves their own documents plus the curated corpus, so
+# corpus size no longer degrades anyone's results. What remains is abuse and
+# cost mitigation, and at ~3KB per chunk even 3000 is under 10MB.
 MAX_CORPUS_CHUNKS = int(os.getenv("MAX_CORPUS_CHUNKS", "0"))
 
 # --- Optional Firebase identity (app/auth.py) -------------------------------

@@ -107,19 +107,38 @@ def init_db() -> None:
 # Chunk operations (used by ingest.py and retrieval.py)
 # ---------------------------------------------------------------------------
 
-def get_chunk_count(session_id: str | None = None) -> int:
-    """Chunks in the store. Used by /ready (total) and by /upload's caps.
+def get_chunk_count(session_id: str | None = None, include_expired: bool = False) -> int:
+    """Chunks in the store. Used by /ready and by /upload's caps.
 
     With `session_id`, counts only that visitor's own uploaded chunks, which
     is what the per-session ceiling is enforced against -- so one visitor
     cannot consume the whole global budget.
+
+    **Expired rows are excluded by default, and that matters.** Retrieval
+    already filters on expires_at, so an expired chunk is invisible the
+    moment it expires -- but it still occupies a row until something deletes
+    it, and nothing does unless the Cloud Scheduler sweep is configured.
+    Counting those rows against MAX_CORPUS_CHUNKS meant the demo could start
+    refusing uploads with a 507 because of documents that expired days ago
+    and no visitor could retrieve. Counting live rows makes the cap
+    self-correcting: capacity comes back on expiry whether or not the sweep
+    ever runs, and the sweep becomes a storage optimisation rather than a
+    correctness dependency.
+
+    `include_expired=True` gives the raw row count, for when the question is
+    about storage rather than what is retrievable.
     """
+    live = "" if include_expired else " WHERE (expires_at IS NULL OR expires_at > now())"
     with get_conn() as conn:
         with conn.cursor() as cur:
             if session_id is None:
-                cur.execute("SELECT COUNT(*) FROM chunks")
+                cur.execute(f"SELECT COUNT(*) FROM chunks{live}")
             else:
-                cur.execute("SELECT COUNT(*) FROM chunks WHERE session_id = %s", (session_id,))
+                joiner = " AND" if live else " WHERE"
+                cur.execute(
+                    f"SELECT COUNT(*) FROM chunks{live}{joiner} session_id = %s",
+                    (session_id,),
+                )
             return cur.fetchone()[0]
 
 
