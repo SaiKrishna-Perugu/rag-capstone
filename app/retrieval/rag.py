@@ -8,8 +8,8 @@ without spinning up the FastAPI app.
 import logging
 from dataclasses import dataclass, field
 
-from app.providers import get_llm
-from app.retrieval import retrieve_with_hybrid_and_rerank
+from app.llm.providers import get_llm
+from app.retrieval.hybrid import retrieve_with_hybrid_and_rerank
 
 logger = logging.getLogger(__name__)
 

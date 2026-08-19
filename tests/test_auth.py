@@ -8,7 +8,8 @@ purpose. Most of these tests exist to prove the failure modes degrade to
 """
 from unittest.mock import patch
 
-from app import auth, config
+from app import config
+from app.api import auth
 
 
 def test_no_header_is_anonymous():
@@ -33,14 +34,14 @@ def test_invalid_token_degrades_to_anonymous(monkeypatch):
     """A stale token in a browser tab must drop the visitor to the public
     experience, not lock them out."""
     monkeypatch.setattr(config, "FIREBASE_PROJECT_ID", "test-project")
-    with patch("app.auth.id_token.verify_firebase_token", side_effect=ValueError("expired")):
+    with patch("app.api.auth.id_token.verify_firebase_token", side_effect=ValueError("expired")):
         assert auth.identity_from_header("Bearer expired-token") is auth.ANONYMOUS
 
 
 def test_valid_token_resolves_identity(monkeypatch):
     monkeypatch.setattr(config, "FIREBASE_PROJECT_ID", "test-project")
     claims = {"sub": "uid-123", "email": "someone@example.com"}
-    with patch("app.auth.id_token.verify_firebase_token", return_value=claims):
+    with patch("app.api.auth.id_token.verify_firebase_token", return_value=claims):
         ident = auth.identity_from_header("Bearer good-token")
     assert ident.is_authenticated
     assert ident.uid == "uid-123"
@@ -51,7 +52,7 @@ def test_log_value_uses_uid_not_email(monkeypatch):
     """Logs get a stable identifier without accumulating personal data."""
     monkeypatch.setattr(config, "FIREBASE_PROJECT_ID", "test-project")
     claims = {"sub": "uid-123", "email": "someone@example.com"}
-    with patch("app.auth.id_token.verify_firebase_token", return_value=claims):
+    with patch("app.api.auth.id_token.verify_firebase_token", return_value=claims):
         ident = auth.identity_from_header("Bearer good-token")
     assert ident.log_value == "uid-123"
     assert auth.ANONYMOUS.log_value == "anonymous"

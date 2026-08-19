@@ -1,6 +1,6 @@
 """Circuit breaker + cross-provider failover (app/circuit.py, app/providers.py).
 
-The integration tests here patch `app.providers._build_raw_client` rather
+The integration tests here patch `app.llm.providers._build_raw_client` rather
 than the provider SDKs, keeping to the module-function boundary this repo
 mocks at everywhere else. That boundary is also the useful one: it exercises
 the real _ResilientLLM/_CostTrackingLLM stack, so a regression in the
@@ -13,8 +13,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessageChunk
 
-from app import circuit, config, cost, providers
-from app.circuit import CircuitBreaker, CircuitOpenError, CircuitState
+from app import config
+from app.llm import circuit, cost, providers
+from app.llm.circuit import CircuitBreaker, CircuitOpenError, CircuitState
 
 PRIMARY = "vertexai"
 PRIMARY_MODEL = "gemini-2.5-flash-lite"
@@ -171,7 +172,7 @@ def _wire(monkeypatch, primary_client, fallback_client, *, fallback=FALLBACK, th
             return fallback_client, FALLBACK_MODEL
         raise ValueError(f"Unknown MODEL_PROVIDER: {provider}")
 
-    return patch("app.providers._build_raw_client", side_effect=build)
+    return patch("app.llm.providers._build_raw_client", side_effect=build)
 
 
 def test_repeated_failures_open_the_circuit_and_route_to_the_fallback(monkeypatch):

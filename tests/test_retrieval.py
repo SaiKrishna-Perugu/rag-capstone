@@ -24,11 +24,11 @@ def test_rerank_falls_back_to_rrf_order_on_bad_llm_response(llm_behavior):
     propagate. Regression test -- llm.invoke() used to sit outside the try,
     so a provider timeout took down the whole retrieval call, and a non-list
     JSON response raised TypeError past the except-tuple."""
-    from app.retrieval import rerank
+    from app.retrieval.hybrid import rerank
 
     candidates = _candidates(12)
 
-    with patch("app.retrieval.get_llm") as mock_get_llm:
+    with patch("app.retrieval.hybrid.get_llm") as mock_get_llm:
         mock_llm = MagicMock()
         if llm_behavior == "raise":
             mock_llm.invoke.side_effect = TimeoutError("provider timed out")
@@ -46,11 +46,11 @@ def test_rerank_falls_back_to_rrf_order_on_bad_llm_response(llm_behavior):
 def test_rerank_applies_valid_ordering_and_backfills_omissions():
     """A well-formed response reorders; candidates the LLM omitted are
     appended in original order rather than silently dropped."""
-    from app.retrieval import rerank
+    from app.retrieval.hybrid import rerank
 
     candidates = _candidates(12)
 
-    with patch("app.retrieval.get_llm") as mock_get_llm:
+    with patch("app.retrieval.hybrid.get_llm") as mock_get_llm:
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content="[3, 1]")
         mock_get_llm.return_value = mock_llm
@@ -65,14 +65,14 @@ def test_rerank_applies_valid_ordering_and_backfills_omissions():
 def test_retrieve_with_hybrid_and_rerank():
     """Verify hybrid_retrieve -> rerank pipeline works end-to-end
     with the new database.hybrid_search backend."""
-    from app.retrieval import retrieve_with_hybrid_and_rerank
+    from app.retrieval.hybrid import retrieve_with_hybrid_and_rerank
 
-    with patch("app.retrieval.get_embeddings") as mock_get_emb:
+    with patch("app.retrieval.hybrid.get_embeddings") as mock_get_emb:
         mock_emb = MagicMock()
         mock_emb.embed_query.return_value = [0.0] * 384
         mock_get_emb.return_value = mock_emb
 
-        with patch("app.retrieval.database") as mock_db:
+        with patch("app.retrieval.hybrid.database") as mock_db:
             # hybrid_search returns empty list -> no candidates
             mock_db.hybrid_search.return_value = []
 
@@ -83,14 +83,14 @@ def test_retrieve_with_hybrid_and_rerank():
 
 def test_hybrid_retrieve_converts_rows_to_documents():
     """Verify that database rows are converted to LangChain Documents."""
-    from app.retrieval import hybrid_retrieve
+    from app.retrieval.hybrid import hybrid_retrieve
 
-    with patch("app.retrieval.get_embeddings") as mock_get_emb:
+    with patch("app.retrieval.hybrid.get_embeddings") as mock_get_emb:
         mock_emb = MagicMock()
         mock_emb.embed_query.return_value = [0.0] * 384
         mock_get_emb.return_value = mock_emb
 
-        with patch("app.retrieval.database") as mock_db:
+        with patch("app.retrieval.hybrid.database") as mock_db:
             mock_db.hybrid_search.return_value = [
                 {
                     "id": 1,

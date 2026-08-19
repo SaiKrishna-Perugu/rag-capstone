@@ -1,7 +1,7 @@
 """Per-request LLM cost attribution."""
 import asyncio
 
-from app import cost
+from app.llm import cost
 
 
 def test_estimate_cost_uses_pricing_table():

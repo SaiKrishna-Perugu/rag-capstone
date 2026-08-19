@@ -11,8 +11,8 @@ retrieval and LLM generation entirely.
 import logging
 import os
 
-from app import database
-from app.providers import get_embeddings
+from app.db import database
+from app.llm.providers import get_embeddings
 
 logger = logging.getLogger(__name__)
 

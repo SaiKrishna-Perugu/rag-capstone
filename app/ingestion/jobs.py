@@ -35,7 +35,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app import config, ingest
+from app import config
+from app.ingestion import ingest
 
 logger = logging.getLogger(__name__)
 

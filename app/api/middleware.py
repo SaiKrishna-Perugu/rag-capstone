@@ -60,7 +60,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import auth, config
+from app import config
+from app.api import auth
 
 logger = logging.getLogger(__name__)
 

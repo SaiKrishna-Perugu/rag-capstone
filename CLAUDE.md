@@ -19,9 +19,9 @@ uv sync --frozen
 cp .env.example .env   # then set GROQ_API_KEY (or Vertex AI vars)
 
 # Build/refresh the vector index (incremental by default -- content-hashed,
-# unchanged files skipped; see app/ingest.py)
-uv run python -m app.ingest
-uv run python -m app.ingest --force   # full re-embed, e.g. after switching MODEL_PROVIDER
+# unchanged files skipped; see app/ingestion/ingest.py)
+uv run python -m app.ingestion.ingest
+uv run python -m app.ingestion.ingest --force   # full re-embed, e.g. after switching MODEL_PROVIDER
 
 # Run the API (http://127.0.0.1:8000/docs for Swagger UI)
 uv run uvicorn app.main:app --reload
@@ -77,12 +77,12 @@ is completed by hand; that setup can't be done from this codebase alone.
 
 ## Architecture
 
-Everything routes through `app/config.py` for settings and `app/providers.py`
+Everything routes through `app/config.py` for settings and `app/llm/providers.py`
 for model access — no module calls `os.getenv()` or instantiates an LLM/
 embeddings client directly outside these two files. Switching
 `MODEL_PROVIDER` between `groq` and `vertexai` in `.env` is the only change
 needed to swap providers; **the vector store is provider-specific**, so a
-switch requires `uv run python -m app.ingest --force` (mixing embedding
+switch requires `uv run python -m app.ingestion.ingest --force` (mixing embedding
 spaces from different providers in the same Postgres `chunks` table
 silently produces bad retrieval, not an error — unless the embedding
 *dimension* also changed, e.g. Groq's 384-dim FastEmbed vs. Vertex AI's
@@ -90,12 +90,12 @@ silently produces bad retrieval, not an error — unless the embedding
 outright rather than silently corrupting retrieval; see `EMBEDDING_DIMENSION`
 below and the vector store paragraph).
 
-The vector store is PostgreSQL + pgvector (`app/database.py`,
-`app/db_schema.sql`), not a local/embedded store — this is deliberate:
+The vector store is PostgreSQL + pgvector (`app/db/database.py`,
+`app/db/db_schema.sql`), not a local/embedded store — this is deliberate:
 Cloud Run instances are stateless with independent local disks, so a local
 vector store would mean every instance sees a different, divergent copy of
 the index. Postgres's `tsvector`/`tsquery` full-text search also means
-hybrid retrieval (`app/retrieval.py` `hybrid_retrieve()` →
+hybrid retrieval (`app/retrieval/hybrid.py` `hybrid_retrieve()` →
 `database.hybrid_search()`) runs as a single SQL query doing vector search
 + full-text search + RRF fusion, rather than a separately maintained BM25
 index. Schema creation (`database.init_db()`) is idempotent
@@ -165,21 +165,21 @@ Three traps this created, all found by running it rather than reading it:
 consumed by documents nobody can retrieve. That makes the Cloud Scheduler
 sweep a storage optimisation rather than something correctness depends on.
 
-**Request flow for `/ask` and `/ask-stream`** (`app/main.py` → `app/rag.py`):
-1. `app/memory.py` rewrites the question using conversation history if a
+**Request flow for `/ask` and `/ask-stream`** (`app/main.py` → `app/retrieval/rag.py`):
+1. `app/retrieval/memory.py` rewrites the question using conversation history if a
    `session_id` is given (`contextualize_question`).
-2. `app/cache.py` checks the semantic cache; on hit, returns immediately
+2. `app/retrieval/cache.py` checks the semantic cache; on hit, returns immediately
    without touching retrieval/generation.
-3. `app/retrieval.py` `hybrid_retrieve()`: BM25 + vector search each over a
+3. `app/retrieval/hybrid.py` `hybrid_retrieve()`: BM25 + vector search each over a
    candidate pool 3x the final top-k, fused via Reciprocal Rank Fusion, then
    `rerank()` does a single listwise LLM call to narrow to top-k. Reranking
    falls back to pre-rerank order if the LLM response is malformed.
-4. `app/rag.py` `generate_answer()` does strict context-only generation,
+4. `app/retrieval/rag.py` `generate_answer()` does strict context-only generation,
    then `check_groundedness()` runs an LLM-as-judge hallucination check.
-5. Result is cached (`app/cache.py`) and appended to session history
-   (`app/memory.py`) before returning.
+5. Result is cached (`app/retrieval/cache.py`) and appended to session history
+   (`app/retrieval/memory.py`) before returning.
 
-**`/ask-agentic`** (`app/agent.py`) replaces the single retrieve→generate
+**`/ask-agentic`** (`app/retrieval/agent.py`) replaces the single retrieve→generate
 pass with a LangGraph loop: retrieve → grade (LLM judges if context is
 actually sufficient) → generate if sufficient, else rewrite the query and
 retry (capped at `MAX_RETRIES=2`, tracked via `retry_count` in graph state)
@@ -190,7 +190,7 @@ be called with the same question to compare behavior.
 **Module map** (`app/`):
 - `config.py` — all env/config loading; detects CI via `CI`/`GITHUB_ACTIONS`/
   `PYTEST_CURRENT_TEST` to relax the `GROQ_API_KEY`-required check.
-- `providers.py` — `get_llm()` / `get_embeddings()` factory, the only place
+- `llm/providers.py` — `get_llm()` / `get_embeddings()` factory, the only place
   that branches on `MODEL_PROVIDER`. `get_llm()` returns
   `_ResilientLLM(_CostTrackingLLM(client))` — cost tracking sits *inside*
   failover so a fallback-served call is priced against the model that
@@ -200,7 +200,7 @@ be called with the same question to compare behavior.
   provider is either rejected outright or silently returns nonsense
   neighbours. A degraded chat provider is recoverable; a broken retrieval
   path is not.
-- `circuit.py` — circuit breaker for LLM providers. Standard
+- `llm/circuit.py` — circuit breaker for LLM providers. Standard
   closed/open/half-open machine keyed by **provider name**, not by
   `get_llm()`'s `(temperature, stage)` cache key — otherwise one
   provider's health would be split across up to 16 independent copies and
@@ -217,14 +217,14 @@ be called with the same question to compare behavior.
   over when the primary breaks **before the first token**; re-routing
   mid-stream would restart the answer and the reader would watch it
   duplicate itself.
-- `database.py` — PostgreSQL + pgvector connection pool
+- `db/database.py` — PostgreSQL + pgvector connection pool
   (`psycopg2.pool.ThreadedConnectionPool`), idempotent schema init
   (`init_db()`, executes `db_schema.sql`), and the query functions
   `ingest.py`/`retrieval.py`/`cache.py` call: `upsert_chunks()`,
   `delete_chunks_by_source()`, `hybrid_search()` (vector + full-text + RRF
   in one query), `cache_get()`/`cache_set()`. All non-critical-path
   functions (cache) follow the fail-open pattern used elsewhere in the app.
-- `ingest.py` — load → chunk → embed → persist to PostgreSQL + pgvector
+- `ingestion/ingest.py` — load → chunk → embed → persist to PostgreSQL + pgvector
   (via `database.py`); content-hash based incremental re-ingestion tracked
   in the `ingest_manifest` table (unchanged files skipped, changed files'
   old chunks replaced, one bad file is recorded/skipped rather than
@@ -234,7 +234,7 @@ be called with the same question to compare behavior.
   docstring). Manifest entries are written per-file, immediately after
   that file's chunks are upserted, so an interrupted run doesn't lose
   progress.
-- `jobs.py` — async ingestion job tracking, backing `/upload`'s
+- `ingestion/jobs.py` — async ingestion job tracking, backing `/upload`'s
   `202 {job_id}` + `GET /jobs/{job_id}` polling contract (see `main.py`
   below). Job records live in Firestore's `ingest_jobs` collection, same
   TTL pattern as `memory.py`. Unlike `memory.py`/`cache.py`, Firestore is
@@ -249,23 +249,23 @@ be called with the same question to compare behavior.
   official Cloud Tasks emulator exists) calls it directly via FastAPI's
   `BackgroundTasks` from the `/upload` handler itself — same job record,
   same polling contract either way, just without a real queue locally.
-- `retrieval.py` — hybrid retrieval + LLM reranking (see module docstring
+- `retrieval/hybrid.py` — hybrid retrieval + LLM reranking (see module docstring
   for why an LLM reranker was chosen over a cross-encoder here).
-- `rag.py` — single-pass retrieve/generate/groundedness-check, used by both
+- `retrieval/rag.py` — single-pass retrieve/generate/groundedness-check, used by both
   `/ask` and as the retrieval base for `/ask-agentic`.
-- `agent.py` — the self-correcting LangGraph loop described above; every
+- `retrieval/agent.py` — the self-correcting LangGraph loop described above; every
   node is wrapped with `@traceable` for LangSmith tracing (off by default,
   `LANGSMITH_TRACING=false` in `.env`).
-- `memory.py` — per-session conversation history + query contextualization,
+- `retrieval/memory.py` — per-session conversation history + query contextualization,
   backed by Firestore (one document per `session_id`, capped at 5 turns,
   `expires_at` field for Firestore's native TTL -- the policy itself is a
   one-time `gcloud firestore fields ttls update` call, not something the
   code sets). Fails open: with no `GCP_PROJECT_ID` and no
   `FIRESTORE_EMULATOR_HOST`, or on any Firestore error, behaves as if
   there's no history rather than raising -- same posture as `cache.py`.
-- `cache.py` — semantic cache (embedding-similarity match, not exact-string)
+- `retrieval/cache.py` — semantic cache (embedding-similarity match, not exact-string)
   for repeated/similar questions.
-- `cost.py` — per-request LLM cost attribution. Pricing is USD per 1M
+- `llm/cost.py` — per-request LLM cost attribution. Pricing is USD per 1M
   tokens and **goes stale** — every entry is overridable by env
   (`RAG_PRICE_<MODEL>_IN` / `_OUT`) so a correction needs no code change,
   and the authoritative number is always Cloud Billing. Accumulates via
@@ -278,8 +278,8 @@ be called with the same question to compare behavior.
   **rerank is the most expensive stage (~47%), more than generation**,
   because it feeds 12 candidate passages to the LLM where generation gets
   only the final 4.
-- `streaming.py` — SSE streaming for `/ask-stream`.
-- `middleware.py` — two deliberately opposite postures, plus CORS and rate
+- `api/streaming.py` — SSE streaming for `/ask-stream`.
+- `api/middleware.py` — two deliberately opposite postures, plus CORS and rate
   limiting (slowapi). `AccessControlMiddleware` **gates**;
   `IdentityMiddleware` **enriches** (resolves an optional Firebase token, no
   rejection path at all). Keep them separate — collapsing them into one
@@ -305,7 +305,7 @@ be called with the same question to compare behavior.
   how `/internal/process-ingest-job` ended up exposed. `API_KEY` is *kept*
   rather than replaced — it makes a whole deployment private, which is what
   staging uses it for and what `cd.yml`'s smoke test depends on.
-- `auth.py` — optional Firebase identity, deliberately *additive*. A valid
+- `api/auth.py` — optional Firebase identity, deliberately *additive*. A valid
   token raises the caller's upload ceiling
   (`MAX_UPLOAD_FILES_AUTHED`/`MAX_UPLOAD_SIZE_MB_AUTHED`); an absent,
   expired, or malformed one silently yields `ANONYMOUS` with the public
@@ -315,7 +315,7 @@ be called with the same question to compare behavior.
   `google-cloud-firestore`, so no `firebase-admin`. Inert with
   `FIREBASE_PROJECT_ID` unset: everyone is anonymous and the UI hides
   sign-in.
-- `security.py` — prompt-injection screening + Cloud DLP PII redaction, in
+- `api/security.py` — prompt-injection screening + Cloud DLP PII redaction, in
   three parts with three different postures. `screen_question()` **gates**
   (400 before retrieval, so a refused request costs zero tokens) and runs
   on the *raw* question, before contextualization — screening the rewritten
@@ -407,7 +407,7 @@ The `cloudrun-*.yaml` configs mount `DATABASE_URL` from Secret Manager
 and connect to Cloud SQL via the Auth Proxy sidecar
 (`run.googleapis.com/cloudsql-instances` annotation). Ingestion does not
 run at build time or read from anything baked into the image — it writes
-straight to the external Postgres database, so `uv run python -m app.ingest`
+straight to the external Postgres database, so `uv run python -m app.ingestion.ingest`
 can run before or after a deploy, from anywhere with network access to
 that database (locally via the Cloud SQL Auth Proxy, or from Cloud Shell);
 see README "Deploying to GCP" for the full flow. Every Cloud Run

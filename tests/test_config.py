@@ -15,7 +15,7 @@ def test_config_defaults():
 def test_invalid_model_provider():
     # Verify that providers.py raises ValueError on invalid provider
     from app import config
-    from app.providers import get_llm
+    from app.llm.providers import get_llm
     config.MODEL_PROVIDER = "invalid"
     with pytest.raises(ValueError, match="Unknown MODEL_PROVIDER: invalid"):
         get_llm.cache_clear()
@@ -28,7 +28,7 @@ def test_fastembed_cache_path_used(monkeypatch):
     # instance redownloading it from Hugging Face at runtime (see Dockerfile
     # comments). A silent drop of this kwarg would reintroduce that bug.
     from app import config
-    from app.providers import get_embeddings
+    from app.llm.providers import get_embeddings
 
     monkeypatch.setattr(config, "MODEL_PROVIDER", "groq")
     monkeypatch.setattr(config, "FASTEMBED_CACHE_PATH", "/tmp/custom_fastembed_cache")

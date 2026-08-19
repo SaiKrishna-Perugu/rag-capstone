@@ -70,8 +70,8 @@ from ragas.metrics import (
 )
 from ragas.run_config import RunConfig
 
-from app.providers import get_embeddings, get_llm
-from app.rag import generate_answer, retrieve
+from app.llm.providers import get_embeddings, get_llm
+from app.retrieval.rag import generate_answer, retrieve
 
 # ---------------------------------------------------------------------------
 # Same placeholder pattern as eval.py -- replace with real Q&A pairs based
@@ -117,7 +117,7 @@ EVAL_SET = [
 
 
 class _RagasCompatibleEmbeddings:
-    """Thin proxy around whatever app.providers.get_embeddings() returns,
+    """Thin proxy around whatever app.llm.providers.get_embeddings() returns,
     fixing a real RAGAS bug confirmed by reading ragas/embeddings/base.py:
     LangchainEmbeddingsWrapper.embed_query()/embed_documents() call the
     real embedding first (succeeds), then do

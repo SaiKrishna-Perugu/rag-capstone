@@ -35,8 +35,9 @@ import logging
 
 from langchain_core.documents import Document
 
-from app import config, database
-from app.providers import get_embeddings, get_llm
+from app import config
+from app.db import database
+from app.llm.providers import get_embeddings, get_llm
 
 logger = logging.getLogger(__name__)
 

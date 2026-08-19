@@ -26,8 +26,8 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, StateGraph
 from langsmith import traceable
 
-from app.providers import get_llm
-from app.rag import (
+from app.llm.providers import get_llm
+from app.retrieval.rag import (
     _format_context,
     check_groundedness,
     generate_answer,

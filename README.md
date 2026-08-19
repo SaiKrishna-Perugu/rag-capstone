@@ -173,7 +173,7 @@ env var -- `:emulators` still works as of this writing; switch if it stops.)
 
 **1. Build the index**: Run ingestion locally to embed documents into Postgres:
    ```bash
-   uv run python -m app.ingest
+   uv run python -m app.ingestion.ingest
    ```
 Supports `.pdf`, `.txt`, `.md`, `.csv`, `.html`, and `.docx` -- drop any mix
 of these into `docs/` (including subfolders) and re-run. This is also the
@@ -188,7 +188,7 @@ specifically because it's a *shared, external* store now: a local manifest
 file has no way of knowing it's pointed at a different (or freshly created)
 database than the one it was last run against, and would wrongly skip
 files that were never actually ingested into whatever database is
-currently in use. Re-running `uv run python -m app.ingest` after adding a
+currently in use. Re-running `uv run python -m app.ingestion.ingest` after adding a
 new file only embeds the new file; unchanged files are skipped entirely
 (no re-embedding cost), and a changed file has its old chunks deleted and
 replaced (`ON CONFLICT (source, content_hash)` in Postgres). One bad file
@@ -199,7 +199,7 @@ Force a full re-embed of every file regardless of whether it changed (e.g.
 after switching `MODEL_PROVIDER`, since embeddings from different providers
 aren't compatible with each other in the same collection):
 ```bash
-uv run python -m app.ingest --force
+uv run python -m app.ingestion.ingest --force
 ```
 
 **2. Start the API**:
@@ -336,10 +336,10 @@ produces 384-dim embeddings, Vertex AI's `text-embedding-005` produces 768.
 TABLE IF NOT EXISTS` won't widen an existing column). So:
 - **Switching providers on a brand-new database:** set `MODEL_PROVIDER` and
   the matching `EMBEDDING_DIMENSION` (384 or 768) in `.env` *before* the
-  first `uv run python -m app.ingest`, and the schema will be created at
+  first `uv run python -m app.ingestion.ingest`, and the schema will be created at
   the right width automatically.
 - **Switching providers on a database that's already been ingested into:**
-  re-run with `--force` (`uv run python -m app.ingest --force`) is *not*
+  re-run with `--force` (`uv run python -m app.ingestion.ingest --force`) is *not*
   enough by itself if the dimension also changed -- a dimension mismatch
   fails loudly at insert time (pgvector rejects it) rather than silently
   producing bad retrieval. Drop and let `init_db()` recreate the
@@ -388,7 +388,7 @@ gcloud sql instances create rag-capstone-db \
 gcloud sql databases create ragdb --instance=rag-capstone-db
 # No manual `CREATE EXTENSION vector` step needed -- app/db_schema.sql
 # already runs it (idempotently) as part of database.init_db(), which
-# fires on both API startup and `python -m app.ingest`.
+# fires on both API startup and `python -m app.ingestion.ingest`.
 
 # 2b. Provision Firestore (conversation memory + job tracking) in Native
 #     mode, and set a TTL policy on expires_at for BOTH collections that
@@ -470,7 +470,7 @@ gcloud run services update rag-capstone --region=us-central1 \
 #    point DATABASE_URL at the instance and run the same ingest command;
 #    it creates the schema on first run (see "Build the index" above) and
 #    is what /ready checks a chunk count against.
-uv run python -m app.ingest
+uv run python -m app.ingestion.ingest
 
 # 9. Cloud Run services aren't publicly reachable by default -- allow it
 gcloud run services add-iam-policy-binding rag-capstone \
@@ -502,7 +502,7 @@ same secret both the deployed app and its own outgoing Cloud Task use).
 ```bash
 # only if docs/ changed -- DATABASE_URL must point at the Cloud SQL
 # instance (directly, or via the Cloud SQL Auth Proxy) for this to reach it
-uv run python -m app.ingest
+uv run python -m app.ingestion.ingest
 gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
 gcloud run deploy rag-capstone --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest --region=us-central1
 ```
@@ -522,7 +522,7 @@ against production** -- `cd.yml` deploys on every push to `main`, and a
 manual `gcloud run deploy` outside it would send that revision live
 traffic immediately, which breaks the canary rollout's assumption that
 only the pipeline controls traffic splitting (see "Automated deploys"
-below). Document ingestion (`uv run python -m app.ingest`) is **not**
+below). Document ingestion (`uv run python -m app.ingestion.ingest`) is **not**
 part of `cd.yml` and stays a manual, operator-triggered step either way
 -- matches this project's existing stance that ingestion is decoupled
 from deploys (see "Architecture" in `CLAUDE.md`).
@@ -665,7 +665,7 @@ gcloud run services add-iam-policy-binding rag-capstone-staging \
 STAGING_URL=$(gcloud run services describe rag-capstone-staging --region=us-central1 --format='value(status.url)')
 gcloud run services update rag-capstone-staging --region=us-central1 \
     --update-env-vars=INGEST_TARGET_URL=$STAGING_URL
-uv run python -m app.ingest   # against DATABASE_URL pointed at ragdb_staging
+uv run python -m app.ingestion.ingest   # against DATABASE_URL pointed at ragdb_staging
 ```
 
 **Deliberate simplification, documented not hidden:** staging shares
@@ -731,26 +731,31 @@ verbatim and will reset `INGEST_TARGET_URL` to its placeholder.
 
 ```text
 app/
-  agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
-  auth.py       # optional Firebase identity -- additive, raises upload limits, never gates
-  cache.py      # semantic caching for repeated questions (Postgres-backed)
-  circuit.py    # circuit breaker for LLM providers (backs failover in providers.py)
-  config.py     # centralized env/config loading
-  cost.py       # per-request LLM token/cost attribution, broken down by pipeline stage
-  database.py   # PostgreSQL + pgvector connection pool, schema init, hybrid search
-  db_schema.sql # chunks / semantic_cache / ingest_manifest tables, session scoping columns, indexes
-  ingest.py     # load -> chunk -> embed -> persist to PostgreSQL + pgvector
-  jobs.py       # async ingestion job tracking (Firestore) + Cloud Tasks enqueueing
-  main.py       # FastAPI endpoints (/, /ask*, /upload, /jobs/{id}, /documents) + UI serving + logging
-  memory.py     # conversation history (Firestore) and contextual query rewriting
-  metrics.py    # OpenTelemetry metrics -- Prometheus /metrics + optional Cloud Monitoring push
-  middleware.py # tiered access (probe/public/admin/internal) + optional Firebase identity, CORS, rate limiting
-  providers.py  # model provider factory (Groq / Vertex AI)
-  rag.py        # single-pass retrieval, grounded generation, groundedness check
-  security.py   # prompt-injection screening + Cloud DLP PII redaction of logs
-  retrieval.py  # hybrid retrieval (session-scoped) + LLM reranking
-  streaming.py  # Server-Sent Events (SSE) streaming
+  main.py       # FastAPI app + routes (/, /ask*, /upload, /jobs/{id}, /documents) -- entrypoint: app.main:app
+  config.py     # centralized env/config loading, imported by everything
+  metrics.py    # OpenTelemetry -- Prometheus /metrics + optional Cloud Monitoring push
   ui.html       # frontend interface
+  db/
+    database.py   # connection pool, idempotent schema init, session-scoped hybrid search
+    db_schema.sql # chunks / semantic_cache / ingest_manifest, session columns, HNSW + GIN indexes
+  llm/
+    providers.py  # get_llm()/get_embeddings() factory -- the only place that branches on MODEL_PROVIDER
+    circuit.py    # circuit breaker per provider; backs the failover in providers.py
+    cost.py       # per-request token/cost attribution, broken down by pipeline stage
+  retrieval/
+    hybrid.py     # hybrid retrieval (tsvector + pgvector, RRF) + LLM reranking
+    rag.py        # single-pass retrieve -> generate -> groundedness check
+    agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
+    cache.py      # semantic cache, and the gate that keeps private answers out of it
+    memory.py     # conversation history (Firestore) + contextual query rewriting
+  ingestion/
+    ingest.py     # load -> chunk -> embed -> persist; incremental via content hash
+    jobs.py       # async job tracking (Firestore) + Cloud Tasks enqueueing
+  api/
+    middleware.py # tiered access (probe/public/admin/internal) + optional Firebase identity
+    auth.py       # optional Firebase identity -- additive, raises upload limits, never gates
+    security.py   # prompt-injection screening + Cloud DLP PII redaction of logs
+    streaming.py  # Server-Sent Events (SSE) streaming for /ask-stream
 docs/           # source documents (sample included)
 tests/          # unit and integration tests
 scripts/

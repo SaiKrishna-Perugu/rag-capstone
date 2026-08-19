@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app import config
-from app.providers import get_llm
+from app.llm.providers import get_llm
 
 logger = logging.getLogger(__name__)
 

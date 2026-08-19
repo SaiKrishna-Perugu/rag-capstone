@@ -2,15 +2,15 @@ from unittest.mock import MagicMock, patch
 
 
 def test_run_agentic_rag_hit():
-    from app.agent import run_agentic_rag
+    from app.retrieval.agent import run_agentic_rag
     
-    with patch("app.agent.retrieve") as mock_retrieve:
+    with patch("app.retrieval.agent.retrieve") as mock_retrieve:
         mock_retrieve.return_value = [MagicMock(page_content="Mock content")]
-        with patch("app.agent.generate_answer") as mock_gen:
+        with patch("app.retrieval.agent.generate_answer") as mock_gen:
             mock_gen.return_value = "Mock answer"
-            with patch("app.agent.check_groundedness") as mock_check:
+            with patch("app.retrieval.agent.check_groundedness") as mock_check:
                 mock_check.return_value = "GROUNDED"
-                with patch("app.agent.get_llm") as mock_get_llm:
+                with patch("app.retrieval.agent.get_llm") as mock_get_llm:
                     mock_llm = MagicMock()
                     mock_resp = MagicMock()
                     mock_resp.content = "SUFFICIENT" # relevant

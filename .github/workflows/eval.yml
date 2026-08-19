@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       # Ephemeral Postgres scoped to this job only -- not pointed at any
-      # real Cloud SQL instance. app.ingest's database.init_db() creates
+      # real Cloud SQL instance. app.ingestion.ingest's database.init_db() creates
       # the schema on this fresh DB itself, no manual SQL step needed.
       postgres:
         image: pgvector/pgvector:pg16
@@ -86,11 +86,11 @@ jobs:
       # eval_ragas.py's EVAL_SET is written against exactly those files.
       # docs/ is the sample corpus and nothing else: project documentation
       # lives outside it (see .gitignore's notes/ entry), because
-      # app.ingest globs docs/ recursively and anything dropped there
+      # app.ingestion.ingest globs docs/ recursively and anything dropped there
       # becomes retrievable content that competes with the real answers.
       # If retrieval quality shifts unexpectedly, a new docs/ file is why.
       - name: Build the eval corpus
-        run: uv run python -m app.ingest
+        run: uv run python -m app.ingestion.ingest
 
       - name: Run RAGAS eval
         run: uv run python eval_ragas.py

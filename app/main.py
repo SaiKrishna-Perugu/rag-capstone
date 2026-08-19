@@ -32,21 +32,15 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app import (
-    auth,
-    cache,
-    config,
-    cost,
-    database,
-    jobs,
-    memory,
-    metrics,
-    security,
-    streaming,
-)
-from app.agent import run_agentic_rag
-from app.middleware import AccessControlMiddleware, IdentityMiddleware
-from app.rag import answer_question
+from app import config, metrics
+from app.api import auth, security, streaming
+from app.api.middleware import AccessControlMiddleware, IdentityMiddleware
+from app.db import database
+from app.ingestion import jobs
+from app.llm import cost
+from app.retrieval import cache, memory
+from app.retrieval.agent import run_agentic_rag
+from app.retrieval.rag import answer_question
 
 # --- Structured logging setup -------------------------------------------------
 # Every request is logged as one JSON line: question, sources used, answer,

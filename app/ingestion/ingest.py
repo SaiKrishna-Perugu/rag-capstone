@@ -3,7 +3,7 @@ Ingestion pipeline: load documents from DOCS_DIR -> split into chunks ->
 embed -> persist into PostgreSQL + pgvector.
 
 Run standalone to (re)build the index:
-    python -m app.ingest
+    python -m app.ingestion.ingest
 
 Covers three JD requirements directly:
   - "ingestion" (end-to-end) -- multi-format loaders + per-file error
@@ -36,8 +36,9 @@ from langchain_community.document_loaders import (
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app import config, database
-from app.providers import get_embeddings
+from app import config
+from app.db import database
+from app.llm.providers import get_embeddings
 
 # Extension -> loader class. Add new formats here -- everything else
 # (chunking, hashing, freshness tracking) works unchanged for any new type.

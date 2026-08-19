@@ -10,7 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app import config, security
+from app import config
+from app.api import security
 
 # --- Input screening -----------------------------------------------------
 
@@ -86,7 +87,7 @@ def test_redaction_replaces_findings_with_info_type(monkeypatch):
     client = MagicMock()
     client.deidentify_content.return_value = response
 
-    with patch("app.security._get_dlp_client", return_value=client):
+    with patch("app.api.security._get_dlp_client", return_value=client):
         out = security.redact_log_fields({"question": "my ssn is 456-78-9012"})
 
     assert out["question"] == "my ssn is [US_SOCIAL_SECURITY_NUMBER]"
@@ -100,7 +101,7 @@ def test_redaction_fails_closed(monkeypatch):
     monkeypatch.setattr(config, "ENABLE_PII_REDACTION", True)
     monkeypatch.setattr(config, "GCP_PROJECT_ID", "test-project")
 
-    with patch("app.security._get_dlp_client", side_effect=RuntimeError("DLP down")):
+    with patch("app.api.security._get_dlp_client", side_effect=RuntimeError("DLP down")):
         out = security.redact_log_fields({"question": "my ssn is 456-78-9012"})
 
     assert "456-78-9012" not in out["question"]
@@ -179,7 +180,7 @@ def test_ssn_in_a_question_is_redacted_in_the_log(
     client_mock = MagicMock()
     client_mock.deidentify_content.side_effect = fake_deidentify
 
-    with patch("app.security._get_dlp_client", return_value=client_mock), \
+    with patch("app.api.security._get_dlp_client", return_value=client_mock), \
          patch("app.main.logger") as log:
         resp = client.post("/ask", json={"question": "My SSN is 456-78-9012, am I owed a refund?"})
 
@@ -194,9 +195,9 @@ def test_ssn_in_a_question_is_redacted_in_the_log(
 # --- Upload content-type validation (magic bytes) ------------------------
 
 def _upload(client, name, content, **kw):
-    with patch.object(config, "GCP_PROJECT_ID", ""), patch("app.jobs.create_job", return_value="job-1"), \
-         patch("app.jobs.process_job"), \
-         patch("app.database.get_chunk_count", return_value=0), \
+    with patch.object(config, "GCP_PROJECT_ID", ""), patch("app.ingestion.jobs.create_job", return_value="job-1"), \
+         patch("app.ingestion.jobs.process_job"), \
+         patch("app.db.database.get_chunk_count", return_value=0), \
          patch("app.main.logger"):
         return client.post("/upload", files={"files": (name, content)},
                            headers={"X-Session-Id": "sess-A"}, **kw)

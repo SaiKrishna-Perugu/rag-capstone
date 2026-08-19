@@ -8,14 +8,14 @@ IS the deliverable ("logs show an estimated dollar cost per request"), not
 an internal detail.
 
 Mocking follows the repo convention: patch at the module-function boundary
-(app.rag.*, app.main.run_agentic_rag) rather than mocking LLM clients.
+(app.retrieval.rag.*, app.main.run_agentic_rag) rather than mocking LLM clients.
 """
 import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app import cost
+from app.llm import cost
 
 COST_FIELDS = {"llm_calls", "input_tokens", "output_tokens", "cost_usd", "cost_by_stage"}
 
@@ -24,7 +24,7 @@ COST_FIELDS = {"llm_calls", "input_tokens", "output_tokens", "cost_usd", "cost_b
 def captured_log():
     """Capture what the service writes to its structured request log."""
     lines = []
-    with patch("app.main.logger") as main_log, patch("app.streaming.logger") as stream_log:
+    with patch("app.main.logger") as main_log, patch("app.api.streaming.logger") as stream_log:
         main_log.info.side_effect = lambda m: lines.append(m)
         stream_log.info.side_effect = lambda m: lines.append(m)
         yield lines
@@ -100,9 +100,9 @@ def test_ask_stream_reports_cost(client, mock_cache, captured_log):
     llm = MagicMock()
     llm.astream = fake_astream
 
-    with patch("app.streaming.retrieve", return_value=[chunk]), \
-         patch("app.streaming.get_llm", return_value=llm), \
-         patch("app.streaming.check_groundedness", return_value="GROUNDED"):
+    with patch("app.api.streaming.retrieve", return_value=[chunk]), \
+         patch("app.api.streaming.get_llm", return_value=llm), \
+         patch("app.api.streaming.check_groundedness", return_value="GROUNDED"):
         resp = client.post("/ask-stream", json={"question": "q"})
         assert resp.status_code == 200
         assert "hello" in resp.text.replace('"', "")
@@ -123,9 +123,9 @@ def test_cache_hit_still_reports_contextualization_cost(client, mock_retrieval, 
 
     hit = {"answer": "cached", "groundedness": "GROUNDED", "similarity_score": 0.99}
 
-    with patch("app.memory.contextualize_question", side_effect=fake_contextualize), \
-         patch("app.cache.get_cached_answer", return_value=hit), \
-         patch("app.memory.add_to_history"):
+    with patch("app.retrieval.memory.contextualize_question", side_effect=fake_contextualize), \
+         patch("app.retrieval.cache.get_cached_answer", return_value=hit), \
+         patch("app.retrieval.memory.add_to_history"):
         resp = client.post("/ask", json={"question": "q", "session_id": "s1"})
         assert resp.status_code == 200
 

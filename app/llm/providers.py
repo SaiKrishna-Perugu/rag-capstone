@@ -39,7 +39,8 @@ generating with the fallback's chat model.
 import logging
 from functools import lru_cache
 
-from app import circuit, config, cost, metrics
+from app import config, metrics
+from app.llm import circuit, cost
 
 logger = logging.getLogger(__name__)
 

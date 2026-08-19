@@ -16,8 +16,8 @@ import json
 import sys
 from pathlib import Path
 
-from app.providers import get_llm
-from app.rag import answer_question
+from app.llm.providers import get_llm
+from app.retrieval.rag import answer_question
 
 # ---------------------------------------------------------------------------
 # Replace these with 8-10 real Q&A pairs based on the documents you put in

@@ -17,7 +17,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app import config, database, ingest
+from app import config
+from app.db import database
+from app.ingestion import ingest
 
 
 def _doc(session_id=None):
@@ -48,7 +50,7 @@ def test_visibility_predicate_is_applied_to_every_candidate_source():
     ctx.__enter__ = lambda s: conn
     ctx.__exit__ = lambda s, *a: False
 
-    with patch("app.database.get_conn", return_value=ctx):
+    with patch("app.db.database.get_conn", return_value=ctx):
         database.hybrid_search([0.1] * 4, "q", k=4, candidate_pool=12, session_id="sess-A")
 
     sql = captured["sql"]
@@ -74,7 +76,7 @@ def test_anonymous_callers_see_only_the_curated_corpus():
     ctx.__enter__ = lambda s: conn
     ctx.__exit__ = lambda s, *a: False
 
-    with patch("app.database.get_conn", return_value=ctx):
+    with patch("app.db.database.get_conn", return_value=ctx):
         database.hybrid_search([0.1] * 4, "q")
 
     assert captured["params"]["session_id"] is None
@@ -101,11 +103,11 @@ def test_only_uploads_are_session_tagged_never_the_curated_corpus(tmp_path, monk
     embeddings = MagicMock()
     embeddings.embed_documents.side_effect = lambda texts: [[0.1] * 4 for _ in texts]
 
-    with patch("app.ingest.database.init_db"), \
-         patch("app.ingest.database.get_manifest", return_value={}), \
-         patch("app.ingest.database.upsert_manifest_entry"), \
-         patch("app.ingest.database.upsert_chunks", side_effect=fake_upsert), \
-         patch("app.ingest.get_embeddings", return_value=embeddings):
+    with patch("app.ingestion.ingest.database.init_db"), \
+         patch("app.ingestion.ingest.database.get_manifest", return_value={}), \
+         patch("app.ingestion.ingest.database.upsert_manifest_entry"), \
+         patch("app.ingestion.ingest.database.upsert_chunks", side_effect=fake_upsert), \
+         patch("app.ingestion.ingest.get_embeddings", return_value=embeddings):
         ingest.run(session_id="sess-A", expires_at="2099-01-01T00:00:00Z")
 
     by_name = {c["source"]: c for c in calls}
@@ -127,7 +129,7 @@ def test_private_answers_are_not_written_to_the_shared_cache(
     undoes the isolation entirely -- while retrieval itself still looks
     correct."""
     _, mock_set = mock_cache
-    with patch("app.rag.retrieve_with_hybrid_and_rerank", return_value=[_doc("sess-A")]), \
+    with patch("app.retrieval.rag.retrieve_with_hybrid_and_rerank", return_value=[_doc("sess-A")]), \
          patch("app.main.logger"):
         resp = client.post(
             "/ask", json={"question": "what is in my document?"},
@@ -144,7 +146,7 @@ def test_curated_only_answers_are_still_cached(
     """The guard must not disable caching wholesale -- answers from the
     curated corpus are the common case and still belong in the cache."""
     _, mock_set = mock_cache
-    with patch("app.rag.retrieve_with_hybrid_and_rerank", return_value=[_doc(None)]), \
+    with patch("app.retrieval.rag.retrieve_with_hybrid_and_rerank", return_value=[_doc(None)]), \
          patch("app.main.logger"):
         resp = client.post(
             "/ask", json={"question": "what is the refund policy?"},
@@ -161,7 +163,7 @@ def test_jobs_are_not_readable_across_sessions(client):
     """A job records which files someone uploaded. A mismatched session gets
     404, not 403 -- a 403 would confirm the ID is real."""
     job = {"status": "done", "files": ["secret.pdf"], "session_id": "sess-A"}
-    with patch("app.jobs.get_job", return_value=job):
+    with patch("app.ingestion.jobs.get_job", return_value=job):
         mine = client.get("/jobs/abc", headers={"X-Session-Id": "sess-A"})
         theirs = client.get("/jobs/abc", headers={"X-Session-Id": "sess-B"})
         anon = client.get("/jobs/abc")
@@ -182,7 +184,7 @@ def test_a_visitor_with_uploads_bypasses_the_shared_cache(
     requests in, an anonymous answer got cached and every later session was
     served it back."""
     hit = {"answer": "stale curated answer", "groundedness": "GROUNDED", "similarity_score": 0.99}
-    with patch("app.database.get_chunk_count", return_value=3),          patch("app.cache.get_cached_answer", return_value=hit) as mock_get,          patch("app.cache.set_cached_answer"),          patch("app.rag.retrieve_with_hybrid_and_rerank", return_value=[_doc("sess-A")]),          patch("app.main.logger"):
+    with patch("app.db.database.get_chunk_count", return_value=3),          patch("app.retrieval.cache.get_cached_answer", return_value=hit) as mock_get,          patch("app.retrieval.cache.set_cached_answer"),          patch("app.retrieval.rag.retrieve_with_hybrid_and_rerank", return_value=[_doc("sess-A")]),          patch("app.main.logger"):
         resp = client.post(
             "/ask", json={"question": "what is in my document?"},
             headers={"X-Session-Id": "sess-A"},
@@ -199,7 +201,7 @@ def test_visitors_without_uploads_still_get_cache_hits(
     """The gate must not disable the cache for everyone -- a visitor who has
     uploaded nothing can safely be served a curated-corpus answer."""
     hit = {"answer": "cached curated answer", "groundedness": "GROUNDED", "similarity_score": 0.99}
-    with patch("app.database.get_chunk_count", return_value=0),          patch("app.cache.get_cached_answer", return_value=hit) as mock_get,          patch("app.main.logger"):
+    with patch("app.db.database.get_chunk_count", return_value=0),          patch("app.retrieval.cache.get_cached_answer", return_value=hit) as mock_get,          patch("app.main.logger"):
         resp = client.post(
             "/ask", json={"question": "what is the refund policy?"},
             headers={"X-Session-Id": "sess-new"},
@@ -214,7 +216,7 @@ def test_cache_gate_fails_open(client, mock_llm_answer, mock_groundedness):
     """A DB error checking for uploads must not cost an answer -- same
     fail-open posture as the rest of app/cache.py."""
     hit = {"answer": "cached", "groundedness": "GROUNDED", "similarity_score": 0.99}
-    with patch("app.database.get_chunk_count", side_effect=RuntimeError("db down")),          patch("app.cache.get_cached_answer", return_value=hit) as mock_get,          patch("app.main.logger"):
+    with patch("app.db.database.get_chunk_count", side_effect=RuntimeError("db down")),          patch("app.retrieval.cache.get_cached_answer", return_value=hit) as mock_get,          patch("app.main.logger"):
         resp = client.post(
             "/ask", json={"question": "q"}, headers={"X-Session-Id": "sess-A"},
         )
@@ -234,7 +236,7 @@ _DOCS_A = [
 
 
 def test_documents_lists_only_the_callers_own_uploads(client):
-    with patch("app.database.list_session_documents", return_value=_DOCS_A) as listed:
+    with patch("app.db.database.list_session_documents", return_value=_DOCS_A) as listed:
         resp = client.get("/documents", headers={"X-Session-Id": "sess-A"})
 
     assert resp.status_code == 200
@@ -255,9 +257,9 @@ def test_removing_a_document_also_clears_the_manifest(client):
     skips files whose manifest hash is unchanged, so leaving the row behind
     makes re-uploading the SAME file a no-op -- the document would be
     permanently unrecoverable with no error raised anywhere."""
-    with patch("app.database.list_session_documents", return_value=_DOCS_A), \
-         patch("app.database.delete_session_document", return_value=4) as del_chunks, \
-         patch("app.database.delete_manifest_entry", return_value=1) as del_manifest, \
+    with patch("app.db.database.list_session_documents", return_value=_DOCS_A), \
+         patch("app.db.database.delete_session_document", return_value=4) as del_chunks, \
+         patch("app.db.database.delete_manifest_entry", return_value=1) as del_manifest, \
          patch("app.main.logger"):
         resp = client.delete("/documents/report.pdf", headers={"X-Session-Id": "sess-A"})
 
@@ -271,9 +273,9 @@ def test_cannot_remove_another_sessions_document(client):
     """B asks for a file it does not own. The lookup is scoped to B's own
     documents, so nothing matches and nothing is deleted -- 404, not 403,
     which would confirm the file exists."""
-    with patch("app.database.list_session_documents", return_value=[]), \
-         patch("app.database.delete_session_document") as del_chunks, \
-         patch("app.database.delete_manifest_entry") as del_manifest:
+    with patch("app.db.database.list_session_documents", return_value=[]), \
+         patch("app.db.database.delete_session_document") as del_chunks, \
+         patch("app.db.database.delete_manifest_entry") as del_manifest:
         resp = client.delete("/documents/report.pdf", headers={"X-Session-Id": "sess-B"})
 
     assert resp.status_code == 404
@@ -286,8 +288,8 @@ def test_traversal_attempts_are_rejected(client, name):
     """The source used for deletion is only ever one the database already
     associated with this session, so this is belt-and-braces -- but a crafted
     filename must not even reach the lookup."""
-    with patch("app.database.list_session_documents") as listed, \
-         patch("app.database.delete_session_document") as del_chunks:
+    with patch("app.db.database.list_session_documents") as listed, \
+         patch("app.db.database.delete_session_document") as del_chunks:
         resp = client.delete(f"/documents/{name}", headers={"X-Session-Id": "sess-A"})
 
     assert resp.status_code == 404
@@ -296,7 +298,7 @@ def test_traversal_attempts_are_rejected(client, name):
 
 
 def test_removal_requires_a_session(client):
-    with patch("app.database.delete_session_document") as del_chunks:
+    with patch("app.db.database.delete_session_document") as del_chunks:
         resp = client.delete("/documents/report.pdf")
     assert resp.status_code == 404
     del_chunks.assert_not_called()
@@ -324,14 +326,14 @@ def test_chunk_count_excludes_expired_by_default():
     ctx.__enter__ = lambda s: conn
     ctx.__exit__ = lambda s, *a: False
 
-    with patch("app.database.get_conn", return_value=ctx):
+    with patch("app.db.database.get_conn", return_value=ctx):
         database.get_chunk_count()
     assert "expires_at IS NULL OR expires_at > now()" in captured["sql"]
 
-    with patch("app.database.get_conn", return_value=ctx):
+    with patch("app.db.database.get_conn", return_value=ctx):
         database.get_chunk_count(session_id="sess-A")
     assert "expires_at" in captured["sql"] and "session_id = %s" in captured["sql"]
 
-    with patch("app.database.get_conn", return_value=ctx):
+    with patch("app.db.database.get_conn", return_value=ctx):
         database.get_chunk_count(include_expired=True)
     assert "expires_at" not in captured["sql"]

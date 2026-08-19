@@ -70,8 +70,8 @@ def test_anonymous_upload_still_works(client, monkeypatch, tmp_path):
     passes."""
     monkeypatch.setattr(config, "GCP_PROJECT_ID", "")
     monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
-    with patch("app.jobs.create_job", return_value="job-anon"):
-        with patch("app.jobs.process_job"):
+    with patch("app.ingestion.jobs.create_job", return_value="job-anon"):
+        with patch("app.ingestion.jobs.process_job"):
             files = {"files": ("notes.txt", b"hello world", "text/plain")}
             response = client.post("/upload", files=files)   # no auth headers
     assert response.status_code == 202
@@ -110,8 +110,8 @@ def test_upload_corpus_check_fails_open(client, monkeypatch, tmp_path):
         raise RuntimeError("database unreachable")
 
     monkeypatch.setattr("app.main.database.get_chunk_count", _boom)
-    with patch("app.jobs.create_job", return_value="job-123"):
-        with patch("app.jobs.process_job"):
+    with patch("app.ingestion.jobs.create_job", return_value="job-123"):
+        with patch("app.ingestion.jobs.process_job"):
             files = {"files": ("test.txt", b"hello", "text/plain")}
             response = client.post("/upload", files=files)
     assert response.status_code == 202
@@ -126,8 +126,8 @@ def test_upload_endpoint_success_processes_in_background_without_gcp(client, mon
     # write a real file into the project's docs/uploads/.
     monkeypatch.setattr(config, "GCP_PROJECT_ID", "")
     monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
-    with patch("app.jobs.create_job", return_value="job-123") as mock_create:
-        with patch("app.jobs.process_job") as mock_process:
+    with patch("app.ingestion.jobs.create_job", return_value="job-123") as mock_create:
+        with patch("app.ingestion.jobs.process_job") as mock_process:
             files = {"files": ("test.txt", b"hello world", "text/plain")}
             response = client.post("/upload", files=files)
 
@@ -141,8 +141,8 @@ def test_upload_endpoint_success_processes_in_background_without_gcp(client, mon
 def test_upload_endpoint_enqueues_cloud_task_when_gcp_configured(client, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "GCP_PROJECT_ID", "test-project")
     monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
-    with patch("app.jobs.create_job", return_value="job-456"):
-        with patch("app.jobs.enqueue_cloud_task") as mock_enqueue:
+    with patch("app.ingestion.jobs.create_job", return_value="job-456"):
+        with patch("app.ingestion.jobs.enqueue_cloud_task") as mock_enqueue:
             files = {"files": ("test.txt", b"hello world", "text/plain")}
             response = client.post("/upload", files=files)
 
@@ -151,24 +151,24 @@ def test_upload_endpoint_enqueues_cloud_task_when_gcp_configured(client, monkeyp
 
 def test_upload_endpoint_job_tracking_unavailable(client, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
-    with patch("app.jobs.create_job", side_effect=RuntimeError("Firestore is not configured")):
+    with patch("app.ingestion.jobs.create_job", side_effect=RuntimeError("Firestore is not configured")):
         files = {"files": ("test.txt", b"hello world", "text/plain")}
         response = client.post("/upload", files=files)
     assert response.status_code == 503
 
 def test_get_job_status_found(client):
-    with patch("app.jobs.get_job", return_value={"status": "done", "ingest_summary": {"added": ["a.txt"]}}):
+    with patch("app.ingestion.jobs.get_job", return_value={"status": "done", "ingest_summary": {"added": ["a.txt"]}}):
         response = client.get("/jobs/job-123")
     assert response.status_code == 200
     assert response.json()["status"] == "done"
 
 def test_get_job_status_not_found(client):
-    with patch("app.jobs.get_job", return_value=None):
+    with patch("app.ingestion.jobs.get_job", return_value=None):
         response = client.get("/jobs/nonexistent")
     assert response.status_code == 404
 
 def test_get_job_status_unavailable(client):
-    with patch("app.jobs.get_job", side_effect=RuntimeError("Firestore is not configured")):
+    with patch("app.ingestion.jobs.get_job", side_effect=RuntimeError("Firestore is not configured")):
         response = client.get("/jobs/job-123")
     assert response.status_code == 503
 
@@ -177,7 +177,7 @@ def test_process_ingest_job_success(client, monkeypatch):
     account configured the middleware falls back to the shared API key."""
     monkeypatch.setattr(config, "API_KEY", "internal-key")
     monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", "")
-    with patch("app.jobs.process_job") as mock_process:
+    with patch("app.ingestion.jobs.process_job") as mock_process:
         response = client.post(
             "/internal/process-ingest-job",
             json={"job_id": "job-123"},
@@ -191,7 +191,7 @@ def test_process_ingest_job_is_not_publicly_callable(client):
     """The vulnerability this closes: production runs with no API_KEY, which
     made APIKeyMiddleware disable itself and left this endpoint -- which
     triggers real ingestion work -- callable by anyone with the URL."""
-    with patch("app.jobs.process_job") as mock_process:
+    with patch("app.ingestion.jobs.process_job") as mock_process:
         response = client.post("/internal/process-ingest-job", json={"job_id": "job-123"})
     assert response.status_code == 403
     mock_process.assert_not_called()
@@ -202,7 +202,7 @@ def test_internal_denies_when_nothing_is_configured(client, monkeypatch):
     a broken upload is a better failure than a stranger running ingestion."""
     monkeypatch.setattr(config, "API_KEY", "")
     monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", "")
-    with patch("app.jobs.process_job") as mock_process:
+    with patch("app.ingestion.jobs.process_job") as mock_process:
         response = client.post("/internal/process-ingest-job", json={"job_id": "j"})
     assert response.status_code == 403
     mock_process.assert_not_called()
@@ -223,7 +223,7 @@ def test_probes_stay_open_even_when_the_deployment_is_private(client, monkeypatc
 def test_process_ingest_job_failure_returns_500_for_cloud_tasks_retry(client, monkeypatch):
     monkeypatch.setattr(config, "API_KEY", "internal-key")
     monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", "")
-    with patch("app.jobs.process_job", side_effect=RuntimeError("ingest blew up")):
+    with patch("app.ingestion.jobs.process_job", side_effect=RuntimeError("ingest blew up")):
         response = client.post(
             "/internal/process-ingest-job",
             json={"job_id": "job-123"},

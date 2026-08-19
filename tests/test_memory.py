@@ -3,17 +3,15 @@ from unittest.mock import MagicMock, patch
 
 def test_add_to_history_noop_without_session_id():
     # No session_id -- must never touch Firestore at all.
-    from app import memory
-
-    with patch("app.memory._get_client") as mock_get_client:
+    from app.retrieval import memory
+    with patch("app.retrieval.memory._get_client") as mock_get_client:
         memory.add_to_history(None, "question", "answer")
         mock_get_client.assert_not_called()
 
 
 def test_contextualize_question_noop_without_session_id():
-    from app import memory
-
-    with patch("app.memory._get_client") as mock_get_client:
+    from app.retrieval import memory
+    with patch("app.retrieval.memory._get_client") as mock_get_client:
         result = memory.contextualize_question(None, "What is X?")
         assert result == "What is X?"
         mock_get_client.assert_not_called()
@@ -22,9 +20,8 @@ def test_contextualize_question_noop_without_session_id():
 def test_add_to_history_fails_open_on_firestore_error():
     # A transient Firestore failure must not propagate -- the caller
     # already has a usable answer to return.
-    from app import memory
-
-    with patch("app.memory._get_client") as mock_get_client:
+    from app.retrieval import memory
+    with patch("app.retrieval.memory._get_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.collection.side_effect = RuntimeError("Firestore unavailable")
         mock_get_client.return_value = mock_client
@@ -33,9 +30,8 @@ def test_add_to_history_fails_open_on_firestore_error():
 
 
 def test_contextualize_question_fails_open_on_firestore_error():
-    from app import memory
-
-    with patch("app.memory._get_client") as mock_get_client:
+    from app.retrieval import memory
+    with patch("app.retrieval.memory._get_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.collection.side_effect = RuntimeError("Firestore unavailable")
         mock_get_client.return_value = mock_client
@@ -46,16 +42,14 @@ def test_contextualize_question_fails_open_on_firestore_error():
 
 def test_contextualize_question_unconfigured_returns_question_unchanged():
     # _get_client() returns None when Firestore isn't configured at all.
-    from app import memory
-
-    with patch("app.memory._get_client", return_value=None):
+    from app.retrieval import memory
+    with patch("app.retrieval.memory._get_client", return_value=None):
         result = memory.contextualize_question("session-1", "What is X?")
         assert result == "What is X?"
 
 
 def test_history_capped_at_five_turns():
-    from app import memory
-
+    from app.retrieval import memory
     existing_turns = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(5)]
 
     mock_snap = MagicMock()
@@ -68,7 +62,7 @@ def test_history_capped_at_five_turns():
     mock_client = MagicMock()
     mock_client.collection.return_value.document.return_value = mock_doc_ref
 
-    with patch("app.memory._get_client", return_value=mock_client):
+    with patch("app.retrieval.memory._get_client", return_value=mock_client):
         memory.add_to_history("session-1", "new question", "new answer")
 
     written = mock_doc_ref.set.call_args[0][0]
@@ -78,8 +72,7 @@ def test_history_capped_at_five_turns():
 
 
 def test_contextualize_question_rewrites_with_history():
-    from app import memory
-
+    from app.retrieval import memory
     mock_snap = MagicMock()
     mock_snap.exists = True
     mock_snap.to_dict.return_value = {
@@ -90,8 +83,8 @@ def test_contextualize_question_rewrites_with_history():
     mock_client = MagicMock()
     mock_client.collection.return_value.document.return_value = mock_doc_ref
 
-    with patch("app.memory._get_client", return_value=mock_client):
-        with patch("app.memory.get_llm") as mock_get_llm:
+    with patch("app.retrieval.memory._get_client", return_value=mock_client):
+        with patch("app.retrieval.memory.get_llm") as mock_get_llm:
             mock_llm = MagicMock()
             mock_response = MagicMock()
             mock_response.content = "How long is the refund policy window?"
