@@ -10,7 +10,12 @@ import uuid
 
 from app import cache, cost, memory, metrics, security
 from app.providers import get_llm
-from app.rag import _format_context, check_groundedness, retrieve
+from app.rag import (
+    _ANSWER_SYSTEM_PROMPT,
+    _format_context,
+    check_groundedness,
+    retrieve,
+)
 
 logger = logging.getLogger("rag_service")
 
@@ -116,7 +121,10 @@ async def stream_answer(
         # 4. Stream LLM Response
         llm = get_llm(temperature=0.0, stage="generate_stream")
         messages = [
-            ("system", "You are a precise assistant that answers questions using ONLY the provided context. Follow these rules strictly:\n1. Base your answer only on the context below. Do not use outside knowledge.\n2. If the context does not contain enough information to answer, say exactly: \"I don't have enough information in the provided documents to answer that.\"\n3. Keep answers concise and factual.\n4. Do not fabricate sources, numbers, or details not present in the context."),
+            # Imported rather than duplicated. This was a hand-copied twin of
+            # rag.py's prompt, so any rule added there -- like the new
+            # context-boundary rule -- silently did not apply to /ask-stream.
+            ("system", _ANSWER_SYSTEM_PROMPT),
             ("human", f"QUESTION:\n{contextualized_q}\n\nCONTEXT:\n{context}"),
         ]
         

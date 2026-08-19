@@ -189,3 +189,46 @@ def test_ssn_in_a_question_is_redacted_in_the_log(
     blob = json.dumps(entries)
     assert "456-78-9012" not in blob, "raw SSN reached the log"
     assert "[US_SOCIAL_SECURITY_NUMBER]" in blob
+
+
+# --- Upload content-type validation (magic bytes) ------------------------
+
+def _upload(client, name, content, **kw):
+    with patch.object(config, "GCP_PROJECT_ID", ""), patch("app.jobs.create_job", return_value="job-1"), \
+         patch("app.jobs.process_job"), \
+         patch("app.database.get_chunk_count", return_value=0), \
+         patch("app.main.logger"):
+        return client.post("/upload", files={"files": (name, content)},
+                           headers={"X-Session-Id": "sess-A"}, **kw)
+
+
+def test_executable_renamed_to_txt_is_rejected(client, tmp_path, monkeypatch):
+    """The extension whitelist is defeated by renaming, and these files go to
+    document loaders that were never written to be hostile-input-safe. Real
+    text has no magic bytes, so anything with a signature under a text
+    extension is a lie about its content."""
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    resp = _upload(client, "notes.txt", b"MZ\x90\x00\x03" + b"\x00" * 200)
+    assert resp.status_code == 400
+    assert "does not look like a real" in resp.json()["detail"]["error"]
+
+
+def test_gif_renamed_to_pdf_is_rejected(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    resp = _upload(client, "report.pdf", b"GIF89a" + b"\x00" * 200)
+    assert resp.status_code == 400
+
+
+def test_a_real_pdf_is_accepted(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    resp = _upload(client, "report.pdf", b"%PDF-1.4\n" + b"x" * 200)
+    assert resp.status_code == 202
+
+
+def test_plain_text_is_accepted_despite_having_no_signature(client, tmp_path, monkeypatch):
+    """The check must not reject the formats it cannot fingerprint --
+    .txt/.md/.csv have no magic bytes by definition, and refusing them would
+    break the common case to stop the rare one."""
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    assert _upload(client, "notes.txt", b"The refund policy is 30 days.").status_code == 202
+    assert _upload(client, "notes.md", b"# Heading\n\nSome content.").status_code == 202

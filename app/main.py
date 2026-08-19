@@ -14,6 +14,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import filetype
 from fastapi import (
     BackgroundTasks,
     FastAPI,
@@ -145,6 +146,21 @@ class AgenticAskResponse(BaseModel):
     sources: list[SourceChunk]
     retries_used: int
     latency_ms: int
+
+
+# Extensions whose content carries a magic-byte signature, mapped to what
+# that signature must be. Anything not listed here is a magic-less text
+# format (.txt/.md/.csv/.html) and must therefore be UNdetected.
+# .docx is an OOXML zip, so a bare "application/zip" is the honest floor --
+# filetype cannot always distinguish it from any other zip, and rejecting on
+# that would refuse legitimate documents.
+_EXPECTED_MIME = {
+    ".pdf": {"application/pdf"},
+    ".docx": {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/zip",
+    },
+}
 
 
 class InternalJobRequest(BaseModel):
@@ -366,6 +382,33 @@ async def upload_files(
             )
 
         content = await file.read()
+
+        # Magic-byte check. The extension whitelist above is trivially
+        # defeated by renaming, and these files are parsed by document
+        # loaders that were never written to be hostile-input-safe.
+        #
+        # The discriminator is that real text has NO signature: a renamed
+        # executable, archive or image is detected and rejected, while
+        # .txt/.md/.csv/.html legitimately return None. So "undetected" is
+        # only acceptable for the formats that genuinely have no magic bytes.
+        kind = filetype.guess(content[:2048])
+        detected = kind.mime if kind else None
+        allowed = _EXPECTED_MIME.get(suffix)
+        if allowed is None:
+            ok = detected is None          # magic-less text format
+        else:
+            ok = detected in allowed
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"{safe_name} does not look like a real '{suffix}' file "
+                        f"(detected: {detected or 'no recognised signature'})."
+                    ),
+                    "request_id": request_id,
+                },
+            )
 
         # Check file size against this caller's ceiling, not the global one.
         max_bytes = max_size_mb * 1024 * 1024
