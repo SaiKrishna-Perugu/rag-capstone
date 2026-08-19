@@ -235,21 +235,51 @@ releases, worked around with a small shim, not a bug in this code.
 
 ## Access model (public demo vs. private deployment)
 
-Two independent controls, deliberately not merged into one "auth" setting:
+Access is **tiered**, because a single on/off switch has no correct
+position for a demo meant to be publicly usable — with the key set you lock
+out the visitors it exists for, with it unset you expose the operator
+surface:
 
-| Control | Effect |
-|---|---|
-| `API_KEY` set | `APIKeyMiddleware` **gates** everything except `/health`, `/ready`, `/docs`, `/openapi.json`, `/redoc`, `/`. Unset (default) disables it entirely. |
-| Firebase configured | `IdentityMiddleware` **enriches**: a signed-in caller gets raised upload limits. It never rejects anything. |
+| Tier | Routes | Control |
+|---|---|---|
+| Probe | `/health`, `/ready` | Always open — Cloud Run calls these itself and cannot present a key |
+| Public | `/`, `/config`, `/ask*`, `/upload`, `/jobs/*`, `/documents*`, `/docs` | Open, unless `API_KEY` is set |
+| Admin | `/metrics` | `X-Admin-Key` header matching `ADMIN_KEY`, else **404** |
+| Internal | `/internal/*` | Cloud Tasks OIDC token only (`TASKS_SERVICE_ACCOUNT_EMAIL`) |
+
+Alongside these, Firebase (if configured) **enriches** rather than gates: a
+signed-in caller gets raised upload limits and is never rejected.
+
+Three details worth keeping:
+
+- **Admin returns 404, not 401** — a 401 confirms the route exists to anyone
+  probing. `/metrics` exposes token counts, estimated spend, latency and
+  error rates, so set `ADMIN_KEY` on anything reachable from the internet.
+  Leaving it unset means `/metrics` 404s for *everyone*, including you.
+- **Unlisted paths 404 at the middleware.** A route added to `main.py` is
+  unreachable until it is listed in `app/middleware.py`. That is deliberate:
+  a new endpoint silently inheriting public access is how
+  `/internal/process-ingest-job` was once left callable by anyone.
+- **`API_KEY` still makes a whole deployment private**, which is what staging
+  uses it for. The admin and internal tiers sit on top rather than replacing
+  it.
 
 The deployed production service runs as a **public demo**: no `API_KEY`, so
-anyone with the URL can ask questions and upload within these bounds.
+anyone with the URL can ask questions and upload within these bounds. Each
+visitor's uploads are scoped to their browser session and expire after
+`UPLOAD_TTL_HOURS`; they can list and remove their own files at any time
+(`GET /documents`, `DELETE /documents/{filename}`).
 
 | Limit | Anonymous | Signed in |
 |---|---|---|
 | Files per upload | `MAX_UPLOAD_FILES` (3) | `MAX_UPLOAD_FILES_AUTHED` (10) |
 | Size per file | `MAX_UPLOAD_SIZE_MB` (2) | `MAX_UPLOAD_SIZE_MB_AUTHED` (10) |
+| Chunks per visitor | `MAX_SESSION_CHUNKS` (300) | same |
 | Total corpus | `MAX_CORPUS_CHUNKS` — 507 when full, 0 disables | same |
+
+`MAX_CORPUS_CHUNKS` counts only **live** chunks: expired uploads are already
+invisible to retrieval, so counting them would let the demo refuse new
+uploads over documents nobody could read.
 
 All three are enforced in `app/main.py` *before* any file is written, so a
 rejected batch never leaves the first few already saved and queued. The
@@ -708,17 +738,17 @@ app/
   config.py     # centralized env/config loading
   cost.py       # per-request LLM token/cost attribution, broken down by pipeline stage
   database.py   # PostgreSQL + pgvector connection pool, schema init, hybrid search
-  db_schema.sql # chunks / semantic_cache table + index definitions
+  db_schema.sql # chunks / semantic_cache / ingest_manifest tables, session scoping columns, indexes
   ingest.py     # load -> chunk -> embed -> persist to PostgreSQL + pgvector
   jobs.py       # async ingestion job tracking (Firestore) + Cloud Tasks enqueueing
-  main.py       # FastAPI endpoints (/, /upload, /jobs/{id}, /ask, /ask-agentic) + UI serving + logging
+  main.py       # FastAPI endpoints (/, /ask*, /upload, /jobs/{id}, /documents) + UI serving + logging
   memory.py     # conversation history (Firestore) and contextual query rewriting
   metrics.py    # OpenTelemetry metrics -- Prometheus /metrics + optional Cloud Monitoring push
-  middleware.py # API key gate + optional Firebase identity, CORS, rate limiting
+  middleware.py # tiered access (probe/public/admin/internal) + optional Firebase identity, CORS, rate limiting
   providers.py  # model provider factory (Groq / Vertex AI)
   rag.py        # single-pass retrieval, grounded generation, groundedness check
   security.py   # prompt-injection screening + Cloud DLP PII redaction of logs
-  retrieval.py  # hybrid retrieval + LLM reranking
+  retrieval.py  # hybrid retrieval (session-scoped) + LLM reranking
   streaming.py  # Server-Sent Events (SSE) streaming
   ui.html       # frontend interface
 docs/           # source documents (sample included)
@@ -850,10 +880,29 @@ real and working, not stubbed — but scoped down from a production system:
   Enabling it therefore requires `gcloud services enable dlp.googleapis.com`
   first, or you trade your request logs for nothing.
 
+- **Tiered access control** (`app/middleware.py`) — access used to be one
+  boolean, and both of its positions were wrong for a public demo: the key
+  set locked out the visitors the demo exists for, the key unset left
+  `/metrics` (spend, token counts, error rates) and
+  `POST /internal/process-ingest-job` (triggers real ingestion) callable by
+  anyone with the URL. Both were confirmed open on the live service before
+  the fix. Now split into probe / public / admin / internal tiers, with
+  `/metrics` behind `X-Admin-Key` returning **404 rather than 401** (a 401
+  confirms a route exists), `/internal/*` accepting only a Cloud Tasks OIDC
+  token, and unlisted paths closed by default.
+- **Session-scoped documents with self-service removal** — every upload
+  carries the uploading browser's `X-Session-Id` (a `localStorage` UUID, no
+  login) and a TTL; retrieval is filtered so one visitor's documents are
+  invisible to everyone else, and the curated `docs/` corpus stays shared and
+  permanent. Visitors list and delete their own files via `GET /documents`
+  and `DELETE /documents/{filename}`. Before this, any visitor could change
+  what every later visitor saw — including leaving a prompt-injection payload
+  in place for the next person.
+
 **Explicitly deferred:** most items previously listed here — async
 ingestion, external session state, the vector store migration, the eval
 gate + CD pipeline, optional per-user identity (`app/auth.py`),
-per-request cost attribution (`app/cost.py`), and circuit breaker /
-provider failover (`app/circuit.py`) — are now implemented. Still
-deferred: **load testing** (Phase 9) and multi-tenancy (Phase 10,
-deliberately skipped).
+per-request cost attribution (`app/cost.py`), circuit breaker / provider
+failover (`app/circuit.py`), and security hardening (`app/security.py`) —
+are now implemented. Still deferred: **load testing** (Phase 9) and
+multi-tenancy (Phase 10, deliberately skipped).

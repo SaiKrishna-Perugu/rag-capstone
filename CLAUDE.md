@@ -133,6 +133,38 @@ time so containers never hit Hugging Face's API at runtime (its default
 cache is `/tmp`, which doesn't persist across instances anyway, and Cloud
 Run's shared outbound IPs routinely hit HF's anonymous rate limit).
 
+**Documents are session-scoped.** Every uploaded chunk carries the
+`session_id` of the browser that uploaded it (an `X-Session-Id` UUID kept in
+`localStorage` — no login, so the demo stays usable by a stranger) plus an
+`expires_at` TTL. Curated `docs/` files carry `NULL` for both, meaning
+*visible to everyone, never expires*. `database.hybrid_search()` filters on
+`(session_id IS NULL OR session_id = :sid) AND (expires_at IS NULL OR
+expires_at > now())` in **three** places — both CTEs and the final join;
+dropping it from one still returns plausible results, just leaky ones.
+Visitors manage their own uploads via `GET /documents` and
+`DELETE /documents/{filename}`.
+
+Three traps this created, all found by running it rather than reading it:
+
+- **The semantic cache is consulted BEFORE retrieval and is not
+  session-aware.** An answer grounded in a private upload would be replayed
+  to the next visitor asking something similar — retrieval looking correct
+  while the isolation it provides is undone. Answers touching private
+  documents are never cached (`rag.RagResult.used_private_docs`), *and* cache
+  reads are skipped for visitors who have uploads of their own — otherwise a
+  cached global answer shadows their document and the upload appears to do
+  nothing.
+- **`ingest.run()` rescans the whole docs tree on every upload**, so only
+  files under `uploads/` may be session-tagged. Tagging indiscriminately
+  converts the shared sample corpus into one visitor's private documents.
+- **Deleting a document must delete its `ingest_manifest` row.** Leave it and
+  re-uploading the same file is silently skipped as "unchanged" — measured:
+  `added=0, skipped=11`, document unrecoverable, no error anywhere.
+
+`get_chunk_count()` excludes expired rows, so `MAX_CORPUS_CHUNKS` cannot be
+consumed by documents nobody can retrieve. That makes the Cloud Scheduler
+sweep a storage optimisation rather than something correctness depends on.
+
 **Request flow for `/ask` and `/ask-stream`** (`app/main.py` → `app/rag.py`):
 1. `app/memory.py` rewrites the question using conversation history if a
    `session_id` is given (`contextualize_question`).
@@ -248,11 +280,31 @@ be called with the same question to compare behavior.
   only the final 4.
 - `streaming.py` — SSE streaming for `/ask-stream`.
 - `middleware.py` — two deliberately opposite postures, plus CORS and rate
-  limiting (slowapi). `APIKeyMiddleware` **gates**: a wrong `X-API-Key` is a
-  401, and it disables itself entirely when `API_KEY` is unset.
-  `IdentityMiddleware` **enriches**: it resolves an optional Firebase token
-  and has no rejection path at all. Keep them separate — collapsing them
-  into one "auth" layer is how the public demo accidentally gets walled off.
+  limiting (slowapi). `AccessControlMiddleware` **gates**;
+  `IdentityMiddleware` **enriches** (resolves an optional Firebase token, no
+  rejection path at all). Keep them separate — collapsing them into one
+  "auth" layer is how the public demo accidentally gets walled off.
+
+  Access is **tiered, not a boolean**. It used to be one switch, and both of
+  its positions were wrong for a public demo: `API_KEY` set locked out the
+  visitors the demo exists for, `API_KEY` unset left `/metrics` (spend, token
+  counts, error rates) and `POST /internal/process-ingest-job` (triggers real
+  ingestion) callable by anyone with the URL. Both were verified open on the
+  live service before the fix, not inferred.
+
+  | Tier | Routes | Control |
+  |---|---|---|
+  | Probe | `/health`, `/ready` | always open — Cloud Run calls these itself and cannot present a key |
+  | Public | `/`, `/config`, `/ask*`, `/upload`, `/jobs/*`, `/documents*`, `/docs` | open, unless `API_KEY` is set |
+  | Admin | `/metrics` | `X-Admin-Key` (`ADMIN_KEY`), else **404 not 401** — a 401 confirms the route exists |
+  | Internal | `/internal/*` | Cloud Tasks OIDC only (`TASKS_SERVICE_ACCOUNT_EMAIL`) |
+
+  **Unlisted paths 404 at the middleware.** A route added to `main.py` is
+  unreachable until it is listed here. That maintenance cost is bought
+  deliberately: a new endpoint silently inheriting public access is exactly
+  how `/internal/process-ingest-job` ended up exposed. `API_KEY` is *kept*
+  rather than replaced — it makes a whole deployment private, which is what
+  staging uses it for and what `cd.yml`'s smoke test depends on.
 - `auth.py` — optional Firebase identity, deliberately *additive*. A valid
   token raises the caller's upload ceiling
   (`MAX_UPLOAD_FILES_AUTHED`/`MAX_UPLOAD_SIZE_MB_AUTHED`); an absent,
@@ -306,8 +358,11 @@ be called with the same question to compare behavior.
   `/upload` itself doesn't run ingestion inline — it saves files, creates
   a job via `jobs.create_job()`, and returns `202 {job_id}` immediately;
   `GET /jobs/{job_id}` and `POST /internal/process-ingest-job` (the
-  latter is Cloud Tasks' HTTP target, gated by the same `APIKeyMiddleware`
-  as everything else) complete the async contract — see `jobs.py` above.
+  latter is Cloud Tasks' HTTP target, on the **internal** tier — it accepts
+  only a Cloud Tasks OIDC token, and denies everything when neither that nor
+  `API_KEY` is configured) complete the async contract — see `jobs.py`
+  above. `GET /jobs/{job_id}` additionally checks the job belongs to the
+  calling session, so IDs are not enumerable across visitors.
   Because production accepts uploads from anonymous visitors, `/upload` is
   bounded on three axes checked *before* anything is written (a rejected
   batch must not leave the first N files already saved and queued):
@@ -336,9 +391,12 @@ documented simplification, not an oversight.
 **What is actually deployed right now** (verify with `gcloud`, don't infer
 from this file): both services run **Vertex AI**
 (`gemini-2.5-flash-lite`, `text-embedding-005`, 768-dim). Production is a
-**public demo** — no `API_KEY`, so `APIKeyMiddleware` disables itself and
-anyone with the URL can ask questions and upload within the limits above.
-Staging keeps its API key as the place to test authenticated behaviour.
+**public demo** — no `API_KEY`, so the public tier is open and anyone with
+the URL can ask questions and upload within the limits above. `ADMIN_KEY`
+gates `/metrics`, and `TASKS_SERVICE_ACCOUNT_EMAIL` puts `/internal/*` behind
+Cloud Tasks OIDC — both set imperatively, so a `gcloud run services replace`
+drops them (same caveat as `INGEST_TARGET_URL` below). Staging keeps its API
+key as the place to test authenticated behaviour.
 The YAMLs still mount `API_KEY`, so a `gcloud run services replace`
 against production re-enables auth and locks visitors out; the restore
 command is recorded in `cloudrun-vertexai.yaml` next to that env var.
