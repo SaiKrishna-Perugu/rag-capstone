@@ -78,11 +78,14 @@ _PROBE_PATHS = frozenset({"/health", "/ready"})
 _PUBLIC_PATHS = frozenset({
     "/", "/config",
     "/ask", "/ask-stream", "/ask-agentic", "/upload",
+    "/documents",
     "/docs", "/openapi.json", "/redoc",
 })
 
-# Prefixes whose sub-paths follow the public tier (e.g. /jobs/{job_id}).
-_PUBLIC_PREFIXES = ("/jobs/",)
+# Prefixes whose sub-paths follow the public tier -- /jobs/{job_id} and
+# /documents/{filename}. Both are session-scoped by their handlers; being in
+# the public tier only means "reachable without an API key", not "unowned".
+_PUBLIC_PREFIXES = ("/jobs/", "/documents/")
 
 # Operator surface. Leaks spend, token counts and error rates.
 _ADMIN_PATHS = frozenset({"/metrics"})

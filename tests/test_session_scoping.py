@@ -15,6 +15,8 @@ they are worth having:
 """
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app import config, database, ingest
 
 
@@ -220,3 +222,81 @@ def test_cache_gate_fails_open(client, mock_llm_answer, mock_groundedness):
     assert resp.status_code == 200
     mock_get.assert_called_once()
 
+
+# --- Document removal -----------------------------------------------------
+
+_DOCS_A = [
+    {"source": "docs/uploads/sess-A/report.pdf", "chunks": 4,
+     "ingested_at": None, "expires_at": None},
+    {"source": "docs/uploads/sess-A/notes.txt", "chunks": 2,
+     "ingested_at": None, "expires_at": None},
+]
+
+
+def test_documents_lists_only_the_callers_own_uploads(client):
+    with patch("app.database.list_session_documents", return_value=_DOCS_A) as listed:
+        resp = client.get("/documents", headers={"X-Session-Id": "sess-A"})
+
+    assert resp.status_code == 200
+    assert [d["name"] for d in resp.json()["documents"]] == ["report.pdf", "notes.txt"]
+    # Scoped at the query, so curated docs/ files can never appear.
+    listed.assert_called_once_with("sess-A")
+
+
+def test_documents_is_empty_without_a_session(client):
+    """One code path for the UI: a brand-new visitor gets [], not a 404."""
+    resp = client.get("/documents")
+    assert resp.status_code == 200
+    assert resp.json()["documents"] == []
+
+
+def test_removing_a_document_also_clears_the_manifest(client):
+    """The regression that would otherwise ship silently broken. ingest.run()
+    skips files whose manifest hash is unchanged, so leaving the row behind
+    makes re-uploading the SAME file a no-op -- the document would be
+    permanently unrecoverable with no error raised anywhere."""
+    with patch("app.database.list_session_documents", return_value=_DOCS_A), \
+         patch("app.database.delete_session_document", return_value=4) as del_chunks, \
+         patch("app.database.delete_manifest_entry", return_value=1) as del_manifest, \
+         patch("app.main.logger"):
+        resp = client.delete("/documents/report.pdf", headers={"X-Session-Id": "sess-A"})
+
+    assert resp.status_code == 200
+    assert resp.json()["chunks_deleted"] == 4
+    del_chunks.assert_called_once_with("sess-A", "docs/uploads/sess-A/report.pdf")
+    del_manifest.assert_called_once_with("docs/uploads/sess-A/report.pdf")
+
+
+def test_cannot_remove_another_sessions_document(client):
+    """B asks for a file it does not own. The lookup is scoped to B's own
+    documents, so nothing matches and nothing is deleted -- 404, not 403,
+    which would confirm the file exists."""
+    with patch("app.database.list_session_documents", return_value=[]), \
+         patch("app.database.delete_session_document") as del_chunks, \
+         patch("app.database.delete_manifest_entry") as del_manifest:
+        resp = client.delete("/documents/report.pdf", headers={"X-Session-Id": "sess-B"})
+
+    assert resp.status_code == 404
+    del_chunks.assert_not_called()
+    del_manifest.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["../curated.txt", "../../etc/passwd", "sub/dir.txt"])
+def test_traversal_attempts_are_rejected(client, name):
+    """The source used for deletion is only ever one the database already
+    associated with this session, so this is belt-and-braces -- but a crafted
+    filename must not even reach the lookup."""
+    with patch("app.database.list_session_documents") as listed, \
+         patch("app.database.delete_session_document") as del_chunks:
+        resp = client.delete(f"/documents/{name}", headers={"X-Session-Id": "sess-A"})
+
+    assert resp.status_code == 404
+    del_chunks.assert_not_called()
+    listed.assert_not_called()
+
+
+def test_removal_requires_a_session(client):
+    with patch("app.database.delete_session_document") as del_chunks:
+        resp = client.delete("/documents/report.pdf")
+    assert resp.status_code == 404
+    del_chunks.assert_not_called()

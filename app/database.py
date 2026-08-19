@@ -174,6 +174,68 @@ def upsert_chunks(
             return cur.rowcount
 
 
+def list_session_documents(session_id: str) -> list[dict]:
+    """The documents this visitor uploaded, one row per source file.
+
+    Backs the "your documents" list in the UI. Curated corpus files
+    (session_id IS NULL) never appear -- a visitor manages their own uploads,
+    not the shared sample set.
+    """
+    sql = """
+        SELECT source,
+               COUNT(*)            AS chunks,
+               MIN(ingested_at)    AS ingested_at,
+               MAX(expires_at)     AS expires_at
+        FROM chunks
+        WHERE session_id = %s
+        GROUP BY source
+        ORDER BY MIN(ingested_at)
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (session_id,))
+            return [dict(row) for row in cur.fetchall()]
+
+
+def delete_session_document(session_id: str, source: str) -> int:
+    """Delete one visitor's document. Returns rows removed.
+
+    Scoped by session_id as well as source, deliberately. `source` is derived
+    from a client-supplied filename, and this is the second of two independent
+    checks (main.py rebuilds the path server-side from the caller's own
+    session). Either layer alone is one bug away from letting somebody delete
+    the curated corpus or another visitor's file.
+
+    Kept separate from delete_chunks_by_source() rather than adding an
+    optional filter to it: that one is used by ingest.py for the curated
+    corpus, where session_id IS NULL, and an optional parameter there invites
+    passing None and deleting far more than intended.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM chunks WHERE source = %s AND session_id = %s",
+                (source, session_id),
+            )
+            return cur.rowcount
+
+
+def delete_manifest_entry(source: str) -> int:
+    """Forget that a file was ever ingested.
+
+    Load-bearing, not tidy-up. ingest.run() skips any file whose manifest row
+    still matches its content hash, so deleting a document's chunks while
+    leaving this row behind means re-uploading the SAME file is silently
+    treated as "unchanged" -- ingestion skips it and the chunks are never
+    recreated. The document becomes permanently unrecoverable with no error
+    raised anywhere.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM ingest_manifest WHERE source = %s", (source,))
+            return cur.rowcount
+
+
 def delete_chunks_by_source(source: str) -> int:
     """Delete all chunks for a given source file (used when a file has
     changed and needs full re-ingestion)."""

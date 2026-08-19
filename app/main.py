@@ -415,6 +415,89 @@ async def upload_files(
     )
 
 
+@app.get("/documents")
+async def list_documents(request: Request) -> dict:
+    """The caller's own uploaded documents.
+
+    Returns an empty list rather than 404 when there is no session, so the UI
+    has one code path for "new visitor" and "visitor with nothing uploaded".
+    Curated docs/ files never appear -- a visitor manages their own uploads,
+    not the shared sample corpus.
+    """
+    session = _doc_session(request)
+    if not session:
+        return {"documents": []}
+
+    try:
+        rows = await asyncio.to_thread(database.list_session_documents, session)
+    except Exception as exc:
+        logger.error(
+            json.dumps({"event": "error", "endpoint": "documents", "error": str(exc)}),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=503, detail={"error": "Could not list documents."})
+
+    return {
+        "documents": [
+            {
+                "name": Path(r["source"]).name,
+                "chunks": r["chunks"],
+                "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.delete("/documents/{filename}")
+async def delete_document(filename: str, request: Request) -> dict:
+    """Remove one of the caller's own uploaded documents.
+
+    Lets a visitor swap a file out instead of waiting out the TTL or
+    exhausting MAX_SESSION_CHUNKS -- "I uploaded the wrong file and I'm stuck"
+    is otherwise a dead end on a demo meant to be tried by a stranger.
+
+    The client sends a FILENAME, never a source path. The actual `source` used
+    for deletion is looked up among this session's own documents, so it can
+    only ever be a value the database already associated with this caller --
+    there is no path for a crafted input to reach the curated corpus or
+    another visitor's file. database.delete_session_document() then scopes by
+    session_id again as a second, independent check.
+    """
+    session = _doc_session(request)
+    # Traversal rejected early and explicitly, even though the lookup below
+    # makes it unreachable -- a clear 400 beats a confusing 404.
+    if not session or Path(filename).name != filename:
+        raise HTTPException(status_code=404, detail={"error": "Document not found."})
+
+    try:
+        rows = await asyncio.to_thread(database.list_session_documents, session)
+        match = next((r for r in rows if Path(r["source"]).name == filename), None)
+        if match is None:
+            # Same posture as /jobs/{id}: do not confirm what exists.
+            raise HTTPException(status_code=404, detail={"error": "Document not found."})
+
+        source = match["source"]
+        deleted = await asyncio.to_thread(database.delete_session_document, session, source)
+        # Not tidy-up: leaving the manifest row makes re-uploading the same
+        # file a silent no-op, because ingest.run() would treat it as
+        # unchanged and skip it. See database.delete_manifest_entry().
+        await asyncio.to_thread(database.delete_manifest_entry, source)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            json.dumps({"event": "error", "endpoint": "delete-document", "error": str(exc)}),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=503, detail={"error": "Could not remove the document."})
+
+    logger.info(json.dumps({
+        "event": "document_deleted", "filename": filename, "chunks_deleted": deleted,
+    }))
+    return {"deleted": filename, "chunks_deleted": deleted}
+
+
 @app.get("/jobs/{job_id}")
 async def get_job_status(job_id: str, request: Request) -> dict:
     """Polled by ui.html (and anyone else holding a job_id from /upload)."""

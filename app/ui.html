@@ -184,6 +184,36 @@
             color: var(--text-main);
         }
 
+        .doc-list {
+            margin-top: 0.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .doc-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            font-size: 0.85rem;
+            padding: 0.35rem 0.6rem;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.04);
+        }
+        .doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .doc-meta { color: var(--text-muted); font-size: 0.75rem; white-space: nowrap; }
+        .doc-remove {
+            background: none;
+            border: 1px solid rgba(248, 113, 113, 0.4);
+            color: #f87171;
+            border-radius: 6px;
+            padding: 0.15rem 0.5rem;
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+        .doc-remove:hover { background: rgba(248, 113, 113, 0.12); }
+        .doc-remove:disabled { opacity: 0.5; cursor: default; }
+
         .upload-status {
             margin-top: 10px;
             font-size: 0.9rem;
@@ -424,6 +454,7 @@
             </label>
             <div class="upload-status" id="upload-status">Document ingested successfully!</div>
             <div class="upload-error" id="upload-error"></div>
+            <div class="doc-list" id="doc-list"></div>
         </div>
 
         <div class="search-box">
@@ -629,6 +660,9 @@
                 }
                 if (res.ok) {
                     const cfg = await res.json();
+                    // Only meaningful when uploads are on; harmless otherwise
+                    // (the list simply comes back empty).
+                    if (cfg.enable_uploads) refreshDocuments();
                     if (!cfg.enable_uploads) {
                         const uploadSection = document.getElementById('upload-section');
                         if (uploadSection) {
@@ -666,6 +700,68 @@
                 console.warn('Could not fetch runtime config:', e);
             }
         }
+        // --- Your documents ------------------------------------------------
+        // Built with createElement/textContent throughout, never innerHTML:
+        // these names come from files a stranger uploaded, and rendering them
+        // as markup is the stored-XSS path this project already fixed once.
+        async function refreshDocuments() {
+            const list = document.getElementById('doc-list');
+            if (!list) return;
+            list.replaceChildren();
+            let docs = [];
+            try {
+                const res = await fetch('/documents', { headers: authHeaders() });
+                if (!res.ok) return;
+                docs = (await res.json()).documents || [];
+            } catch (err) {
+                return;   // listing is a convenience; never break the page over it
+            }
+
+            for (const doc of docs) {
+                const row = document.createElement('div');
+                row.className = 'doc-row';
+
+                const name = document.createElement('span');
+                name.className = 'doc-name';
+                name.textContent = doc.name;
+                name.title = doc.name;
+
+                const meta = document.createElement('span');
+                meta.className = 'doc-meta';
+                meta.textContent = `${doc.chunks} chunk${doc.chunks === 1 ? '' : 's'}`;
+
+                const btn = document.createElement('button');
+                btn.className = 'doc-remove';
+                btn.textContent = 'Remove';
+                btn.onclick = () => removeDocument(doc.name, btn);
+
+                const left = document.createElement('span');
+                left.style.cssText = 'display:flex;align-items:center;gap:0.6rem;min-width:0;';
+                left.append(name, meta);
+                row.append(left, btn);
+                list.appendChild(row);
+            }
+        }
+
+        async function removeDocument(name, btn) {
+            btn.disabled = true;
+            btn.textContent = 'Removing...';
+            try {
+                const res = await fetch(`/documents/${encodeURIComponent(name)}`, {
+                    method: 'DELETE',
+                    headers: authHeaders(),
+                });
+                if (!res.ok) throw new Error(`Server returned ${res.status}`);
+            } catch (err) {
+                const uploadError = document.getElementById('upload-error');
+                uploadError.innerText = "Could not remove document: " + err.message;
+                uploadError.style.display = 'block';
+            }
+            // Refresh either way -- on failure the row reappears, which is a
+            // truer signal than a button stuck on "Removing...".
+            await refreshDocuments();
+        }
+
         window.addEventListener('DOMContentLoaded', initApp);
 
         const loadingTexts = [
@@ -936,6 +1032,7 @@
                 const updated = (summary.updated || []).length;
                 uploadStatus.innerText = `Processed ${files.length} document(s): ${added} added, ${updated} updated.`;
                 uploadStatus.style.display = 'block';
+                await refreshDocuments();
             } catch (err) {
                 uploadError.innerText = "Upload failed: " + err.message;
                 uploadError.style.display = 'block';
