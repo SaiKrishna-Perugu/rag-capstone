@@ -62,12 +62,12 @@ def test_ask_reports_cost(client, mock_cache, mock_retrieval, mock_llm_answer, m
 def test_ask_agentic_reports_cost(client, mock_cache, captured_log):
     """The regression this closes: /ask-agentic never called start_request(),
     so it logged no cost fields at all."""
-    def fake_agentic(question):
+    def fake_agentic(question, session_id=None):
         _spend(stage="grade", in_tok=500, out_tok=10)
         _spend(stage="generate", in_tok=1200, out_tok=150)
         return {
             "current_query": question, "answer": "a", "groundedness": "GROUNDED",
-            "sources": [], "retry_count": 1,
+            "sources": [], "retry_count": 1, "chunks": [],
         }
 
     with patch("app.main.run_agentic_rag", side_effect=fake_agentic):

@@ -10,7 +10,12 @@ spec:
       annotations:
         # Autoscaling bounds (scale to 0 saves money when idle)
         autoscaling.knative.dev/minScale: "0"
-        autoscaling.knative.dev/maxScale: "10"
+        # Capped at 2 deliberately. slowapi's limiter is IN-PROCESS, so
+        # maxScale is the real multiplier on RATE_LIMIT: at 10 instances a
+        # configured 20/minute is up to 200/minute in practice. 2 keeps the
+        # limiter approximately honest (worst case 2x) and caps worst-case
+        # compute on a publicly reachable demo.
+        autoscaling.knative.dev/maxScale: '2'
         # Increase concurrency per instance for async FastAPI
         autoscaling.knative.dev/targetBurstCapacity: "100"
         # Cloud SQL Auth Proxy sidecar (auto-manages secure connections)

@@ -58,6 +58,8 @@ Return ONLY the rewritten query, nothing else."""
 class AgentState(TypedDict):
     original_question: str
     current_query: str
+    # Document-visibility scope, not the conversation-memory session.
+    session_id: str | None
     chunks: list
     grade: str            # "SUFFICIENT" | "INSUFFICIENT" | ""
     retry_count: int
@@ -78,7 +80,7 @@ def _get_grading_llm(stage: str):
 
 @traceable(name="agent.retrieve", run_type="retriever")
 def node_retrieve(state: AgentState) -> AgentState:
-    chunks = retrieve(state["current_query"])
+    chunks = retrieve(state["current_query"], session_id=state.get("session_id"))
     return {**state, "chunks": chunks}
 
 
@@ -185,11 +187,12 @@ def get_compiled_graph():
 
 
 @traceable(name="agentic_rag.run", run_type="chain")
-def run_agentic_rag(question: str) -> AgentState:
+def run_agentic_rag(question: str, session_id: str | None = None) -> AgentState:
     """Entry point used by main.py and eval.py."""
     initial_state: AgentState = {
         "original_question": question,
         "current_query": question,
+        "session_id": session_id,
         "chunks": [],
         "grade": "",
         "retry_count": 0,

@@ -107,11 +107,19 @@ def init_db() -> None:
 # Chunk operations (used by ingest.py and retrieval.py)
 # ---------------------------------------------------------------------------
 
-def get_chunk_count() -> int:
-    """Return the total number of chunks in the store. Used by /ready."""
+def get_chunk_count(session_id: str | None = None) -> int:
+    """Chunks in the store. Used by /ready (total) and by /upload's caps.
+
+    With `session_id`, counts only that visitor's own uploaded chunks, which
+    is what the per-session ceiling is enforced against -- so one visitor
+    cannot consume the whole global budget.
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM chunks")
+            if session_id is None:
+                cur.execute("SELECT COUNT(*) FROM chunks")
+            else:
+                cur.execute("SELECT COUNT(*) FROM chunks WHERE session_id = %s", (session_id,))
             return cur.fetchone()[0]
 
 
@@ -121,22 +129,30 @@ def upsert_chunks(
     embeddings: list[list[float]],
     content_hashes: list[str],
     metadatas: list[dict],
+    session_id: str | None = None,
+    expires_at=None,
 ) -> int:
     """Bulk upsert chunks for a given source file.
 
     Uses ON CONFLICT on (source, content_hash) to handle the freshness
     logic: unchanged chunks are skipped, changed chunks are updated.
     Returns the number of rows affected.
+
+    `session_id`/`expires_at` default to None, which is the curated corpus:
+    visible to everyone, never expires. Visitor uploads pass both.
     """
     import numpy as np
 
     sql = """
-        INSERT INTO chunks (source, content, embedding, content_hash, metadata)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO chunks (source, content, embedding, content_hash, metadata,
+                            session_id, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (source, content_hash) DO UPDATE SET
             content = EXCLUDED.content,
             embedding = EXCLUDED.embedding,
             metadata = EXCLUDED.metadata,
+            session_id = EXCLUDED.session_id,
+            expires_at = EXCLUDED.expires_at,
             ingested_at = now()
     """
     with get_conn() as conn:
@@ -151,6 +167,8 @@ def upsert_chunks(
                     np.array(emb, dtype=np.float32),
                     chash,
                     psycopg2.extras.Json(meta),
+                    session_id,
+                    expires_at,
                 ))
             cur.executemany(sql, rows)
             return cur.rowcount
@@ -207,11 +225,28 @@ def upsert_manifest_entry(source: str, content_hash: str, num_chunks: int) -> No
 # Hybrid search (used by retrieval.py)
 # ---------------------------------------------------------------------------
 
+# The visibility predicate, in one place. Repeated inline in each CTE rather
+# than factored into a `visible` CTE so Postgres can still push it down to the
+# HNSW / GIN indexes instead of scanning a materialised intermediate.
+#
+#   session_id IS NULL -> curated corpus, everyone sees it
+#   session_id = :sid  -> this visitor's own upload
+#
+# A caller with no session (sid IS NULL) matches only the first branch, so an
+# anonymous visitor sees the curated corpus and nobody's uploads -- including
+# their own from a previous browser. That is the intended default.
+_VISIBLE = """
+    (session_id IS NULL OR session_id = %(session_id)s)
+    AND (expires_at IS NULL OR expires_at > now())
+"""
+
+
 def hybrid_search(
     query_embedding: list[float],
     query_text: str,
     k: int = 10,
     candidate_pool: int = 20,
+    session_id: str | None = None,
 ) -> list[dict]:
     """Single-query hybrid retrieval: vector similarity + full-text search,
     fused with Reciprocal Rank Fusion (RRF, k=60).
@@ -219,41 +254,72 @@ def hybrid_search(
     This is the exact same RRF math previously in retrieval.py's
     _reciprocal_rank_fusion() — k=60, unchanged — just executed by Postgres
     instead of Python. Returns dicts with keys: id, source, content, metadata.
+
+    Scoped to what `session_id` may see (see _VISIBLE). Named parameters
+    throughout, deliberately: this query binds the same values several times
+    and the visibility predicate appears three times, which is exactly the
+    shape where positional placeholders get silently mis-ordered.
+
+    Known pgvector caveat: an HNSW scan with a filter post-filters, so a
+    heavily-filtered search can return fewer than `candidate_pool` rows. Not a
+    practical concern at this corpus size (MAX_CORPUS_CHUNKS is in the
+    hundreds), but it would be at scale.
     """
     import numpy as np
 
-    sql = """
+    sql = f"""
         WITH vector_ranked AS (
             SELECT id, ROW_NUMBER() OVER (
-                ORDER BY embedding <=> %s
+                ORDER BY embedding <=> %(emb)s
             ) AS rank
             FROM chunks
-            ORDER BY embedding <=> %s
-            LIMIT %s
+            WHERE {_VISIBLE}
+            ORDER BY embedding <=> %(emb)s
+            LIMIT %(pool)s
         ),
         keyword_ranked AS (
             SELECT id, ROW_NUMBER() OVER (
-                ORDER BY ts_rank(content_tsv, plainto_tsquery('english', %s)) DESC
+                ORDER BY ts_rank(content_tsv, plainto_tsquery('english', %(q)s)) DESC
             ) AS rank
             FROM chunks
-            WHERE content_tsv @@ plainto_tsquery('english', %s)
-            LIMIT %s
+            WHERE content_tsv @@ plainto_tsquery('english', %(q)s)
+              AND {_VISIBLE}
+            LIMIT %(pool)s
         )
-        SELECT c.id, c.source, c.content, c.metadata,
+        SELECT c.id, c.source, c.content, c.metadata, c.session_id,
                COALESCE(1.0 / (60 + v.rank), 0) + COALESCE(1.0 / (60 + k.rank), 0) AS rrf_score
         FROM chunks c
         LEFT JOIN vector_ranked v ON c.id = v.id
         LEFT JOIN keyword_ranked k ON c.id = k.id
-        WHERE v.id IS NOT NULL OR k.id IS NOT NULL
+        WHERE (v.id IS NOT NULL OR k.id IS NOT NULL)
+          AND {_VISIBLE}
         ORDER BY rrf_score DESC
-        LIMIT %s
+        LIMIT %(k)s
     """
-    emb = np.array(query_embedding, dtype=np.float32)
+    params = {
+        "emb": np.array(query_embedding, dtype=np.float32),
+        "q": query_text,
+        "pool": candidate_pool,
+        "k": k,
+        "session_id": session_id,
+    }
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (emb, emb, candidate_pool, query_text, query_text, candidate_pool, k))
+            cur.execute(sql, params)
             return [dict(row) for row in cur.fetchall()]
+
+
+def delete_expired_chunks() -> int:
+    """Drop uploaded chunks past their TTL. Curated chunks (expires_at NULL)
+    are never touched. Called by the internal cleanup endpoint that Cloud
+    Scheduler hits daily -- Postgres has no native TTL, unlike Firestore."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM chunks WHERE expires_at IS NOT NULL AND expires_at < now()"
+            )
+            return cur.rowcount
 
 
 # ---------------------------------------------------------------------------

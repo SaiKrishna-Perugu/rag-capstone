@@ -172,15 +172,63 @@ def test_get_job_status_unavailable(client):
         response = client.get("/jobs/job-123")
     assert response.status_code == 503
 
-def test_process_ingest_job_success(client):
+def test_process_ingest_job_success(client, monkeypatch):
+    """Reachable only with internal credentials now. With no Tasks service
+    account configured the middleware falls back to the shared API key."""
+    monkeypatch.setattr(config, "API_KEY", "internal-key")
+    monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", "")
     with patch("app.jobs.process_job") as mock_process:
-        response = client.post("/internal/process-ingest-job", json={"job_id": "job-123"})
+        response = client.post(
+            "/internal/process-ingest-job",
+            json={"job_id": "job-123"},
+            headers={"X-API-Key": "internal-key"},
+        )
     assert response.status_code == 200
     mock_process.assert_called_once_with("job-123")
 
-def test_process_ingest_job_failure_returns_500_for_cloud_tasks_retry(client):
-    with patch("app.jobs.process_job", side_effect=RuntimeError("ingest blew up")):
+
+def test_process_ingest_job_is_not_publicly_callable(client):
+    """The vulnerability this closes: production runs with no API_KEY, which
+    made APIKeyMiddleware disable itself and left this endpoint -- which
+    triggers real ingestion work -- callable by anyone with the URL."""
+    with patch("app.jobs.process_job") as mock_process:
         response = client.post("/internal/process-ingest-job", json={"job_id": "job-123"})
+    assert response.status_code == 403
+    mock_process.assert_not_called()
+
+
+def test_internal_denies_when_nothing_is_configured(client, monkeypatch):
+    """Neither OIDC nor an API key configured must mean closed, not open --
+    a broken upload is a better failure than a stranger running ingestion."""
+    monkeypatch.setattr(config, "API_KEY", "")
+    monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", "")
+    with patch("app.jobs.process_job") as mock_process:
+        response = client.post("/internal/process-ingest-job", json={"job_id": "j"})
+    assert response.status_code == 403
+    mock_process.assert_not_called()
+
+
+def test_unlisted_paths_are_closed_by_default(client):
+    """Default-closed routing: a route added to main.py is unreachable until
+    it is listed in middleware. That maintenance cost is bought on purpose --
+    silently inheriting public access is how /internal got exposed."""
+    assert client.get("/some-route-that-does-not-exist").status_code == 404
+
+
+def test_probes_stay_open_even_when_the_deployment_is_private(client, monkeypatch):
+    """Cloud Run calls these itself and cannot present a key."""
+    monkeypatch.setattr(config, "API_KEY", "private-deployment")
+    assert client.get("/health").status_code == 200
+
+def test_process_ingest_job_failure_returns_500_for_cloud_tasks_retry(client, monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "internal-key")
+    monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", "")
+    with patch("app.jobs.process_job", side_effect=RuntimeError("ingest blew up")):
+        response = client.post(
+            "/internal/process-ingest-job",
+            json={"job_id": "job-123"},
+            headers={"X-API-Key": "internal-key"},
+        )
     assert response.status_code == 500
 
 def test_config_endpoint(client):

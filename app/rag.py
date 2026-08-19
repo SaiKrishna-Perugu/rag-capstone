@@ -35,15 +35,19 @@ class RagResult:
     answer: str
     sources: list = field(default_factory=list)
     groundedness: str = "NOT_CHECKED"
+    # True when any retrieved chunk belonged to a specific visitor rather
+    # than the curated corpus. Callers use this to skip the shared semantic
+    # cache; see the note in answer_question().
+    used_private_docs: bool = False
 
 
-def retrieve(question: str, k: int | None = None) -> list:
+def retrieve(question: str, k: int | None = None, session_id: str | None = None) -> list:
     """
     Retrieve the top-k most relevant chunks for a question, via hybrid
     (BM25 + vector, RRF-fused) retrieval followed by LLM reranking --
     see app/retrieval.py for why each stage exists and its tradeoffs.
     """
-    return retrieve_with_hybrid_and_rerank(question, k=k)
+    return retrieve_with_hybrid_and_rerank(question, k=k, session_id=session_id)
 
 
 def _format_context(chunks: list) -> str:
@@ -100,8 +104,13 @@ def check_groundedness(answer: str, chunks: list) -> str:
     return verdict if verdict in ("GROUNDED", "UNSUPPORTED") else "UNKNOWN"
 
 
-def answer_question(question: str, k: int | None = None, check_hallucination: bool = True) -> RagResult:
-    chunks = retrieve(question, k=k)
+def answer_question(
+    question: str,
+    k: int | None = None,
+    check_hallucination: bool = True,
+    session_id: str | None = None,
+) -> RagResult:
+    chunks = retrieve(question, k=k, session_id=session_id)
 
     if not chunks:
         return RagResult(
@@ -113,6 +122,12 @@ def answer_question(question: str, k: int | None = None, check_hallucination: bo
     answer = generate_answer(question, chunks)
     groundedness = check_groundedness(answer, chunks) if check_hallucination else "NOT_CHECKED"
 
+    # The semantic cache is global and is consulted BEFORE retrieval, so an
+    # answer grounded in a visitor's private upload would otherwise be served
+    # to the next person asking something similar -- silently defeating the
+    # session isolation the scoping exists to provide.
+    used_private_docs = any(c.metadata.get("_session_id") for c in chunks)
+
     sources = [
         {
             "source": chunk.metadata.get("source", "unknown"),
@@ -122,4 +137,9 @@ def answer_question(question: str, k: int | None = None, check_hallucination: bo
         for chunk in chunks
     ]
 
-    return RagResult(answer=answer, sources=sources, groundedness=groundedness)
+    return RagResult(
+        answer=answer,
+        sources=sources,
+        groundedness=groundedness,
+        used_private_docs=used_private_docs,
+    )

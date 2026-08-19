@@ -570,10 +570,31 @@
         // when no key is set matters: sending an empty X-API-Key is a
         // *failed* auth attempt, while sending nothing is indistinguishable
         // from an unauthenticated call to a service that has auth disabled.
+        // Stable per-browser ID scoping which uploaded documents this visitor
+        // can retrieve. Kept in localStorage so it survives reloads -- unlike
+        // the conversation-memory session_id, which is per page load. No login
+        // involved: the demo stays usable by a stranger, but one visitor's
+        // uploads are invisible to everyone else.
+        function docSessionId() {
+            let id = localStorage.getItem('rag_doc_session');
+            if (!id) {
+                // randomUUID needs a secure context; the fallback keeps this
+                // working if the page is ever served over plain http.
+                id = (window.crypto && crypto.randomUUID)
+                    ? crypto.randomUUID()
+                    : 'sid-' + Date.now().toString(36) + Math.random().toString(36).slice(2);
+                localStorage.setItem('rag_doc_session', id);
+            }
+            return id;
+        }
+
         function authHeaders(extra) {
             const h = Object.assign({}, extra || {});
             const key = getApiKey();
             if (key) h['X-API-Key'] = key;
+            // Every request carries it: /upload tags chunks with it, /ask*
+            // scopes retrieval to it, /jobs/{id} checks ownership against it.
+            h['X-Session-Id'] = docSessionId();
             // Firebase identity is independent of the API key: the key (when
             // set) controls whether you may reach the service at all, the
             // bearer token controls how much you may upload. Both, either,

@@ -119,6 +119,13 @@ SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
 CLOUD_TASKS_QUEUE = os.getenv("CLOUD_TASKS_QUEUE", "ingest-queue")
 INGEST_TARGET_URL = os.getenv("INGEST_TARGET_URL", "")
 JOB_TTL_HOURS = int(os.getenv("JOB_TTL_HOURS", "48"))
+# How long a visitor's uploaded documents stay retrievable. Uploads are
+# scoped to the uploading session and swept by the cleanup endpoint; the
+# curated docs/ corpus never expires.
+UPLOAD_TTL_HOURS = int(os.getenv("UPLOAD_TTL_HOURS", "24"))
+# Per-session ceiling on indexed chunks, so one visitor cannot consume the
+# whole MAX_CORPUS_CHUNKS budget and lock everyone else out. 0 disables.
+MAX_SESSION_CHUNKS = int(os.getenv("MAX_SESSION_CHUNKS", "100"))
 
 # --- Metrics (OpenTelemetry) -------------------------------------------------
 # Prometheus export (GET /metrics) is always on and needs no GCP config.
@@ -130,7 +137,10 @@ TOP_K = int(os.getenv("TOP_K", "4"))
 # --- API Security & Features ----------------------------------------------
 API_KEY = _get_secret("API_KEY", "")  # empty string = auth disabled
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
-RATE_LIMIT = os.getenv("RATE_LIMIT", "20/minute")
+# 10/minute, not 20: no legitimate demo visitor needs more, and the
+# limiter is per-IP and in-process, so it is a speed bump rather than a
+# real quota. See maxScale in the Cloud Run YAMLs for why that matters.
+RATE_LIMIT = os.getenv("RATE_LIMIT", "10/minute")
 ENABLE_UPLOADS = os.getenv("ENABLE_UPLOADS", "true").lower() == "true"
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
 # Number of files accepted per /upload request. The per-file size cap
@@ -164,6 +174,20 @@ FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN", "")
 MAX_UPLOAD_FILES_AUTHED = int(os.getenv("MAX_UPLOAD_FILES_AUTHED", "10"))
 MAX_UPLOAD_SIZE_MB_AUTHED = int(os.getenv("MAX_UPLOAD_SIZE_MB_AUTHED", "10"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
+
+# --- Access tiers (app/middleware.py) ---------------------------------------
+# Separate from API_KEY on purpose. API_KEY makes a WHOLE deployment private
+# (staging uses it). ADMIN_KEY gates only the operator surface -- /metrics
+# leaks token counts, spend and error rates, which must not be public even
+# on a demo whose whole point is being publicly usable.
+ADMIN_KEY = _get_secret("ADMIN_KEY", "")
+
+# Service account Cloud Tasks signs its OIDC tokens as. When set,
+# /internal/* accepts ONLY a valid OIDC token from this identity -- the
+# endpoint stops being reachable from the public internet at all. Unset
+# falls back to requiring API_KEY, and if that is also unset /internal/*
+# denies everything rather than standing open.
+TASKS_SERVICE_ACCOUNT_EMAIL = os.getenv("TASKS_SERVICE_ACCOUNT_EMAIL", "")
 
 # --- Security hardening (app/security.py) ----------------------------------
 # Prompt-injection screening. Regex-only, so it costs no tokens and no

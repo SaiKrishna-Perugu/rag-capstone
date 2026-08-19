@@ -44,7 +44,7 @@ from app import (
     streaming,
 )
 from app.agent import run_agentic_rag
-from app.middleware import APIKeyMiddleware, IdentityMiddleware
+from app.middleware import AccessControlMiddleware, IdentityMiddleware
 from app.rag import answer_question
 
 # --- Structured logging setup -------------------------------------------------
@@ -108,10 +108,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(APIKeyMiddleware)
-# Registered after APIKeyMiddleware so it runs FIRST (Starlette applies
+app.add_middleware(AccessControlMiddleware)
+# Registered after AccessControlMiddleware so it runs FIRST (Starlette applies
 # middleware in reverse registration order). Identity is therefore resolved
-# before the API-key gate, which matters only for ordering clarity -- the two
+# before the access gate, which matters only for ordering clarity -- the two
 # are independent, and IdentityMiddleware never rejects anything.
 app.add_middleware(IdentityMiddleware)
 
@@ -149,6 +149,20 @@ class AgenticAskResponse(BaseModel):
 
 class InternalJobRequest(BaseModel):
     job_id: str
+
+
+def _doc_session(request: Request) -> str | None:
+    """The visitor's document-visibility scope, from X-Session-Id.
+
+    Deliberately NOT the same thing as AskRequest.session_id, which scopes
+    conversation memory. A visitor could reasonably want chat history without
+    exposing their uploads to it, and the two have different lifetimes. The
+    UI generates this one once and keeps it in localStorage.
+
+    None means "curated corpus only" -- the safe default for any caller that
+    does not send the header.
+    """
+    return request.headers.get("X-Session-Id") or None
 
 
 @app.get("/health")
@@ -254,6 +268,29 @@ async def upload_files(
     # refusal, not a partial ingest. Fails open on a database error -- the
     # cap is abuse mitigation, not a correctness invariant, and a transient
     # DB blip shouldn't reject a legitimate upload.
+    doc_session = _doc_session(request)
+
+    # Per-session ceiling, checked first: without it one visitor can consume
+    # the entire global budget below and lock everyone else out of uploading.
+    if doc_session and config.MAX_SESSION_CHUNKS > 0:
+        try:
+            mine = database.get_chunk_count(session_id=doc_session)
+        except Exception as e:
+            logger.warning(f"Session size check failed, allowing upload: {e}")
+            mine = 0
+        if mine >= config.MAX_SESSION_CHUNKS:
+            raise HTTPException(
+                status_code=507,
+                detail={
+                    "error": (
+                        f"You have reached this demo's per-visitor limit "
+                        f"({mine} chunks). Your documents expire automatically "
+                        f"after {config.UPLOAD_TTL_HOURS}h."
+                    ),
+                    "request_id": request_id,
+                },
+            )
+
     if config.MAX_CORPUS_CHUNKS > 0:
         try:
             current = database.get_chunk_count()
@@ -278,7 +315,13 @@ async def upload_files(
     # under docs_dir, so the startup cleanup above can safely clear only
     # this subdirectory. ingest.py discovers files recursively, so this
     # doesn't change what gets indexed.
+    # One directory per session. Without this two visitors uploading files
+    # with the same name overwrite each other on disk AND collide on the
+    # chunks table's (source, content_hash) unique index, so the second
+    # uploader would silently take ownership of the first one's document.
     docs_dir = Path(config.DOCS_DIR) / "uploads"
+    if doc_session:
+        docs_dir = docs_dir / doc_session
     docs_dir.mkdir(parents=True, exist_ok=True)
     
     saved_files = []
@@ -342,7 +385,7 @@ async def upload_files(
     logger.info(f"Saved uploaded files: {saved_files}. Creating ingestion job...")
 
     try:
-        job_id = await asyncio.to_thread(jobs.create_job, saved_files)
+        job_id = await asyncio.to_thread(jobs.create_job, saved_files, doc_session)
     except Exception as exc:
         metrics.record_error("upload")
         logger.error(
@@ -373,13 +416,21 @@ async def upload_files(
 
 
 @app.get("/jobs/{job_id}")
-async def get_job_status(job_id: str) -> dict:
+async def get_job_status(job_id: str, request: Request) -> dict:
     """Polled by ui.html (and anyone else holding a job_id from /upload)."""
     try:
         job = await asyncio.to_thread(jobs.get_job, job_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"error": f"Job tracking is unavailable: {exc!s}"})
     if job is None:
+        raise HTTPException(status_code=404, detail={"error": f"Job {job_id} not found."})
+
+    # Job IDs are UUIDs, but "unguessable" is not an access control. A job
+    # records which files someone uploaded, so a mismatched session gets the
+    # same 404 as a nonexistent job -- not a 403, which would confirm the ID
+    # is real.
+    owner = job.get("session_id")
+    if owner and owner != _doc_session(request):
         raise HTTPException(status_code=404, detail={"error": f"Job {job_id} not found."})
     return job
 
@@ -400,6 +451,30 @@ async def process_ingest_job(body: InternalJobRequest) -> dict:
         # just overwrites the job back to "done" (see app/jobs.py).
         raise HTTPException(status_code=500, detail={"error": str(exc)})
     return {"status": "done"}
+
+
+@app.post("/internal/cleanup-expired")
+async def cleanup_expired() -> dict:
+    """Sweep uploaded chunks past their TTL. Cloud Scheduler's target.
+
+    Postgres has no native TTL the way Firestore does, so expired rows need
+    deleting by something. Retrieval already filters on expires_at, so a
+    delayed sweep costs storage, never correctness -- an expired document is
+    invisible from the moment it expires, whether or not this has run.
+
+    Behind the internal tier (see app/middleware.py), same as the ingest
+    callback.
+    """
+    try:
+        deleted = await asyncio.to_thread(database.delete_expired_chunks)
+    except Exception as exc:
+        logger.error(
+            json.dumps({"event": "error", "endpoint": "cleanup-expired", "error": str(exc)}),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail={"error": str(exc)})
+    logger.info(json.dumps({"event": "cleanup_expired", "chunks_deleted": deleted}))
+    return {"chunks_deleted": deleted}
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -437,7 +512,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     )
 
     # --- Check Semantic Cache First ---------------------------------------
-    cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
+    # Skipped for visitors with their own documents; see _session_has_uploads.
+    cached_hit = None
+    if not await asyncio.to_thread(cache.session_has_uploads, _doc_session(request)):
+        cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
     if cached_hit:
         # Save to memory even if it was a cache hit
         if body.session_id:
@@ -476,6 +554,7 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             question=contextualized_q,
             k=body.top_k,
             check_hallucination=body.check_hallucination,
+            session_id=_doc_session(request),
         )
     except Exception as exc:
         metrics.record_error("ask")
@@ -524,9 +603,14 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
         **cost.current().as_log_fields(),
     }))
 
-    # Cache the successful result for future similar questions
-    await asyncio.to_thread(cache.set_cached_answer, contextualized_q, result.answer, result.groundedness)
-    
+    # Cache the successful result for future similar questions -- but never
+    # one grounded in a visitor's private upload. The cache is global and is
+    # consulted BEFORE retrieval, so caching such an answer would replay it to
+    # the next visitor asking something similar and silently undo the session
+    # isolation entirely.
+    if not result.used_private_docs:
+        await asyncio.to_thread(cache.set_cached_answer, contextualized_q, result.answer, result.groundedness)
+
     if body.session_id:
         await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, result.answer)
 
@@ -548,7 +632,9 @@ async def ask_stream(request: Request, body: AskRequest):
     followed by a `{"type": "final", ...}` payload at the end.
     """
     return StreamingResponse(
-        streaming.stream_answer(body.question, body.session_id, body.top_k),
+        streaming.stream_answer(
+            body.question, body.session_id, body.top_k, _doc_session(request)
+        ),
         media_type="text/event-stream"
     )
 
@@ -589,7 +675,9 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     )
 
     # --- Check Semantic Cache First ---------------------------------------
-    cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
+    cached_hit = None
+    if not await asyncio.to_thread(cache.session_has_uploads, _doc_session(request)):
+        cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
     if cached_hit:
         if body.session_id:
             await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, cached_hit["answer"])
@@ -618,7 +706,9 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
         )
 
     try:
-        final_state = await asyncio.to_thread(run_agentic_rag, contextualized_q)
+        final_state = await asyncio.to_thread(
+            run_agentic_rag, contextualized_q, _doc_session(request)
+        )
     except Exception as exc:
         metrics.record_error("ask-agentic")
         logger.error(
@@ -671,9 +761,13 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
         **cost.current().as_log_fields(),
     }))
 
-    # Cache the successful result for future similar questions
-    await asyncio.to_thread(cache.set_cached_answer, contextualized_q, final_state["answer"], final_state["groundedness"])
-    
+    # Same private-document rule as /ask above.
+    if not any(c.metadata.get("_session_id") for c in final_state.get("chunks", [])):
+        await asyncio.to_thread(
+            cache.set_cached_answer,
+            contextualized_q, final_state["answer"], final_state["groundedness"],
+        )
+
     if body.session_id:
         await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, final_state["answer"])
 

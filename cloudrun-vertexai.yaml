@@ -9,7 +9,12 @@ spec:
     metadata:
       annotations:
         autoscaling.knative.dev/minScale: '0'
-        autoscaling.knative.dev/maxScale: '5'
+        # Capped at 2 deliberately. slowapi's limiter is IN-PROCESS, so
+        # maxScale is the real multiplier on RATE_LIMIT: at 10 instances a
+        # configured 20/minute is up to 200/minute in practice. 2 keeps the
+        # limiter approximately honest (worst case 2x) and caps worst-case
+        # compute on a publicly reachable demo.
+        autoscaling.knative.dev/maxScale: '2'
         run.googleapis.com/startup-cpu-boost: 'true'
         # Cloud SQL Auth Proxy sidecar (auto-manages secure connections)
         run.googleapis.com/cloudsql-instances: YOUR_PROJECT_ID:us-central1:rag-capstone-db

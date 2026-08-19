@@ -32,6 +32,24 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON chunks USING hnsw (embed
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING gin (content_tsv);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_source_hash ON chunks (source, content_hash);
 
+-- Session scoping. Added by ALTER rather than in the CREATE above on
+-- purpose: CREATE TABLE IF NOT EXISTS is a no-op against the existing table,
+-- so columns declared there would never reach a deployed database. ADD COLUMN
+-- IF NOT EXISTS keeps init_db() idempotent AND actually migrates.
+--
+--   session_id IS NULL  -> curated docs/ corpus, visible to everyone, forever
+--   session_id = '<id>' -> a visitor's own upload, visible only to them
+--
+-- Without this every upload landed in one shared corpus, so any visitor could
+-- change what every later visitor saw -- including leaving a prompt-injection
+-- payload in place for the next person.
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS session_id TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks (session_id);
+-- Partial: only uploaded chunks have an expiry, curated ones never do.
+CREATE INDEX IF NOT EXISTS idx_chunks_expires ON chunks (expires_at)
+    WHERE expires_at IS NOT NULL;
+
 -- Semantic cache: stores previously answered Q&A pairs for similarity lookup.
 CREATE TABLE IF NOT EXISTS semantic_cache (
     id BIGSERIAL PRIMARY KEY,

@@ -51,7 +51,7 @@ Respond with ONLY a JSON array of the candidate numbers in ranked order, e.g. \
 [3, 1, 4, 2]. Include every candidate number exactly once. No other text."""
 
 
-def hybrid_retrieve(question: str, k: int | None = None) -> list:
+def hybrid_retrieve(question: str, k: int | None = None, session_id: str | None = None) -> list:
     """
     Vector search + full-text search, fused via Reciprocal Rank Fusion
     inside a single Postgres query. Returns the top-k fused results (this
@@ -71,6 +71,9 @@ def hybrid_retrieve(question: str, k: int | None = None) -> list:
         query_text=question,
         k=candidate_k,
         candidate_pool=candidate_k,
+        # Scopes retrieval to the curated corpus plus this visitor's own
+        # uploads. None means curated only.
+        session_id=session_id,
     )
 
     # Convert database rows back to LangChain Document objects so the
@@ -79,6 +82,11 @@ def hybrid_retrieve(question: str, k: int | None = None) -> list:
     for row in rows:
         metadata = row.get("metadata") or {}
         metadata["source"] = row["source"]
+        # Underscore-prefixed so it cannot collide with a document's own
+        # metadata keys. Consumed by rag.py to decide whether an answer is
+        # safe to put in the shared semantic cache -- an answer derived from
+        # one visitor's private upload must not be replayed to another.
+        metadata["_session_id"] = row.get("session_id")
         documents.append(
             Document(page_content=row["content"], metadata=metadata)
         )
@@ -140,8 +148,10 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
         return candidates[:top_k]
 
 
-def retrieve_with_hybrid_and_rerank(question: str, k: int | None = None) -> list:
+def retrieve_with_hybrid_and_rerank(
+    question: str, k: int | None = None, session_id: str | None = None
+) -> list:
     """The full pipeline: hybrid candidate retrieval -> LLM rerank -> top-k."""
     k = k or config.TOP_K
-    candidates = hybrid_retrieve(question, k=k)
+    candidates = hybrid_retrieve(question, k=k, session_id=session_id)
     return rerank(question, candidates, top_k=k)

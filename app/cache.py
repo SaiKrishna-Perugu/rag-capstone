@@ -45,3 +45,32 @@ def set_cached_answer(question: str, answer: str, groundedness: str) -> None:
         database.cache_set(question, answer, groundedness, question_embedding)
     except Exception:
         logger.warning("Semantic cache write failed; answer was still returned to the caller.", exc_info=True)
+
+
+def session_has_uploads(session_id: str | None) -> bool:
+    """Whether this visitor has documents of their own in the corpus.
+
+    Gates the cache READ above. This cache is global and is consulted
+    *before* retrieval, so a visitor who uploaded a document would otherwise
+    be served a previously-cached answer built only from the curated corpus
+    -- their upload silently ignored. Found by live testing: three requests
+    in, an anonymous curated-only answer got cached, and every later session
+    was handed it back regardless of what they had uploaded.
+
+    Not a privacy problem -- answers grounded in private documents are never
+    written here (see rag.RagResult.used_private_docs) -- but a correctness
+    one, and the more visible of the two: "I uploaded a file and nothing
+    changed" is what a visitor actually notices.
+
+    Costs one COUNT against idx_chunks_session per request carrying a
+    session. Fails open to "no uploads", matching this module's posture: the
+    cache is a latency optimisation and a transient DB error should not cost
+    an answer.
+    """
+    if not session_id:
+        return False
+    try:
+        return database.get_chunk_count(session_id=session_id) > 0
+    except Exception:
+        logger.warning("Session upload check failed; using the shared cache.", exc_info=True)
+        return False

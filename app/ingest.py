@@ -91,16 +91,25 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def run(force: bool = False) -> dict:
+def run(force: bool = False, session_id: str | None = None, expires_at=None) -> dict:
     """
     Incremental ingestion. Set force=True to re-embed every file
     regardless of whether its content hash changed (e.g. after switching
     MODEL_PROVIDER, since embeddings from different providers aren't
     compatible with each other in the same collection).
 
+    `session_id`/`expires_at` scope a visitor's uploaded documents so they
+    are retrievable only by that visitor and expire on their own. They are
+    applied **only to files under DOCS_DIR/uploads/**, never to the curated
+    corpus. That distinction is load-bearing: this function rescans the whole
+    docs tree on every run, so tagging indiscriminately would quietly convert
+    the shared sample corpus into one visitor's private documents and make it
+    invisible to everyone else.
+
     Returns a summary dict: {"added": [...], "updated": [...],
     "skipped_unchanged": [...], "failed": [{"file": ..., "error": ...}]}.
     """
+    uploads_root = str(Path(config.DOCS_DIR) / "uploads")
     files = _discover_files(config.DOCS_DIR)
     if not files:
         supported = ", ".join(sorted(LOADER_BY_EXTENSION))
@@ -159,6 +168,10 @@ def run(force: bool = False) -> dict:
         # Batch embed all chunks for this file
         chunk_embeddings = embeddings.embed_documents(contents)
 
+        # Only visitor uploads carry a session and an expiry; curated docs
+        # stay global and permanent. See the note in this function's docstring.
+        is_upload = path.startswith(uploads_root)
+
         # Upsert into PostgreSQL
         database.upsert_chunks(
             source=path,
@@ -166,6 +179,8 @@ def run(force: bool = False) -> dict:
             embeddings=chunk_embeddings,
             content_hashes=content_hashes,
             metadatas=metadatas,
+            session_id=session_id if is_upload else None,
+            expires_at=expires_at if is_upload else None,
         )
 
         # Written immediately, not batched until the end of the run, so

@@ -14,7 +14,12 @@ from app.rag import _format_context, check_groundedness, retrieve
 
 logger = logging.getLogger("rag_service")
 
-async def stream_answer(question: str, session_id: str | None = None, top_k: int | None = None):
+async def stream_answer(
+    question: str,
+    session_id: str | None = None,
+    top_k: int | None = None,
+    doc_session_id: str | None = None,
+):
     """
     Async generator that yields SSE strings containing JSON payloads.
     It retrieves context, streams tokens as they are generated, and
@@ -48,8 +53,12 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
             memory.contextualize_question, session_id, question
         )
         
-        # 2. Check semantic cache
-        cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
+        # 2. Check semantic cache -- skipped for visitors with their own
+        #    documents, so an upload is never shadowed by a globally cached
+        #    answer (see main.py::_session_has_uploads).
+        cached_hit = None
+        if not await asyncio.to_thread(cache.session_has_uploads, doc_session_id):
+            cached_hit = await asyncio.to_thread(cache.get_cached_answer, contextualized_q)
         if cached_hit:
             # Save to memory even if it was a cache hit
             if session_id:
@@ -91,7 +100,9 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
             
         # 3. Retrieve documents
         try:
-            chunks = await asyncio.to_thread(retrieve, contextualized_q, top_k)
+            chunks = await asyncio.to_thread(
+                retrieve, contextualized_q, top_k, doc_session_id
+            )
         except Exception as exc:
             logger.error(
                 json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask-stream/retrieve", "error": str(exc)}),
@@ -153,7 +164,11 @@ async def stream_answer(question: str, session_id: str | None = None, top_k: int
             for c in chunks
         ]
         
-        if not leak.flagged:
+        # Two independent reasons to withhold from the shared cache: a leaked
+        # system prompt, and an answer grounded in this visitor's private
+        # upload (the cache is global and consulted before retrieval).
+        used_private = any(c.metadata.get("_session_id") for c in chunks)
+        if not leak.flagged and not used_private:
             await asyncio.to_thread(cache.set_cached_answer, contextualized_q, final_answer, groundedness)
         if session_id:
             await asyncio.to_thread(memory.add_to_history, session_id, question, final_answer)

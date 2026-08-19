@@ -6,6 +6,23 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
+@pytest.fixture(autouse=True)
+def _disable_rate_limit():
+    """Turn slowapi off for the whole suite.
+
+    RATE_LIMIT is 10/minute in production, and slowapi keys on client IP --
+    which is one shared value for every TestClient request. Without this, the
+    suite starts returning 429 partway through and the failures land on
+    whichever tests happen to run last, not on whatever is actually broken.
+    Rate limiting is production behaviour worth having; it is not something
+    unit tests should be fighting.
+    """
+    from app.main import limiter
+    limiter.enabled = False
+    yield
+    limiter.enabled = True
+
+
 @pytest.fixture
 def client():
     """Test client for FastAPI app."""

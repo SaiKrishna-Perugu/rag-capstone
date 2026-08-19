@@ -9,7 +9,12 @@ spec:
     metadata:
       annotations:
         autoscaling.knative.dev/minScale: "0"
-        autoscaling.knative.dev/maxScale: "10"
+        # Capped at 2 deliberately. slowapi's limiter is IN-PROCESS, so
+        # maxScale is the real multiplier on RATE_LIMIT: at 10 instances a
+        # configured 20/minute is up to 200/minute in practice. 2 keeps the
+        # limiter approximately honest (worst case 2x) and caps worst-case
+        # compute on a publicly reachable demo.
+        autoscaling.knative.dev/maxScale: '2'
         autoscaling.knative.dev/targetBurstCapacity: "100"
         # Same Cloud SQL instance as production -- staging uses a separate
         # DATABASE within it (ragdb_staging), not a second instance.
