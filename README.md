@@ -6,6 +6,8 @@ using a Retrieval-Augmented Generation (RAG) pipeline. Started as a focused
 reranking, standardized evaluation, observability, and multi-cloud model
 support -- see "JD coverage" below for exactly what maps to what.
 
+**Live demo:** <https://rag-capstone-jjinz2egfq-uc.a.run.app>
+
 ## JD coverage
 
 Mapped directly against a "RAG Pipelines & Vector Intelligence" JD section
@@ -15,18 +17,18 @@ evaluators, and freshness pipelines.*
 
 | JD requirement | Where it lives | Notes |
 |---|---|---|
-| Ingestion | `app/ingest.py` | Multi-format (pdf/txt/md/csv/html/docx), per-file error isolation |
-| Embeddings | `app/providers.py` | Groq (FastEmbed local ONNX) or Vertex AI, config-switchable |
-| Vector search | `app/retrieval.py` `hybrid_retrieve()` | pgvector cosine similarity (`<=>`), via `app/database.py` |
-| **Hybrid retrieval** | `app/retrieval.py` `hybrid_retrieve()` | Postgres full-text (`tsvector`) + pgvector, fused via Reciprocal Rank Fusion in a single SQL query |
-| Grounding | `app/rag.py` `generate_answer()`, `check_groundedness()` | Strict context-only prompting + LLM-as-judge hallucination check |
-| Vector database integration | `app/database.py`, `app/db_schema.sql` | PostgreSQL + pgvector (Cloud SQL in production) -- external, shared store so multiple Cloud Run instances see the same index |
-| **Rerankers** | `app/retrieval.py` `rerank()` | LLM-based listwise reranking (see file header for why, vs. cross-encoder) |
+| Ingestion | `app/ingestion/ingest.py` | Multi-format (pdf/txt/md/csv/html/docx), per-file error isolation |
+| Embeddings | `app/llm/providers.py` | Groq (FastEmbed local ONNX) or Vertex AI, config-switchable |
+| Vector search | `app/retrieval/hybrid.py` `hybrid_retrieve()` | pgvector cosine similarity (`<=>`), via `app/db/database.py` |
+| **Hybrid retrieval** | `app/retrieval/hybrid.py` `hybrid_retrieve()` | Postgres full-text (`tsvector`) + pgvector, fused via Reciprocal Rank Fusion in a single SQL query |
+| Grounding | `app/retrieval/rag.py` `generate_answer()`, `check_groundedness()` | Strict context-only prompting + LLM-as-judge hallucination check |
+| Vector database integration | `app/db/database.py`, `app/db/db_schema.sql` | PostgreSQL + pgvector (Cloud SQL in production) -- external, shared store so multiple Cloud Run instances see the same index |
+| **Rerankers** | `app/retrieval/hybrid.py` `rerank()` | LLM-based listwise reranking (see file header for why, vs. cross-encoder) |
 | **Retrieval evaluators** | `eval.py`, `eval_ragas.py` | Custom LLM-as-judge + standardized RAGAS metrics (faithfulness, relevancy, precision, recall) -- `eval_ragas.py` also gates CI (`.github/workflows/eval.yml`), not just run manually |
-| **Freshness pipelines** | `app/ingest.py` (hash + manifest) | Incremental re-ingestion: unchanged files skipped, changed files replaced, new files added |
+| **Freshness pipelines** | `app/ingestion/ingest.py` (hash + manifest) | Incremental re-ingestion: unchanged files skipped, changed files replaced, new files added |
 
 Also present, beyond this specific JD section: a self-correcting LangGraph
-agent loop (`app/agent.py`), LangSmith tracing, and GCP Vertex AI + Cloud Run
+agent loop (`app/retrieval/agent.py`), LangSmith tracing, and GCP Vertex AI + Cloud Run
 deployment -- see the rest of this README.
 
 ## Architecture
@@ -58,13 +60,13 @@ graph TD
 
 ### Hybrid retrieval + reranking
 
-`app/retrieval.py` replaces plain vector search with a two-stage pipeline,
-used by both `/ask` and `/ask-agentic` (via `app/rag.py`'s `retrieve()`):
+`app/retrieval/hybrid.py` replaces plain vector search with a two-stage pipeline,
+used by both `/ask` and `/ask-agentic` (via `app/retrieval/rag.py`'s `retrieve()`):
 
 1. **Hybrid candidate retrieval** — Postgres full-text search (`tsvector`/
    `plainto_tsquery`, the BM25-equivalent) and pgvector similarity search
    run over a candidate pool 3x larger than the final top-k, fused with
-   Reciprocal Rank Fusion -- all in a single SQL query (`app/database.py`
+   Reciprocal Rank Fusion -- all in a single SQL query (`app/db/database.py`
    `hybrid_search()`), no separate index to keep in sync. Catches both
    exact-term queries (product codes, IDs -- vector search alone is often
    weak here) and paraphrase/synonym queries (full-text search alone is
@@ -74,12 +76,12 @@ used by both `/ask` and `/ask-agentic` (via `app/rag.py`'s `retrieve()`):
    passed to generation. Falls back safely to the pre-rerank order if the
    LLM's response is malformed, rather than failing the request.
 
-See the module docstring in `app/retrieval.py` for the full reasoning,
+See the module docstring in `app/retrieval/hybrid.py` for the full reasoning,
 including why an LLM reranker was chosen over a cross-encoder here.
 
 ### Agentic RAG (`POST /ask-agentic`)
 
-`app/agent.py` wraps retrieval in a self-correcting LangGraph loop instead of
+`app/retrieval/agent.py` wraps retrieval in a self-correcting LangGraph loop instead of
 a single pass. This is the "agentic" upgrade over `/ask`:
 
 ```mermaid
@@ -112,7 +114,7 @@ graph TD
   local vector store means every instance sees a different, divergent
   copy of the index. An external, shared Postgres database (Cloud SQL in
   production) fixes that, and its `tsvector`/`tsquery` full-text search
-  lets hybrid retrieval run as one SQL query (`app/database.py`
+  lets hybrid retrieval run as one SQL query (`app/db/database.py`
   `hybrid_search()`) instead of maintaining a separate, hand-rolled BM25
   index that has to be rebuilt to stay in sync with the vector store.
 - **LLM-as-judge for both groundedness and eval correctness** — a real,
@@ -124,7 +126,7 @@ graph TD
 - **`/ask` (single-pass) and `/ask-agentic` (self-correcting loop) kept
   side by side** — lets you call both with the same question and compare
   behavior directly, e.g. when grading fails and a query gets rewritten.
-- **Provider abstraction (`app/providers.py`)** — every LLM/embeddings call
+- **Provider abstraction (`app/llm/providers.py`)** — every LLM/embeddings call
   goes through `get_llm()`/`get_embeddings()`. Switching between Groq and
   Vertex AI is a `.env` change (`MODEL_PROVIDER`), not a code change --
   see "Switching to Vertex AI" below.
@@ -148,13 +150,13 @@ docker run -d --name rag-postgres -e POSTGRES_PASSWORD=dev \
 matching the default `DATABASE_URL` in `.env.example`
 (`postgresql://postgres:dev@localhost:5432/ragdb`). Tables/indexes are
 created automatically and idempotently the first time you run ingestion
-or start the API (`app/database.py` `init_db()`) -- no manual schema step.
+or start the API (`app/db/database.py` `init_db()`) -- no manual schema step.
 
 **Firestore is optional for conversation memory, but required for `/upload`.**
 With no `GCP_PROJECT_ID` and no `FIRESTORE_EMULATOR_HOST` set,
-`app/memory.py` fails open (follow-up questions just aren't
+`app/retrieval/memory.py` fails open (follow-up questions just aren't
 contextualized using history; `/ask`/`/ask-agentic` work normally either
-way). `app/jobs.py` does **not** fail open the same way, though --
+way). `app/ingestion/jobs.py` does **not** fail open the same way, though --
 job tracking is `/upload`'s actual contract (see "Asynchronous ingestion"
 above), so uploading a document needs one of these two configured. Run
 the Firestore emulator in Docker to exercise both locally:
@@ -257,7 +259,7 @@ Three details worth keeping:
   error rates, so set `ADMIN_KEY` on anything reachable from the internet.
   Leaving it unset means `/metrics` 404s for *everyone*, including you.
 - **Unlisted paths 404 at the middleware.** A route added to `main.py` is
-  unreachable until it is listed in `app/middleware.py`. That is deliberate:
+  unreachable until it is listed in `app/api/middleware.py`. That is deliberate:
   a new endpoint silently inheriting public access is how
   `/internal/process-ingest-job` was once left callable by anyone.
 - **`API_KEY` still makes a whole deployment private**, which is what staging
@@ -315,7 +317,7 @@ credential — access is controlled by authorized domains, not secrecy.
 
 ## Switching to Vertex AI (instead of Groq)
 
-All LLM/embeddings calls go through `app/providers.py`, so this is a config
+All LLM/embeddings calls go through `app/llm/providers.py`, so this is a config
 change, not a code change:
 
 ```bash
@@ -386,13 +388,13 @@ gcloud sql instances create rag-capstone-db \
     --region=us-central1 \
     --root-password=YOUR_DB_PASSWORD
 gcloud sql databases create ragdb --instance=rag-capstone-db
-# No manual `CREATE EXTENSION vector` step needed -- app/db_schema.sql
+# No manual `CREATE EXTENSION vector` step needed -- app/db/db_schema.sql
 # already runs it (idempotently) as part of database.init_db(), which
 # fires on both API startup and `python -m app.ingestion.ingest`.
 
 # 2b. Provision Firestore (conversation memory + job tracking) in Native
 #     mode, and set a TTL policy on expires_at for BOTH collections that
-#     use it -- app/memory.py and app/jobs.py set that field on every
+#     use it -- app/retrieval/memory.py and app/ingestion/jobs.py set that field on every
 #     write, but Firestore only actually deletes expired docs once this
 #     server-side policy is enabled per collection (one-time, not
 #     something Python can do)
@@ -402,7 +404,7 @@ gcloud firestore fields ttls update expires_at \
 gcloud firestore fields ttls update expires_at \
     --collection-group=ingest_jobs --enable-ttl
 
-# 2c. Create the Cloud Tasks queue app/jobs.py enqueues async ingestion
+# 2c. Create the Cloud Tasks queue app/ingestion/jobs.py enqueues async ingestion
 #     jobs onto (see "Asynchronous ingestion" above) -- max-attempts is
 #     bounded deliberately, since a whole-job failure reaching Cloud Tasks
 #     means something systemic (e.g. Postgres unreachable), not a
@@ -461,6 +463,22 @@ gcloud run services replace cloudrun-groq.yaml --region=us-central1
 #     `gcloud run services replace` -- that command applies the YAML
 #     verbatim, which would silently reset INGEST_TARGET_URL back to the
 #     placeholder value checked into cloudrun-groq.yaml.
+#     Note: Cloud Run currently exposes this service under TWO hostnames --
+#     the legacy `<service>-<hash>-uc.a.run.app`, and a newer
+#     `<service>-<project-number>.<region>.run.app` in a different DNS zone.
+#     `status.url` (used just below) returns the LEGACY one; `gcloud run
+#     deploy`/`update` print the NEWER one in their closing `Service URL:`
+#     banner, so the two disagree and it is easy to copy the wrong one.
+#     Either resolves for Cloud Tasks. For browser visitors prefer the
+#     `status.url` value, which is what this README advertises as the demo
+#     link: on 2026-08-20 one consumer ISP resolver answered DNS `REFUSED`
+#     for the whole `*.<region>.run.app` zone for several hours while
+#     `*.a.run.app` resolved normally (it recovered the same day; all four
+#     major public resolvers served both throughout). Worth recognising
+#     because the symptom is misleading -- the browser shows "site can't be
+#     reached" and, since no HTTP request is ever issued, NOTHING appears in
+#     the Cloud Run request log, so a perfectly healthy service reads as an
+#     outage.
 SERVICE_URL=$(gcloud run services describe rag-capstone --region=us-central1 --format='value(status.url)')
 gcloud run services update rag-capstone --region=us-central1 \
     --update-env-vars=INGEST_TARGET_URL=$SERVICE_URL
@@ -486,13 +504,13 @@ then stop running these commands by hand.
 **A secret can't be created empty** (`gcloud secrets create ... --data-file=-`
 with no input errors with `INVALID_ARGUMENT: Secret Payload cannot be empty`).
 If you want the deployed app's API-key auth effectively off (open demo),
-`app/middleware.py`'s check is `if config.API_KEY and ...`, so any
+`app/api/middleware.py`'s check is `if config.API_KEY and ...`, so any
 non-empty placeholder value works the same as truly empty -- just don't
 send that header when testing. If you want it protected, use a real value
 and send it back as `X-API-Key: <value>` on every `/ask`, `/ask-agentic`,
 `/upload`, `/jobs/{id}`, and `/metrics` call. `/internal/process-ingest-job`
 is protected the same way, but you don't need to do anything extra for
-it -- `app/jobs.py::enqueue_cloud_task()` reads `config.API_KEY` and sets
+it -- `app/ingestion/jobs.py::enqueue_cloud_task()` reads `config.API_KEY` and sets
 it as a header on the Cloud Task's own HTTP request, so it authenticates
 itself automatically as long as `API_KEY` is set consistently (i.e. the
 same secret both the deployed app and its own outgoing Cloud Task use).
@@ -785,10 +803,10 @@ real and working, not stubbed — but scoped down from a production system:
   has (every instance would otherwise see a different, divergent local
   copy), and its `tsvector`/`tsquery` full-text search lets hybrid
   retrieval run as one SQL query instead of a separately maintained BM25
-  index -- see `app/database.py` and "Design decisions" above
+  index -- see `app/db/database.py` and "Design decisions" above
 - **Self-correcting agentic loop** (`/ask-agentic`): grade retrieved context,
   rewrite and retry on insufficient context (capped retries), graceful
-  fallback -- see `app/agent.py`
+  fallback -- see `app/retrieval/agent.py`
 - Groundedness / hallucination check on every answer
 - Two eval harnesses: custom LLM-as-judge (`eval.py`) and standardized
   RAGAS metrics -- faithfulness, response relevancy, context precision,
@@ -801,13 +819,13 @@ real and working, not stubbed — but scoped down from a production system:
 - Structured request logging (question, answer, sources, latency, retries used)
 - Source citation in every response (which chunks were used)
 - **Multi-cloud model provider support**: Groq (default) or GCP Vertex AI,
-  switchable via config -- see `app/providers.py` and "Switching to Vertex AI"
+  switchable via config -- see `app/llm/providers.py` and "Switching to Vertex AI"
 - **GCP Cloud Run deployment**: Dockerfile adapted for Cloud Run's dynamic
   `$PORT`, plus full `gcloud` deploy commands for both provider paths --
   see "Deploying to GCP" above
 - **External session state (Firestore + OpenTelemetry)** -- the other half
   of the statelessness fix Phase 1 started for the vector store.
-  Conversation history (`app/memory.py`) now lives in Firestore, one
+  Conversation history (`app/retrieval/memory.py`) now lives in Firestore, one
   document per `session_id`, with a native TTL policy for automatic
   cleanup, instead of a per-instance in-process dict -- a multi-turn
   conversation now survives a restart or landing on a different Cloud Run
@@ -818,10 +836,10 @@ real and working, not stubbed — but scoped down from a production system:
   rather than reset on every restart. Both fail open -- Firestore/Cloud
   Monitoring being unreachable or unconfigured degrades to "no history" /
   "local metrics only" rather than breaking requests, the same posture as
-  `app/cache.py` and `check_groundedness()`.
+  `app/retrieval/cache.py` and `check_groundedness()`.
 - **Asynchronous ingestion (Cloud Tasks + job polling)** -- `POST /upload`
   no longer blocks the request on `ingest.run()`. It saves the files,
-  creates a job record (`app/jobs.py`, Firestore `ingest_jobs`
+  creates a job record (`app/ingestion/jobs.py`, Firestore `ingest_jobs`
   collection), and returns `202 {job_id}` almost immediately; a new
   `GET /jobs/{job_id}` endpoint (polled by `ui.html` every ~2s) reports
   `pending` → `processing` → `done`/`failed`. In a real deployment
@@ -851,8 +869,8 @@ real and working, not stubbed — but scoped down from a production system:
   GCP/GitHub credentials, so this ships as complete, working config that
   stays inert until you run that setup yourself).
 
-- **Circuit breaker + automatic provider failover** (`app/circuit.py`,
-  `app/providers.py`) — without one, every request rediscovers a provider
+- **Circuit breaker + automatic provider failover** (`app/llm/circuit.py`,
+  `app/llm/providers.py`) — without one, every request rediscovers a provider
   outage the slow way: `LLM_MAX_RETRIES=3` at a 60s timeout, three LLM
   calls per `/ask`, each holding a worker thread. After
   `LLM_CIRCUIT_FAILURE_THRESHOLD` *consecutive* failures the provider is
@@ -871,7 +889,7 @@ real and working, not stubbed — but scoped down from a production system:
   one provider's embedding space). Off by default: enabling it means this
   deployment must hold working credentials for both providers.
 
-- **Security hardening** (`app/security.py`) — prompt-injection screening
+- **Security hardening** (`app/api/security.py`) — prompt-injection screening
   refuses a crafted payload with a 400 *before* retrieval, so an attack
   costs zero LLM calls; output screening catches the case input screening
   cannot, where the payload arrived inside an uploaded document rather than
@@ -885,7 +903,7 @@ real and working, not stubbed — but scoped down from a production system:
   Enabling it therefore requires `gcloud services enable dlp.googleapis.com`
   first, or you trade your request logs for nothing.
 
-- **Tiered access control** (`app/middleware.py`) — access used to be one
+- **Tiered access control** (`app/api/middleware.py`) — access used to be one
   boolean, and both of its positions were wrong for a public demo: the key
   set locked out the visitors the demo exists for, the key unset left
   `/metrics` (spend, token counts, error rates) and
@@ -906,8 +924,8 @@ real and working, not stubbed — but scoped down from a production system:
 
 **Explicitly deferred:** most items previously listed here — async
 ingestion, external session state, the vector store migration, the eval
-gate + CD pipeline, optional per-user identity (`app/auth.py`),
-per-request cost attribution (`app/cost.py`), circuit breaker / provider
-failover (`app/circuit.py`), and security hardening (`app/security.py`) —
+gate + CD pipeline, optional per-user identity (`app/api/auth.py`),
+per-request cost attribution (`app/llm/cost.py`), circuit breaker / provider
+failover (`app/llm/circuit.py`), and security hardening (`app/api/security.py`) —
 are now implemented. Still deferred: **load testing** (Phase 9) and
 multi-tenancy (Phase 10, deliberately skipped).

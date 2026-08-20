@@ -418,12 +418,28 @@ until after first deploy, so this gets set imperatively via
 into the YAML; a later `gcloud run services replace` silently resets it
 to the checked-in placeholder, so that update has to be re-run afterward.
 
+Cloud Run exposes each service under **two** hostnames: the legacy
+`<service>-<hash>-uc.a.run.app` and a newer
+`<service>-<project-number>.<region>.run.app`. `status.url` returns the
+legacy one — that is what README advertises as the demo link and the one
+to hand a visitor. `gcloud run deploy`/`update` print the *newer* one in
+their closing `Service URL:` banner, so quoting that banner hands out a
+different host than the documented link. Both reach the same service and
+both work for Cloud Tasks; the distinction matters because the two DNS
+zones resolve independently — on 2026-08-20 one consumer ISP resolver
+answered `REFUSED` for the whole `*.<region>.run.app` zone for several
+hours while `*.a.run.app` resolved normally (it recovered the same day).
+While that lasts no HTTP request is ever issued, so **nothing appears in
+the Cloud Run request log** and a healthy service reads as an outage.
+
 ## Testing conventions
 
 Tests mock at the module-function boundary via `unittest.mock.patch`, not
 by mocking LLM clients directly — e.g. `tests/conftest.py` patches
-`app.rag.retrieve_with_hybrid_and_rerank`, `app.rag.generate_answer`,
-`app.rag.check_groundedness`, and `app.cache.get_cached_answer` /
+`app.retrieval.rag.retrieve_with_hybrid_and_rerank`,
+`app.retrieval.rag.generate_answer`,
+`app.retrieval.rag.check_groundedness`, and
+`app.retrieval.cache.get_cached_answer` /
 `set_cached_answer` as shared fixtures (`mock_retrieval`, `mock_llm_answer`,
 `mock_groundedness`, `mock_cache`). Follow this pattern for new endpoint
 tests rather than mocking `get_llm()`/provider clients. Ruff ignores
