@@ -9,7 +9,7 @@ LLM calls (rerank, generate, groundedness). Under a real outage every
 concurrent request pays that in full while holding a thread from
 ``asyncio.to_thread``, which turns "the provider is down" into "the service
 is wedged". Tripping a breaker after a few consecutive failures converts
-that into an immediate, cheap error (or a failover -- see app/providers.py).
+that into an immediate, cheap error (or a failover -- see app/llm/providers.py).
 
 Standard three-state machine:
 

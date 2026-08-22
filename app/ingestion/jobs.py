@@ -5,12 +5,12 @@ Backs the "upload -> get a job ID -> poll status" flow in app/main.py:
 POST /upload creates a job here and hands off the actual ingestion work
 instead of running it inline in the request. Job records live in the
 `ingest_jobs` Firestore collection, one document per job_id, with an
-`expires_at` TTL field (same pattern as app/memory.py's
+`expires_at` TTL field (same pattern as app/retrieval/memory.py's
 `conversation_sessions` -- a computed future timestamp, not
 firestore.SERVER_TIMESTAMP, and the TTL policy itself is a one-time
 `gcloud firestore fields ttls update` call, not something this code sets).
 
-Unlike app/memory.py and app/cache.py, Firestore here is NOT fail-open.
+Unlike app/retrieval/memory.py and app/retrieval/cache.py, Firestore here is NOT fail-open.
 Conversation memory and the semantic cache degrade to "no history"/"cache
 miss" when Firestore is unreachable because that's a pure latency/UX
 optimization on top of a request that still works without it. Job
@@ -45,7 +45,7 @@ _client = None
 
 def _get_client():
     """Lazily construct the Firestore client -- same pattern as
-    app/memory.py's _get_client(). Returns None if unconfigured; callers
+    app/retrieval/memory.py's _get_client(). Returns None if unconfigured; callers
     here (unlike memory.py) treat that as an error, not a fallback."""
     global _client
     if _client is not None:
@@ -183,7 +183,7 @@ def enqueue_cloud_task(job_id: str) -> None:
 
     if config.TASKS_SERVICE_ACCOUNT_EMAIL:
         # Cloud Tasks mints a signed OIDC token per task, audience-bound to
-        # the target URL. app/middleware.py verifies both the signature and
+        # the target URL. app/api/middleware.py verifies both the signature and
         # the identity, which is what makes /internal/* unreachable from the
         # public internet rather than merely undocumented. The audience must
         # match what the verifier expects exactly -- both read

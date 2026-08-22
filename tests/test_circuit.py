@@ -1,4 +1,4 @@
-"""Circuit breaker + cross-provider failover (app/circuit.py, app/providers.py).
+"""Circuit breaker + cross-provider failover (app/llm/circuit.py, app/llm/providers.py).
 
 The integration tests here patch `app.llm.providers._build_raw_client` rather
 than the provider SDKs, keeping to the module-function boundary this repo

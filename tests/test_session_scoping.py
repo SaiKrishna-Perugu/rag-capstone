@@ -214,7 +214,7 @@ def test_visitors_without_uploads_still_get_cache_hits(
 
 def test_cache_gate_fails_open(client, mock_llm_answer, mock_groundedness):
     """A DB error checking for uploads must not cost an answer -- same
-    fail-open posture as the rest of app/cache.py."""
+    fail-open posture as the rest of app/retrieval/cache.py."""
     hit = {"answer": "cached", "groundedness": "GROUNDED", "similarity_score": 0.99}
     with patch("app.db.database.get_chunk_count", side_effect=RuntimeError("db down")),          patch("app.retrieval.cache.get_cached_answer", return_value=hit) as mock_get,          patch("app.main.logger"):
         resp = client.post(

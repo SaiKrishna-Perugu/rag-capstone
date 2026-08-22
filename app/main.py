@@ -44,9 +44,10 @@ from app.retrieval.rag import answer_question
 
 # --- Structured logging setup -------------------------------------------------
 # Every request is logged as one JSON line: question, sources used, answer,
-# groundedness verdict, latency. This is the "monitoring" layer -- basic on
-# purpose, but it's real, queryable, and shows you thought about observability
-# instead of just shipping the happy path.
+# groundedness verdict, latency. One line per request keeps it greppable and
+# parseable without a log-shipping stack; Cloud Logging ingests it as
+# structured JSON automatically. This is the first thing to read when
+# debugging request behaviour.
 LOG_PATH = Path("logs")
 LOG_PATH.mkdir(exist_ok=True)
 logger = logging.getLogger("rag_service")
@@ -85,8 +86,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="RAG Capstone API",
-    description="Document Q&A over a local knowledge base using RAG.",
+    title="Grounded Document Q&A API",
+    description=(
+        "Retrieval-Augmented Generation over a document set: hybrid retrieval "
+        "(full-text + vector, RRF-fused), LLM reranking, grounded generation, "
+        "and a groundedness check on every answer."
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -290,7 +295,7 @@ async def upload_files(
 ):
     """Accepts multiple files, saves them to docs/uploads/, and hands off
     ingestion as an async job -- returns 202 + job_id immediately rather
-    than blocking on ingest.run() (see app/jobs.py)."""
+    than blocking on ingest.run() (see app/ingestion/jobs.py)."""
     request_id = str(uuid.uuid4())
     if not config.ENABLE_UPLOADS:
         raise HTTPException(
@@ -600,7 +605,7 @@ async def get_job_status(job_id: str, request: Request) -> dict:
 @app.post("/internal/process-ingest-job")
 async def process_ingest_job(body: InternalJobRequest) -> dict:
     """Cloud Tasks' HTTP target for real deployments (see
-    app/jobs.py::enqueue_cloud_task) -- not used by the local/no-GCP dev
+    app/ingestion/jobs.py::enqueue_cloud_task) -- not used by the local/no-GCP dev
     path, which runs process_job() directly via BackgroundTasks instead
     of going through HTTP. Behind APIKeyMiddleware like every other
     non-public route; enqueue_cloud_task() sends the same X-API-Key
@@ -610,7 +615,7 @@ async def process_ingest_job(body: InternalJobRequest) -> dict:
     except Exception as exc:
         # 500, not a caught-and-200 -- lets Cloud Tasks retry per the
         # queue's bounded --max-attempts policy. A later successful retry
-        # just overwrites the job back to "done" (see app/jobs.py).
+        # just overwrites the job back to "done" (see app/ingestion/jobs.py).
         raise HTTPException(status_code=500, detail={"error": str(exc)})
     return {"status": "done"}
 
@@ -624,7 +629,7 @@ async def cleanup_expired() -> dict:
     delayed sweep costs storage, never correctness -- an expired document is
     invisible from the moment it expires, whether or not this has run.
 
-    Behind the internal tier (see app/middleware.py), same as the ingest
+    Behind the internal tier (see app/api/middleware.py), same as the ingest
     callback.
     """
     try:
@@ -645,7 +650,7 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     request_id = str(uuid.uuid4())
     metrics.record_request("ask")
     # Begin per-request cost accumulation. Context-local, so concurrent
-    # requests can't attribute each other's tokens -- see app/cost.py.
+    # requests can't attribute each other's tokens -- see app/llm/cost.py.
     cost.start_request()
     start = time.perf_counter()
 
@@ -810,7 +815,7 @@ async def ask_stream(request: Request, body: AskRequest):
 async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     """
     Self-correcting RAG: retrieve -> grade -> (generate | rewrite & retry) ->
-    fallback if still insufficient after MAX_RETRIES. See app/agent.py.
+    fallback if still insufficient after MAX_RETRIES. See app/retrieval/agent.py.
     """
     request_id = str(uuid.uuid4())
     metrics.record_request("ask-agentic")

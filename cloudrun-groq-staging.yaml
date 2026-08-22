@@ -73,8 +73,8 @@ spec:
         # one database per GCP project by default, so conversation memory
         # (conversation_sessions) and job tracking (ingest_jobs) aren't
         # isolated between staging and prod here. Fully isolating them
-        # would need multi-database Firestore -- out of scope for a
-        # portfolio project's staging environment. Documented, not hidden.
+        # would need multi-database Firestore -- deliberately out of scope
+        # for this staging environment. Documented, not hidden.
         #
         # A separate queue (not the production ingest-queue) so a staging
         # deploy's async ingestion jobs never target the wrong service --

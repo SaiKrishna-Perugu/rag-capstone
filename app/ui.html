@@ -1020,7 +1020,7 @@
 
             try {
                 // /upload returns almost immediately with a job_id -- the
-                // actual ingestion happens afterward (see app/jobs.py).
+                // actual ingestion happens afterward (see app/ingestion/jobs.py).
                 // No Content-Type here on purpose: the browser must set it
                 // itself so the multipart boundary is generated correctly.
                 const response = await fetch('/upload', {

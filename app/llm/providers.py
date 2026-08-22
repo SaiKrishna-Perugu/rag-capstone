@@ -17,8 +17,8 @@ because this is the one place that already knows which provider is in play:
 
   _ResilientLLM(_CostTrackingLLM(real client))
 
-_CostTrackingLLM records tokens and estimated spend (app/cost.py).
-_ResilientLLM applies the circuit breaker (app/circuit.py) and, when
+_CostTrackingLLM records tokens and estimated spend (app/llm/cost.py).
+_ResilientLLM applies the circuit breaker (app/llm/circuit.py) and, when
 LLM_FALLBACK_PROVIDER is configured, routes to the other provider while the
 primary's circuit is open -- the payoff for having built this abstraction
 in the first place, since an outage no longer needs a manual redeploy with
@@ -309,7 +309,7 @@ class _ResilientLLM:
 @lru_cache(maxsize=16)
 def get_llm(temperature: float = 0.0, stage: str = "llm"):
     """`stage` labels this client's calls in the per-request cost breakdown
-    (see app/cost.py) -- "rerank", "generate", "groundedness". It is a
+    (see app/llm/cost.py) -- "rerank", "generate", "groundedness". It is a
     parameter rather than a chained builder so that tests patching
     `get_llm` keep receiving their configured mock directly, which is the
     mocking convention used throughout tests/.

@@ -1,7 +1,6 @@
 """
-Hybrid retrieval + reranking. Two JD requirements live here specifically:
-"hybrid retrieval" and "rerankers", as distinct from plain vector search
-(which is what app/rag.py did before this module existed).
+Hybrid retrieval + reranking, as distinct from plain vector search: keyword
+and semantic matching fail on different queries, and fusing them covers both.
 
 Pipeline: hybrid_retrieve() -> rerank() -> top-k chunks handed to generation.
 
@@ -24,7 +23,7 @@ Pipeline: hybrid_retrieve() -> rerank() -> top-k chunks handed to generation.
      requires downloading model weights from HuggingFace Hub at runtime,
      which isn't guaranteed to be available in every deployment
      environment. An LLM-based reranker needs nothing beyond the same
-     LLM already configured via app/providers.py -- a real, legitimate
+     LLM already configured via app/llm/providers.py -- a real, legitimate
      alternative (this is close to what Cohere's Rerank API and several
      production RAG systems do), not a placeholder. Swapping in a
      cross-encoder later is a drop-in replacement for rerank()'s body,
@@ -58,7 +57,7 @@ def hybrid_retrieve(question: str, k: int | None = None, session_id: str | None 
     Vector search + full-text search, fused via Reciprocal Rank Fusion
     inside a single Postgres query. Returns the top-k fused results (this
     is the CANDIDATE pool that rerank() will further narrow down, not the
-    final answer's context -- see rerank() and app/rag.py's retrieve()).
+    final answer's context -- see rerank() and app/retrieval/rag.py's retrieve()).
     """
     k = k or config.TOP_K
     candidate_k = k * CANDIDATE_POOL_MULTIPLIER
@@ -178,7 +177,7 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
         # Reranking is a quality optimization, not a correctness
         # requirement -- on any failure fall back to the pre-rerank
         # (RRF-fused) order rather than failing the whole request. Same
-        # fail-open posture as check_groundedness() in app/rag.py.
+        # fail-open posture as check_groundedness() in app/retrieval/rag.py.
         logger.warning(f"rerank failed ({type(e).__name__}: {e}); using RRF order")
         return candidates[:top_k]
 

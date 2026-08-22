@@ -5,13 +5,14 @@ embed -> persist into PostgreSQL + pgvector.
 Run standalone to (re)build the index:
     python -m app.ingestion.ingest
 
-Covers three JD requirements directly:
-  - "ingestion" (end-to-end) -- multi-format loaders + per-file error
-    isolation, so one bad file doesn't kill the whole batch.
-  - "freshness pipelines" -- incremental re-ingestion via content hashing:
+Two properties matter here beyond "it loads files":
+  - **Per-file error isolation** -- one unreadable or malformed document is
+    recorded and skipped rather than failing the whole batch, because a
+    single bad file in a corpus of hundreds should not block the rest.
+  - **Incremental re-ingestion** via content hashing:
     unchanged files are skipped entirely (no re-embedding cost), changed
     files have their old chunks deleted and replaced, new files are added.
-    A manifest (the `ingest_manifest` table, see app/database.py) tracks
+    A manifest (the `ingest_manifest` table, see app/db/database.py) tracks
     per-file hash and last-ingested timestamp -- it lives in the same
     database as the chunks it describes, not a local file, so it can't
     silently desync from whichever database DATABASE_URL currently points

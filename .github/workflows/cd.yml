@@ -151,7 +151,7 @@ jobs:
       # to prod manually so that assumption keeps holding.
       #
       # The 120s wait is a fixed timer, not a real error-rate check -- a
-      # portfolio-scale simplification (same category as the Cloud Tasks
+      # deliberate simplification (same category as the Cloud Tasks
       # queue's --max-attempts=3). A real rollback-on-error-spike gate
       # would wire Cloud Monitoring alerting to this workflow; documented
       # as the next step, not built here.

@@ -1,4 +1,4 @@
--- Schema for the RAG Capstone PostgreSQL + pgvector database.
+-- PostgreSQL + pgvector schema: document chunks, semantic cache, ingest manifest.
 -- Executed idempotently by database.init_db() on app startup.
 
 CREATE EXTENSION IF NOT EXISTS vector;

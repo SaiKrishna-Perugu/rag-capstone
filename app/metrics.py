@@ -142,7 +142,7 @@ def record_llm_usage(
 
 
 def record_circuit_opened(provider: str) -> None:
-    """A provider's circuit breaker tripped (app/circuit.py)."""
+    """A provider's circuit breaker tripped (app/llm/circuit.py)."""
     _llm_circuit_opened_total.add(1, {"provider": provider})
 
 
@@ -152,7 +152,7 @@ def record_llm_failover(from_provider: str, to_provider: str) -> None:
 
 
 def record_injection_blocked(reason: str) -> None:
-    """A question was refused by input screening (app/security.py)."""
+    """A question was refused by input screening (app/api/security.py)."""
     _injection_blocked_total.add(1, {"reason": reason})
 
 

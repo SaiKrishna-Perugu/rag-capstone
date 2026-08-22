@@ -1,35 +1,23 @@
-# RAG Capstone — Document Q&A API
+# Grounded Document Q&A — Retrieval-Augmented Generation on Cloud Run
 
-A FastAPI service that answers questions grounded in a local set of documents,
-using a Retrieval-Augmented Generation (RAG) pipeline. Started as a focused
-2-day MVP; extended with agentic self-correction, hybrid retrieval,
-reranking, standardized evaluation, observability, and multi-cloud model
-support -- see "JD coverage" below for exactly what maps to what.
+A FastAPI service that answers questions from a document set and refuses to
+answer beyond it. Retrieval is hybrid — Postgres full-text search and
+pgvector similarity fused with Reciprocal Rank Fusion **inside a single SQL
+query** — followed by LLM reranking, strict context-only generation, and an
+LLM-as-judge groundedness check on every answer.
+
+Beyond the core pipeline: a self-correcting agentic variant that grades its
+own retrieved context and rewrites the query when it is insufficient,
+session-scoped document uploads with TTL, a semantic answer cache,
+conversation memory, per-request cost attribution broken down by pipeline
+stage, a provider circuit breaker with cross-provider failover, and two
+evaluation harnesses — one of which gates CI.
+
+Runs on Cloud Run against Cloud SQL (PostgreSQL + pgvector). The model and
+embeddings provider switches between Groq and GCP Vertex AI through one
+config value.
 
 **Live demo:** <https://rag-capstone-jjinz2egfq-uc.a.run.app>
-
-## JD coverage
-
-Mapped directly against a "RAG Pipelines & Vector Intelligence" JD section
-covering: *ingestion, chunking, embeddings, indexing, vector search, hybrid
-retrieval, and grounding... vector databases... rerankers, retrieval
-evaluators, and freshness pipelines.*
-
-| JD requirement | Where it lives | Notes |
-|---|---|---|
-| Ingestion | `app/ingestion/ingest.py` | Multi-format (pdf/txt/md/csv/html/docx), per-file error isolation |
-| Embeddings | `app/llm/providers.py` | Groq (FastEmbed local ONNX) or Vertex AI, config-switchable |
-| Vector search | `app/retrieval/hybrid.py` `hybrid_retrieve()` | pgvector cosine similarity (`<=>`), via `app/db/database.py` |
-| **Hybrid retrieval** | `app/retrieval/hybrid.py` `hybrid_retrieve()` | Postgres full-text (`tsvector`) + pgvector, fused via Reciprocal Rank Fusion in a single SQL query |
-| Grounding | `app/retrieval/rag.py` `generate_answer()`, `check_groundedness()` | Strict context-only prompting + LLM-as-judge hallucination check |
-| Vector database integration | `app/db/database.py`, `app/db/db_schema.sql` | PostgreSQL + pgvector (Cloud SQL in production) -- external, shared store so multiple Cloud Run instances see the same index |
-| **Rerankers** | `app/retrieval/hybrid.py` `rerank()` | LLM-based listwise reranking (see file header for why, vs. cross-encoder) |
-| **Retrieval evaluators** | `eval.py`, `eval_ragas.py` | Custom LLM-as-judge + standardized RAGAS metrics (faithfulness, relevancy, precision, recall) -- `eval_ragas.py` also gates CI (`.github/workflows/eval.yml`), not just run manually |
-| **Freshness pipelines** | `app/ingestion/ingest.py` (hash + manifest) | Incremental re-ingestion: unchanged files skipped, changed files replaced, new files added |
-
-Also present, beyond this specific JD section: a self-correcting LangGraph
-agent loop (`app/retrieval/agent.py`), LangSmith tracing, and GCP Vertex AI + Cloud Run
-deployment -- see the rest of this README.
 
 ## Measured results
 
@@ -389,8 +377,8 @@ TABLE IF NOT EXISTS` won't widen an existing column). So:
 
 ## Deploying to GCP (Cloud Run + Vertex AI)
 
-Uses GCP's free trial ($300 credit, 90 days) -- enough for portfolio-project
-usage. Requires the `gcloud` CLI installed and authenticated (Cloud Shell
+Uses GCP's free trial ($300 credit, 90 days), which comfortably covers this
+workload. Requires the `gcloud` CLI installed and authenticated (Cloud Shell
 has this pre-installed; `uv` isn't, so run
 `curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env`
 first if you're using it).
@@ -411,7 +399,7 @@ gcloud services enable run.googleapis.com \
 
 # 2. Provision Cloud SQL for PostgreSQL + pgvector -- the external, shared
 #    vector store all Cloud Run instances read/write (db-f1-micro is the
-#    smallest tier, right-sized for portfolio-project traffic)
+#    smallest tier, right-sized for this workload)
 #    --edition=ENTERPRISE is required, not optional: Cloud SQL now defaults
 #    new instances to ENTERPRISE_PLUS, which rejects shared-core tiers with
 #    "Invalid Tier (db-f1-micro) for (ENTERPRISE_PLUS) Edition". Confirmed
@@ -728,7 +716,7 @@ uv run python -m app.ingestion.ingest   # against DATABASE_URL pointed at ragdb_
 Firestore (conversation memory, job tracking) with production -- Firestore
 Native mode is one database per GCP project by default, and fully
 isolating staging would need multi-database Firestore, which is out of
-scope for a portfolio project's staging environment.
+scope for this staging environment.
 
 Then, in the GitHub repo itself (UI steps, not YAML):
 1. **Settings → Secrets and variables → Actions → Variables tab**: add
@@ -829,10 +817,11 @@ Dockerfile
 pyproject.toml
 ```
 
-## What this covers vs. a production system
+## Scope and known limits
 
-Built deliberately as an MVP within a 2-day window. What's implemented is
-real and working, not stubbed — but scoped down from a production system:
+Everything listed under "Implemented" is real and working, not stubbed.
+What follows it is the honest boundary — the things this system
+deliberately does not do, and why.
 
 **Implemented:**
 - End-to-end RAG: chunking, embeddings, vector storage, retrieval, grounded generation

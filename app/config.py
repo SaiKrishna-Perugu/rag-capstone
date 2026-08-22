@@ -21,7 +21,7 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
 
 # --- Model provider switch -------------------------------------------------
-# "vertexai", or "groq". See app/providers.py -- this is the
+# "vertexai", or "groq". See app/llm/providers.py -- this is the
 # single knob that controls which provider get_llm()/get_embeddings() build.
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "groq").lower()
 
@@ -104,7 +104,7 @@ _DEFAULT_EMBEDDING_DIMENSION = "768" if MODEL_PROVIDER == "vertexai" else "384"
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", _DEFAULT_EMBEDDING_DIMENSION))
 
 # --- Conversation memory (Firestore) ----------------------------------------
-# Firestore is optional -- app/memory.py fails open (no history) when
+# Firestore is optional -- app/retrieval/memory.py fails open (no history) when
 # GCP_PROJECT_ID is unset and FIRESTORE_EMULATOR_HOST isn't either, so
 # MODEL_PROVIDER=groq deployments keep working with zero GCP setup.
 FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "conversation_sessions")
@@ -114,7 +114,7 @@ SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
 # Unlike memory/metrics, Firestore is REQUIRED here (not fail-open) -- job
 # tracking is the /upload contract itself, not a latency optimization. The
 # Firestore emulator (see README) covers local dev; the queue below is only
-# used when GCP_PROJECT_ID is set -- otherwise app/jobs.py processes the job
+# used when GCP_PROJECT_ID is set -- otherwise app/ingestion/jobs.py processes the job
 # in-process immediately instead of enqueueing a real Cloud Task.
 CLOUD_TASKS_QUEUE = os.getenv("CLOUD_TASKS_QUEUE", "ingest-queue")
 INGEST_TARGET_URL = os.getenv("INGEST_TARGET_URL", "")
@@ -166,7 +166,7 @@ MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "5"))
 # cost mitigation, and at ~3KB per chunk even 3000 is under 10MB.
 MAX_CORPUS_CHUNKS = int(os.getenv("MAX_CORPUS_CHUNKS", "0"))
 
-# --- Optional Firebase identity (app/auth.py) -------------------------------
+# --- Optional Firebase identity (app/api/auth.py) -------------------------------
 # Additive, never a gate: signing in raises the upload ceiling below, it is
 # not what grants access. With FIREBASE_PROJECT_ID unset the whole feature is
 # inert -- tokens are ignored, everyone is anonymous, and the UI hides its
@@ -187,7 +187,7 @@ MAX_UPLOAD_FILES_AUTHED = int(os.getenv("MAX_UPLOAD_FILES_AUTHED", "10"))
 MAX_UPLOAD_SIZE_MB_AUTHED = int(os.getenv("MAX_UPLOAD_SIZE_MB_AUTHED", "10"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
 
-# --- Access tiers (app/middleware.py) ---------------------------------------
+# --- Access tiers (app/api/middleware.py) ---------------------------------------
 # Separate from API_KEY on purpose. API_KEY makes a WHOLE deployment private
 # (staging uses it). ADMIN_KEY gates only the operator surface -- /metrics
 # leaks token counts, spend and error rates, which must not be public even
@@ -201,7 +201,7 @@ ADMIN_KEY = _get_secret("ADMIN_KEY", "")
 # denies everything rather than standing open.
 TASKS_SERVICE_ACCOUNT_EMAIL = os.getenv("TASKS_SERVICE_ACCOUNT_EMAIL", "")
 
-# --- Security hardening (app/security.py) ----------------------------------
+# --- Security hardening (app/api/security.py) ----------------------------------
 # Prompt-injection screening. Regex-only, so it costs no tokens and no
 # network round-trip -- on by default because a blocked request is refused
 # BEFORE retrieval, which makes it cheaper than answering, not dearer.
@@ -257,7 +257,7 @@ DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "0"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
 
-# Circuit breaker (app/circuit.py). Always active -- failing fast on a dead
+# Circuit breaker (app/llm/circuit.py). Always active -- failing fast on a dead
 # provider is worth having on its own, with or without a fallback below.
 # The threshold counts *consecutive* failures as seen outside LangChain's
 # own retry, so each one is already LLM_MAX_RETRIES upstream attempts:
@@ -272,13 +272,13 @@ LLM_CIRCUIT_COOLDOWN_SECONDS = int(os.getenv("LLM_CIRCUIT_COOLDOWN_SECONDS", "30
 # silently inferring that from a stray GROQ_API_KEY being present would be a
 # surprising way to start spending money with a second vendor.
 #
-# Embeddings deliberately do NOT fail over; see app/providers.py.
+# Embeddings deliberately do NOT fail over; see app/llm/providers.py.
 LLM_FALLBACK_PROVIDER = os.getenv("LLM_FALLBACK_PROVIDER", "").lower()
 
 # --- LangSmith tracing ---------------------------------------------------
 # LangChain/LangGraph auto-trace every LLM call once these env vars are
 # set -- no code changes needed for that part. The @traceable decorators
-# in app/agent.py add named, granular traces for the custom logic
+# in app/retrieval/agent.py add named, granular traces for the custom logic
 # (grading, rewriting) that isn't itself an LLM call LangSmith would
 # otherwise group meaningfully on its own.
 LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "false").lower() == "true"

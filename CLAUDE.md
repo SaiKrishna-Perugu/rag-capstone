@@ -455,6 +455,20 @@ treat the legacy hostname as canonical rather than as a workaround. While
 a refusal lasts no HTTP request is ever issued, so **nothing appears in
 the Cloud Run request log** and a healthy service reads as an outage.
 
+
+## Repository voice
+
+The tracked repo documents the system, not its author. Job-search material —
+JD-requirement mappings, CV phrasing, demo scripts, interview talking points —
+belongs in `notes/` (gitignored) or another untracked file, never in README,
+module docstrings, or code comments. `notes/jd_coverage.md` and `DEMO.md` hold
+that material today.
+
+This is a style rule with a practical edge: comments like "the kind of check
+most candidates skip" or "shows you thought about observability" address a
+reviewer rather than the next maintainer, and they date badly. Explain what
+the code does and why that choice was made — the reasoning is what carries
+weight, and it reads the same to a colleague and to an evaluator.
 ## Testing conventions
 
 Tests mock at the module-function boundary via `unittest.mock.patch`, not

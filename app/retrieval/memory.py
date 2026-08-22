@@ -20,7 +20,7 @@ every call below behaves exactly as if no history existed -- so
 MODEL_PROVIDER=groq deployments keep working with zero GCP setup. Real
 Firestore errors (transient outage, permission issue) are also caught,
 logged, and degrade to "no history" -- the same fail-open posture as
-app/cache.py and app/rag.py's check_groundedness().
+app/retrieval/cache.py and app/retrieval/rag.py's check_groundedness().
 """
 
 import logging

@@ -15,7 +15,7 @@ from app.retrieval.hybrid import retrieve_with_hybrid_and_rerank
 
 logger = logging.getLogger(__name__)
 
-# NOTE: rules 1 and 3 below are fingerprinted by app/security.py's
+# NOTE: rules 1 and 3 below are fingerprinted by app/api/security.py's
 # _PROMPT_FINGERPRINTS to detect this prompt leaking into an answer. Reword
 # them and output screening silently stops matching -- change both together.
 _ANSWER_SYSTEM_PROMPT = """You are a precise assistant that answers questions \
@@ -54,7 +54,7 @@ def retrieve(question: str, k: int | None = None, session_id: str | None = None)
     """
     Retrieve the top-k most relevant chunks for a question, via hybrid
     (BM25 + vector, RRF-fused) retrieval followed by LLM reranking --
-    see app/retrieval.py for why each stage exists and its tradeoffs.
+    see app/retrieval/hybrid.py for why each stage exists and its tradeoffs.
     """
     return retrieve_with_hybrid_and_rerank(question, k=k, session_id=session_id)
 
@@ -96,8 +96,9 @@ def check_groundedness(answer: str, chunks: list) -> str:
     """
     Lightweight hallucination check: ask the LLM whether the answer's claims
     are supported by the retrieved context. Not a substitute for a proper
-    NLI-based groundedness model, but a real, working first pass -- and it's
-    the kind of check most candidates skip entirely.
+    NLI-based groundedness model: it inherits the generator's blind spots,
+    since the same model family judges its own output. It still catches the
+    common failure -- claims with no support anywhere in the context.
 
     This is a verification pass over an answer the caller already has, so a
     transient LLM failure here degrades to an unverified answer ("NOT_CHECKED")

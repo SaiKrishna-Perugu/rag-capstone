@@ -73,9 +73,9 @@ _PROBE_PATHS = frozenset({"/health", "/ready"})
 # requires the key when it is set (staging).
 #
 # /docs, /openapi.json and /redoc are deliberately here rather than in the
-# admin tier: they expose no secrets, and an interactive API explorer is a
-# portfolio asset someone may genuinely want to open. /metrics is the route
-# that actually leaks, and it is the one gated below.
+# admin tier: they expose no secrets, and an interactive API explorer is
+# useful to anyone evaluating or integrating with the service. /metrics is
+# the route that actually leaks, and it is the one gated below.
 _PUBLIC_PATHS = frozenset({
     "/", "/config",
     "/ask", "/ask-stream", "/ask-agentic", "/upload",
@@ -131,7 +131,7 @@ def _verify_oidc_token(request: Request) -> bool:
 
         claims = id_token.verify_oauth2_token(
             token,
-            # Reuses app/auth.py's pooled transport rather than building a
+            # Reuses app/api/auth.py's pooled transport rather than building a
             # second one -- it exists to avoid a TLS handshake per call.
             auth._get_transport(),
             audience=config.INGEST_TARGET_URL or None,

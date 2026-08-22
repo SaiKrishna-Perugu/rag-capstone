@@ -65,8 +65,8 @@ _INJECTION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?:new|updated|revised)\s+(?:system\s+)?instructions\s*:", re.IGNORECASE), "role-override"),
 ]
 
-# Distinctive fragments of this app's own system prompts (app/rag.py,
-# app/retrieval.py, app/streaming.py). If one of these comes back inside an
+# Distinctive fragments of this app's own system prompts (app/retrieval/rag.py,
+# app/retrieval/hybrid.py, app/api/streaming.py). If one of these comes back inside an
 # answer, the instructions leaked -- no legitimate corpus answer contains
 # them, because they describe the assistant rather than the documents.
 _PROMPT_FINGERPRINTS = (
