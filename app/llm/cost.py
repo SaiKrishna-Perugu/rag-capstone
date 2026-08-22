@@ -23,6 +23,8 @@ import contextvars
 import os
 from dataclasses import dataclass, field
 
+from app.llm import budget
+
 # USD per 1,000,000 tokens. Override any of these via env rather than
 # editing code -- e.g. RAG_PRICE_GEMINI_2_5_FLASH_LITE_IN=0.12
 _DEFAULT_PRICING = {
@@ -100,6 +102,11 @@ def add_usage(model: str, input_tokens: int, output_tokens: int, stage: str = "l
     whether it is running inside a request.
     """
     cost = estimate_cost(model, input_tokens, output_tokens)
+    # Every priced call passes through here, which makes this the one place
+    # a daily ceiling can be maintained without a second accounting path.
+    # Unlike the contextvar above it is process-global on purpose: the
+    # budget is about total spend, not any one request's share of it.
+    budget.record_spend(cost)
     usage = _usage.get()
     if usage is not None:
         usage.input_tokens += input_tokens

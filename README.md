@@ -31,6 +31,41 @@ Also present, beyond this specific JD section: a self-correcting LangGraph
 agent loop (`app/retrieval/agent.py`), LangSmith tracing, and GCP Vertex AI + Cloud Run
 deployment -- see the rest of this README.
 
+## Measured results
+
+Numbers from real runs, not estimates. Both are reproducible: the RAGAS
+figures come from `.github/workflows/eval.yml` on every push to `main`, and
+the cost breakdown from the `cost_by_stage` field logged on every `/ask`.
+
+**Retrieval quality** (RAGAS, commit `dd520e1`, Vertex AI
+`gemini-2.5-flash-lite`, 768-dim `text-embedding-005`):
+
+| Metric | Score |
+|---|---|
+| faithfulness | 0.875 |
+| answer_relevancy | 0.62 |
+| llm_context_precision_without_reference | 0.76 |
+| context_recall | 1.00 |
+
+`answer_relevancy` is the one to read carefully rather than the one to
+optimise. The eval set includes a question the corpus deliberately cannot
+answer ("What is the CEO's name?"); the system correctly replies "I don't
+have enough information in the provided documents to answer that", and RAGAS
+scores that honest refusal **0.0** relevancy and 0.0 faithfulness. The
+aggregate therefore understates the behaviour that matters most in
+production. `context_recall: 1.00` is the more trustworthy signal here.
+
+**Cost per request.** Reranking is the single most expensive stage at **~47%
+of per-request spend -- more than generation** -- because it feeds 12
+candidate passages to the LLM where generation only ever sees the final 4.
+That is the measurement that would justify swapping the LLM reranker for a
+local cross-encoder; it has not been done here, deliberately, and the
+tradeoff is written up in `app/retrieval/hybrid.py`'s module docstring.
+
+Two levers exist for that cost without changing the pipeline:
+`GROUNDEDNESS_SAMPLE_RATE` (the check is a whole extra LLM call over the same
+context) and `DAILY_BUDGET_USD` (a hard per-day ceiling). Both ship inert.
+
 ## Architecture
 
 ```mermaid
@@ -472,13 +507,16 @@ gcloud run services replace cloudrun-groq.yaml --region=us-central1
 #     Either resolves for Cloud Tasks. For browser visitors prefer the
 #     `status.url` value, which is what this README advertises as the demo
 #     link: on 2026-08-20 one consumer ISP resolver answered DNS `REFUSED`
-#     for the whole `*.<region>.run.app` zone for several hours while
-#     `*.a.run.app` resolved normally (it recovered the same day; all four
-#     major public resolvers served both throughout). Worth recognising
-#     because the symptom is misleading -- the browser shows "site can't be
-#     reached" and, since no HTTP request is ever issued, NOTHING appears in
-#     the Cloud Run request log, so a perfectly healthy service reads as an
-#     outage.
+#     for the whole `*.<region>.run.app` zone INTERMITTENTLY -- refusing for
+#     hours, recovering, then refusing again the same day -- while
+#     `*.a.run.app` resolved normally throughout, as did all four major
+#     public resolvers (Google, Cloudflare, Quad9, OpenDNS). Treat the
+#     legacy hostname as the canonical link rather than a workaround: the
+#     failure recurs, so "it works now" is not evidence it is fixed. Worth
+#     recognising too, because the symptom is misleading -- the browser
+#     shows "site can't be reached" and, since no HTTP request is ever
+#     issued, NOTHING appears in the Cloud Run request log, so a perfectly
+#     healthy service reads as an outage.
 SERVICE_URL=$(gcloud run services describe rag-capstone --region=us-central1 --format='value(status.url)')
 gcloud run services update rag-capstone --region=us-central1 \
     --update-env-vars=INGEST_TARGET_URL=$SERVICE_URL

@@ -75,6 +75,14 @@ spec:
         # make the deployed value explicit and reviewable.
         - name: EMBEDDING_DIMENSION
           value: "768"
+        # Same caps as production, deliberately. Left unset, MAX_CORPUS_CHUNKS
+        # defaults to 0 (disabled) and staging silently stops being able to
+        # reproduce production's 507-when-full behaviour -- which is most of
+        # the reason staging exists.
+        - name: MAX_CORPUS_CHUNKS
+          value: "3000"
+        - name: MAX_SESSION_CHUNKS
+          value: "300"
         - name: OTEL_GCP_EXPORT
           value: "true"
         # Separate queue from production's ingest-queue so a staging

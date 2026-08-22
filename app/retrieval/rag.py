@@ -6,8 +6,10 @@ Kept separate from main.py so it can be imported directly by eval.py
 without spinning up the FastAPI app.
 """
 import logging
+import random
 from dataclasses import dataclass, field
 
+from app import config
 from app.llm.providers import get_llm
 from app.retrieval.hybrid import retrieve_with_hybrid_and_rerank
 
@@ -119,6 +121,24 @@ def check_groundedness(answer: str, chunks: list) -> str:
     return verdict if verdict in ("GROUNDED", "UNSUPPORTED") else "UNKNOWN"
 
 
+def _should_check_groundedness() -> bool:
+    """
+    Whether this request draws the groundedness check.
+
+    Sampling exists because the check is a full extra LLM call over the same
+    context -- it roughly doubles the token count of a short answer for a
+    one-word verdict. At a rate below 1.0 the aggregate signal (what share
+    of answers are UNSUPPORTED) survives, while the per-request cost does
+    not. Default is 1.0, so this is inert until deliberately lowered.
+    """
+    rate = config.GROUNDEDNESS_SAMPLE_RATE
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    return random.random() < rate
+
+
 def answer_question(
     question: str,
     k: int | None = None,
@@ -135,7 +155,17 @@ def answer_question(
         )
 
     answer = generate_answer(question, chunks)
-    groundedness = check_groundedness(answer, chunks) if check_hallucination else "NOT_CHECKED"
+    # "SKIPPED" is deliberately distinct from "NOT_CHECKED": the latter means
+    # the check ran and failed (see check_groundedness's fail-open path),
+    # while this means it was never attempted. Collapsing the two would make
+    # a routine sampling decision indistinguishable from a provider error in
+    # the metrics, which is where the difference actually matters.
+    if not check_hallucination:
+        groundedness = "NOT_CHECKED"
+    elif _should_check_groundedness():
+        groundedness = check_groundedness(answer, chunks)
+    else:
+        groundedness = "SKIPPED"
 
     # The semantic cache is global and is consulted BEFORE retrieval, so an
     # answer grounded in a visitor's private upload would otherwise be served

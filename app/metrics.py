@@ -92,6 +92,10 @@ _llm_failover_total = _meter.create_counter(
 )
 
 
+_budget_exceeded_total = _meter.create_counter(
+    "rag_budget_exceeded_total",
+    description="Requests refused because the daily LLM spend ceiling was reached.",
+)
 _injection_blocked_total = _meter.create_counter(
     "rag_injection_blocked_total",
     description="Requests refused by prompt-injection screening, by reason.",
@@ -155,3 +159,8 @@ def record_injection_blocked(reason: str) -> None:
 def record_prompt_leak() -> None:
     """An answer was suppressed for containing system-prompt text."""
     _prompt_leak_total.add(1)
+
+
+def record_budget_exceeded() -> None:
+    """A request was refused by the daily spend ceiling (app/llm/budget.py)."""
+    _budget_exceeded_total.add(1)

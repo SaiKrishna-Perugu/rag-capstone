@@ -237,3 +237,33 @@ def test_config_endpoint(client):
     data = response.json()
     assert "enable_uploads" in data
     assert data["model_provider"] == config.MODEL_PROVIDER
+
+
+# --- Cache-hit disambiguation ---------------------------------------------
+# A cache hit returns sources: [] because only the answer was stored. Without
+# the `cached` flag that is indistinguishable from "retrieval found nothing",
+# which is the opposite situation.
+
+def test_cache_hit_is_flagged_and_returns_no_sources(client):
+    from unittest.mock import patch
+
+    hit = {"answer": "Cached: 30 days.", "groundedness": "GROUNDED", "similarity_score": 0.97}
+    with patch("app.retrieval.cache.session_has_uploads", return_value=False):
+        with patch("app.retrieval.cache.get_cached_answer", return_value=hit):
+            resp = client.post("/ask", json={"question": "refund window?"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cached"] is True
+    assert body["sources"] == []
+    assert body["answer"] == "Cached: 30 days."
+
+
+def test_live_answer_is_not_flagged_as_cached(
+    client, mock_cache, mock_retrieval, mock_llm_answer, mock_groundedness
+):
+    resp = client.post("/ask", json={"question": "What is the refund policy?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cached"] is False
+    assert len(body["sources"]) > 0

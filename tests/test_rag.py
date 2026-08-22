@@ -58,3 +58,63 @@ def test_generate_answer(mock_llm_answer):
     
     ans = generate_answer("Question?", [mock_chunk])
     assert ans == "The refund policy is 30 days."
+
+
+# --- Groundedness sampling ------------------------------------------------
+# The check is a whole extra LLM call over the same context. Sampling trades
+# per-request verdicts for aggregate signal; "SKIPPED" must stay distinct
+# from "NOT_CHECKED", which means the check ran and failed.
+
+def test_groundedness_runs_on_every_request_by_default():
+    """Default rate is 1.0 -- this ships inert, no behaviour change."""
+    from app import config
+    from app.retrieval import rag
+
+    with patch.object(config, "GROUNDEDNESS_SAMPLE_RATE", 1.0):
+        with patch("app.retrieval.rag.retrieve", return_value=[_chunk()]):
+            with patch("app.retrieval.rag.generate_answer", return_value="Blue."):
+                with patch("app.retrieval.rag.check_groundedness", return_value="GROUNDED") as chk:
+                    result = rag.answer_question("colour?")
+
+    chk.assert_called_once()
+    assert result.groundedness == "GROUNDED"
+
+
+def test_rate_zero_skips_the_check_without_calling_the_llm():
+    from app import config
+    from app.retrieval import rag
+
+    with patch.object(config, "GROUNDEDNESS_SAMPLE_RATE", 0.0):
+        with patch("app.retrieval.rag.retrieve", return_value=[_chunk()]):
+            with patch("app.retrieval.rag.generate_answer", return_value="Blue."):
+                with patch("app.retrieval.rag.check_groundedness") as chk:
+                    result = rag.answer_question("colour?")
+
+    chk.assert_not_called()
+    assert result.groundedness == "SKIPPED"
+
+
+def test_skipped_is_distinct_from_not_checked():
+    """check_hallucination=False means 'never asked for'; SKIPPED means sampled out."""
+    from app import config
+    from app.retrieval import rag
+
+    with patch.object(config, "GROUNDEDNESS_SAMPLE_RATE", 0.0):
+        with patch("app.retrieval.rag.retrieve", return_value=[_chunk()]):
+            with patch("app.retrieval.rag.generate_answer", return_value="Blue."):
+                with patch("app.retrieval.rag.check_groundedness"):
+                    opted_out = rag.answer_question("colour?", check_hallucination=False)
+
+    assert opted_out.groundedness == "NOT_CHECKED"
+
+
+def test_partial_rate_uses_the_sampler():
+    from app import config
+    from app.retrieval import rag
+
+    with patch.object(config, "GROUNDEDNESS_SAMPLE_RATE", 0.5):
+        # random() < 0.5 -> checked; >= 0.5 -> skipped.
+        with patch("app.retrieval.rag.random.random", return_value=0.9):
+            assert rag._should_check_groundedness() is False
+        with patch("app.retrieval.rag.random.random", return_value=0.1):
+            assert rag._should_check_groundedness() is True

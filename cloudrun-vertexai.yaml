@@ -49,11 +49,16 @@ spec:
         # Regex-only screening; no tokens, no extra latency.
         - name: ENABLE_INJECTION_SCREENING
           value: "true"
-        # Deliberately false: this fails CLOSED, so turning it on before
-        # running `gcloud services enable dlp.googleapis.com` replaces every
-        # logged question/answer with "[redaction unavailable]".
+        # TRUE here, and this must stay in sync with the live service --
+        # production has run with redaction on since DLP was enabled on this
+        # project, and a `gcloud run services replace` against a "false" here
+        # would silently switch a privacy control OFF while reporting success.
+        # This fails CLOSED: enabling it WITHOUT
+        # `gcloud services enable dlp.googleapis.com` replaces every logged
+        # question/answer with "[redaction unavailable]", so a fresh project
+        # must enable the DLP API before deploying this file.
         - name: ENABLE_PII_REDACTION
-          value: "false"
+          value: "true"
         - name: MODEL_PROVIDER
           value: 'vertexai'
         # Required by app/config.py for MODEL_PROVIDER=vertexai, and also
@@ -90,20 +95,30 @@ spec:
         # against a fresh database.
         - name: EMBEDDING_DIMENSION
           value: '768'
+        # Ceiling on TOTAL indexed chunks; /upload returns 507 once reached.
+        # Declared here rather than only set imperatively -- it was the
+        # latter, which is precisely how staging ended up uncapped (unset =
+        # 0 = disabled) while production ran 3000.
+        - name: MAX_CORPUS_CHUNKS
+          value: '3000'
+        # Per-visitor ceiling, so a single session cannot consume the whole
+        # MAX_CORPUS_CHUNKS budget and lock everyone else out.
+        - name: MAX_SESSION_CHUNKS
+          value: '300'
         # PUBLIC DEMO NOTE: the live production service intentionally runs
-        # WITHOUT this secret and with ENABLE_UPLOADS=false, so anyone with
-        # the URL can ask questions while nobody can mutate the corpus.
-        # APIKeyMiddleware disables itself entirely when API_KEY is empty,
-        # which would also leave /upload open -- ENABLE_UPLOADS=false is
-        # what actually closes it (main.py returns 403 before touching the
-        # request body), so the two settings belong together.
+        # WITHOUT this secret and WITH ENABLE_UPLOADS=true -- anyone with the
+        # URL can ask questions AND upload, bounded by the caps above rather
+        # than by authentication. Access is tiered in app/api/middleware.py
+        # (AccessControlMiddleware), not one on/off switch: /metrics needs
+        # ADMIN_KEY, /internal/* needs a Cloud Tasks OIDC token, and the
+        # public tier is open only while API_KEY is empty.
         #
         # Applying this file with `gcloud run services replace` re-mounts
         # the secret and re-enables auth, locking visitors out of the demo.
         # To restore the public configuration afterward:
         #   gcloud run services update rag-capstone --region=us-central1 \
-        #     --remove-secrets=API_KEY --update-env-vars=ENABLE_UPLOADS=false
-        # (Same reset caveat as INGEST_TARGET_URL below.)
+        #     --remove-secrets=API_KEY --update-env-vars=ENABLE_UPLOADS=true
+        # (Same reset caveat as INGEST_TARGET_URL above.)
         - name: API_KEY
           valueFrom:
             secretKeyRef:

@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -105,3 +106,57 @@ def test_hybrid_retrieve_converts_rows_to_documents():
             assert docs[0].page_content == "The refund policy is 30 days."
             assert docs[0].metadata["source"] == "test.pdf"
             assert docs[0].metadata["page"] == 1
+
+
+# --- Reranker response parsing ------------------------------------------
+# The eval gate logged three "rerank failed (JSONDecodeError...)" lines per
+# run, every run, silently discarding the most expensive stage in the
+# pipeline. Both shapes below fail json.loads() at character 0 with the
+# identical, unhelpful "Expecting value: line 1 column 1 (char 0)".
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        pytest.param("[3, 1, 2]", [3, 1, 2], id="bare_array"),
+        pytest.param("```json\n[3, 1, 2]\n```", [3, 1, 2], id="fenced_with_lang"),
+        pytest.param("```\n[3, 1, 2]\n```", [3, 1, 2], id="fenced_bare"),
+        pytest.param("  [3, 1, 2]  ", [3, 1, 2], id="surrounding_whitespace"),
+        pytest.param("Ranked: [3, 1, 2] -- most relevant first.", [3, 1, 2], id="wrapped_in_prose"),
+    ],
+)
+def test_parse_rank_order_recovers_real_llm_shapes(raw, expected):
+    from app.retrieval.hybrid import _parse_rank_order
+    assert _parse_rank_order(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw,expected_exc",
+    [
+        pytest.param("", ValueError, id="empty"),
+        pytest.param("   \n  ", ValueError, id="whitespace_only"),
+        pytest.param("no array here at all", json.JSONDecodeError, id="no_array"),
+        pytest.param('{"ranking": [1, 2]}', TypeError, id="object_not_array"),
+        pytest.param("42", TypeError, id="bare_number"),
+    ],
+)
+def test_parse_rank_order_raises_so_rerank_falls_back(raw, expected_exc):
+    """Anything unusable must raise -- rerank() turns that into RRF order."""
+    from app.retrieval.hybrid import _parse_rank_order
+    with pytest.raises(expected_exc):
+        _parse_rank_order(raw)
+
+
+def test_rerank_now_honours_a_fenced_response():
+    """End-to-end: the shape that used to be discarded now reorders."""
+    from app.retrieval import hybrid
+
+    candidates = _candidates(6)
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(content="```json\n[6, 5, 4, 3, 2, 1]\n```")
+
+    with patch("app.retrieval.hybrid.get_llm", return_value=mock_llm):
+        result = hybrid.rerank("q", candidates, top_k=3)
+
+    # Reversed order means the LLM ranking was actually applied, not the
+    # RRF passthrough it previously fell back to.
+    assert [d.page_content for d in result] == ["chunk 5", "chunk 4", "chunk 3"]

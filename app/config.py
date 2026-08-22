@@ -230,6 +230,29 @@ DLP_INFO_TYPES = [
     ).split(",") if t.strip()
 ]
 
+# --- Cost controls ----------------------------------------------------------
+# Fraction of answered requests that also run the LLM-as-judge groundedness
+# check, 0.0-1.0. Defaults to 1.0 -- every request -- and that default is
+# deliberate: the verdict is one of this demo's more distinctive outputs, and
+# showing "SKIPPED" on an arbitrary subset reads as unreliable rather than
+# economical. Lower it where per-request cost matters more than the display;
+# the check is a whole extra LLM call over the same context, so 0.25 removes
+# roughly a quarter of per-request spend.
+GROUNDEDNESS_SAMPLE_RATE = float(os.getenv("GROUNDEDNESS_SAMPLE_RATE", "1.0"))
+
+# Ceiling on estimated LLM spend per UTC day, in USD. 0 disables it. Once
+# exceeded, /ask* refuses with a friendly message instead of making further
+# paid calls -- the point being that a runaway loop against a publicly
+# advertised URL stops on its own rather than at the end of a billing cycle.
+#
+# Two limitations, both worth stating because they bound what this can
+# promise. The figure is app/llm/cost.py's ESTIMATE from a hand-maintained
+# price table, not Cloud Billing. And the counter is PER PROCESS, exactly
+# like app/llm/circuit.py's breaker state, so with maxScale=2 the real
+# worst case is about twice this number. This is abuse and runaway
+# mitigation; the authoritative stop remains the billing budget alert.
+DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "0"))
+
 # --- LLM Resilience -------------------------------------------------------
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))

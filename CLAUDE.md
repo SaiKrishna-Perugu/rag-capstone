@@ -217,6 +217,20 @@ be called with the same question to compare behavior.
   over when the primary breaks **before the first token**; re-routing
   mid-stream would restart the answer and the reader would watch it
   duplicate itself.
+- `llm/budget.py` — daily LLM spend ceiling (`DAILY_BUDGET_USD`, 0 =
+  disabled, and it ships disabled). Distinct from `circuit.py`: the breaker
+  stops calls to a provider that is *broken*, this stops calls that are
+  merely *expensive*, and a healthy provider plus a scripted loop against a
+  public URL trips neither retry, failover nor rate limiting. Fed from
+  `cost.add_usage()`, the single funnel every priced call already passes
+  through, and enforced at the request boundary in `main.py` so a refused
+  request costs zero tokens rather than failing partway through generation.
+  Two deliberate imprecisions: the figure is `cost.py`'s **estimate** from a
+  hand-maintained price table, not Cloud Billing, and state is **per
+  process** like the breaker's — with `maxScale=2` the real ceiling is about
+  twice the configured one. The window is the UTC calendar day, not a
+  rolling 24h, because that needs one float and one date rather than the
+  timestamp of every call.
 - `db/database.py` — PostgreSQL + pgvector connection pool
   (`psycopg2.pool.ThreadedConnectionPool`), idempotent schema init
   (`init_db()`, executes `db_schema.sql`), and the query functions
@@ -253,6 +267,11 @@ be called with the same question to compare behavior.
   for why an LLM reranker was chosen over a cross-encoder here).
 - `retrieval/rag.py` — single-pass retrieve/generate/groundedness-check, used by both
   `/ask` and as the retrieval base for `/ask-agentic`.
+  The groundedness check is sampled by `GROUNDEDNESS_SAMPLE_RATE` (default
+  1.0, so inert). Sampled-out requests return **`SKIPPED`**, deliberately
+  distinct from `NOT_CHECKED`, which means the check ran and failed — merging
+  them would make a routine sampling decision look like a provider error in
+  the metrics.
 - `retrieval/agent.py` — the self-correcting LangGraph loop described above; every
   node is wrapped with `@traceable` for LangSmith tracing (off by default,
   `LANGSMITH_TRACING=false` in `.env`).
@@ -427,9 +446,13 @@ their closing `Service URL:` banner, so quoting that banner hands out a
 different host than the documented link. Both reach the same service and
 both work for Cloud Tasks; the distinction matters because the two DNS
 zones resolve independently — on 2026-08-20 one consumer ISP resolver
-answered `REFUSED` for the whole `*.<region>.run.app` zone for several
-hours while `*.a.run.app` resolved normally (it recovered the same day).
-While that lasts no HTTP request is ever issued, so **nothing appears in
+answered `REFUSED` for the whole `*.<region>.run.app` zone
+**intermittently**: refusing for hours, recovering, then refusing again
+within the same day, while `*.a.run.app` and all four major public
+resolvers (Google, Cloudflare, Quad9, OpenDNS) served it throughout. The
+recurrence is the point — "it works now" is not evidence it is fixed, so
+treat the legacy hostname as canonical rather than as a workaround. While
+a refusal lasts no HTTP request is ever issued, so **nothing appears in
 the Cloud Run request log** and a healthy service reads as an outage.
 
 ## Testing conventions

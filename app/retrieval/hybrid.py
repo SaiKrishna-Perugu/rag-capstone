@@ -32,6 +32,7 @@ Pipeline: hybrid_retrieve() -> rerank() -> top-k chunks handed to generation.
 """
 import json
 import logging
+import re
 
 from langchain_core.documents import Document
 
@@ -95,6 +96,45 @@ def hybrid_retrieve(question: str, k: int | None = None, session_id: str | None 
     return documents
 
 
+def _parse_rank_order(response: str) -> list:
+    """
+    Extract the ranked array from a reranker reply.
+
+    The prompt asks for a bare JSON array, but two other shapes arrive
+    routinely and both fail json.loads() at character 0 with the same
+    unhelpful "Expecting value: line 1 column 1 (char 0)": a markdown-fenced
+    array (```json\\n[3,1,2]\\n```) and an empty string. That was not
+    hypothetical -- the eval gate logged exactly three such failures per run,
+    on every run, each one silently discarding the most expensive stage in
+    the pipeline (~47% of per-request cost) and falling back to RRF order.
+    A genuinely empty reply still raises, because there is nothing to rank
+    and RRF order is the correct answer then.
+    """
+    text = response.strip()
+    if not text:
+        raise ValueError("reranker returned an empty response")
+
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    try:
+        order = json.loads(text)
+    except json.JSONDecodeError:
+        # The model wrapped the array in prose despite being told not to.
+        # Recovering the first bracketed group beats throwing away the call.
+        match = re.search(r"\[[^\[\]]*\]", text, re.DOTALL)
+        if match is None:
+            raise
+        order = json.loads(match.group(0))
+
+    # A dict, bare string, or number all parse fine as JSON and then blow up
+    # on `1 <= i` (TypeError) or on iteration further down.
+    if not isinstance(order, list):
+        raise TypeError(f"expected a JSON array, got {type(order).__name__}")
+    return order
+
+
 def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
     """
     LLM-based listwise reranking: one call scores the whole candidate
@@ -124,14 +164,8 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
         # the point of having a fallback at all, and it is not theoretical
         # -- a CI eval run logged ~11 TimeoutErrors against Groq in a
         # single pass.
-        response = llm.invoke(messages).content.strip()
-        order = json.loads(response)
-        # The prompt asks for a JSON array, but nothing guarantees one:
-        # a dict, bare string, or number all parse fine as JSON and then
-        # blow up on `1 <= i` (TypeError) or iteration -- neither of which
-        # the old except-tuple caught.
-        if not isinstance(order, list):
-            raise TypeError(f"expected a JSON array, got {type(order).__name__}")
+        response = llm.invoke(messages).content
+        order = _parse_rank_order(response)
         ranks = [i for i in order if isinstance(i, int) and 1 <= i <= len(candidates)]
         reranked = [candidates[i - 1] for i in ranks]
         # Guard against a malformed/partial response silently dropping

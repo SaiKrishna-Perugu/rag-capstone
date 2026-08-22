@@ -37,7 +37,7 @@ from app.api import auth, security, streaming
 from app.api.middleware import AccessControlMiddleware, IdentityMiddleware
 from app.db import database
 from app.ingestion import jobs
-from app.llm import cost
+from app.llm import budget, cost
 from app.retrieval import cache, memory
 from app.retrieval.agent import run_agentic_rag
 from app.retrieval.rag import answer_question
@@ -130,6 +130,11 @@ class AskResponse(BaseModel):
     groundedness: str
     sources: list[SourceChunk]
     latency_ms: int
+    # A semantic-cache hit returns no source chunks -- only the answer was
+    # stored. Without this flag an empty `sources` is indistinguishable from
+    # a genuinely sourceless answer, so a caller cannot tell "served from
+    # cache" from "retrieval found nothing", which are opposite situations.
+    cached: bool = False
 
 
 class AgenticAskResponse(BaseModel):
@@ -173,6 +178,43 @@ def _doc_session(request: Request) -> str | None:
     does not send the header.
     """
     return request.headers.get("X-Session-Id") or None
+
+
+def _enforce_daily_budget(request_id: str, endpoint: str) -> None:
+    """Refuse the request if today's estimated LLM spend ceiling is reached.
+
+    Called AFTER injection screening (which is free and gives a more useful
+    400) but BEFORE contextualization, which is itself the first paid call.
+    Refusing here means a rejected request costs nothing, rather than
+    discovering the ceiling partway through generation with two calls
+    already billed.
+
+    503 rather than 429: the caller did nothing wrong and retrying sooner
+    will not help -- the service is deliberately unavailable until the UTC
+    day rolls over. See app/llm/budget.py for why the number is an estimate
+    and why the counter is per-process.
+    """
+    if not budget.is_exceeded():
+        return
+    metrics.record_budget_exceeded()
+    logger.warning(json.dumps({
+        "request_id": request_id,
+        "event": "budget_exceeded",
+        "endpoint": endpoint,
+        "spent_today_usd": round(budget.spent_today(), 6),
+        "limit_usd": config.DAILY_BUDGET_USD,
+    }))
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": (
+                "This demo has reached its daily usage limit and will reset at "
+                "00:00 UTC. Nothing is broken -- the cap exists to keep a public "
+                "demo affordable."
+            ),
+            "request_id": request_id,
+        },
+    )
 
 
 @app.get("/health")
@@ -626,6 +668,8 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
                     "request_id": request_id},
         )
 
+    _enforce_daily_budget(request_id, "ask")
+
     # --- Conversation Memory: Contextualize Question ----------------------
     contextualized_q = await asyncio.to_thread(
         memory.contextualize_question, body.session_id, body.question
@@ -666,6 +710,7 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             groundedness=cached_hit["groundedness"],
             sources=[],  # Cached answers don't return full source chunks
             latency_ms=latency_ms,
+            cached=True,
         )
 
     try:
@@ -751,6 +796,8 @@ async def ask_stream(request: Request, body: AskRequest):
     Clients should read the stream for `{"token": "..."}` payloads,
     followed by a `{"type": "final", ...}` payload at the end.
     """
+    _enforce_daily_budget(str(uuid.uuid4()), "ask-stream")
+
     return StreamingResponse(
         streaming.stream_answer(
             body.question, body.session_id, body.top_k, _doc_session(request)
@@ -788,6 +835,8 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
             detail={"error": security.REFUSAL_MESSAGE, "reason": verdict.reason,
                     "request_id": request_id},
         )
+
+    _enforce_daily_budget(request_id, "ask-agentic")
 
     # --- Conversation Memory: Contextualize Question ----------------------
     contextualized_q = await asyncio.to_thread(
