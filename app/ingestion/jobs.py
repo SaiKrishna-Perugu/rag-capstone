@@ -36,7 +36,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app import config
-from app.ingestion import ingest
+from app.ingestion import ingest, storage
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +127,10 @@ def _cleanup_files(files: list[str], session_id: str | None) -> None:
             (upload_dir / name).unlink(missing_ok=True)
         except OSError as exc:
             logger.warning(f"Could not delete uploaded file {name}: {exc}")
+    # The staged copy too, or the bucket accumulates every file ever uploaded.
+    # Best-effort by design: the chunks are already in Postgres, so a failed
+    # delete costs storage rather than correctness.
+    storage.delete(session_id, files)
 
 
 def process_job(job_id: str) -> None:
@@ -148,8 +152,48 @@ def process_job(job_id: str) -> None:
     expires_at = datetime.now(UTC) + timedelta(hours=config.UPLOAD_TTL_HOURS)
 
     update_job_status(job_id, "processing")
+
+    # Cloud Tasks targets the SERVICE url, which is load-balanced across
+    # instances. /upload does not write to this instance's disk, so materialise
+    # the job's files here first.
+    #
+    # With UPLOAD_BUCKET set they come from Cloud Storage, which is why this
+    # works regardless of which instance the task landed on. Without it, they
+    # were written locally by whichever instance served /upload -- fine on a
+    # single instance, and the existence check below is what makes the
+    # multi-instance case fail loudly instead of reporting success over an
+    # empty ingest.
+    if session_id and files:
+        upload_dir = Path(config.DOCS_DIR) / "uploads" / session_id
+        if storage.enabled():
+            fetched = storage.fetch_to(session_id, files, upload_dir)
+            logger.info(
+                f"Job {job_id}: fetched {len(fetched)}/{len(files)} staged uploads."
+            )
+        missing = [f for f in files if not (upload_dir / f).exists()]
+        if missing:
+            where = (
+                "They are not in the upload bucket -- staging may have failed, "
+                "or they were already cleaned up by an earlier run."
+                if storage.enabled() else
+                "The Cloud Task was routed to an instance that did not receive "
+                "them. Set UPLOAD_BUCKET so uploads no longer depend on which "
+                "instance serves the request."
+            )
+            msg = f"Uploaded files are not present on this instance: {missing}. {where}"
+            logger.error(f"Job {job_id} failed: {msg}")
+            update_job_status(job_id, "failed", error=msg)
+            raise RuntimeError(msg)
+
     try:
-        summary = ingest.run(force=False, session_id=session_id, expires_at=expires_at)
+        summary = ingest.run(
+            force=False,
+            session_id=session_id,
+            expires_at=expires_at,
+            # The job's own file list is the ingestion allowlist. A concurrent
+            # visitor's upload in the same tree is then never even considered.
+            only=files or None,
+        )
     except Exception as exc:
         logger.error(f"Job {job_id} failed: {exc}", exc_info=True)
         update_job_status(job_id, "failed", error=str(exc))

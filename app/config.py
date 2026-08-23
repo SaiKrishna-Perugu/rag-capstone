@@ -116,6 +116,14 @@ SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
 # Firestore emulator (see README) covers local dev; the queue below is only
 # used when GCP_PROJECT_ID is set -- otherwise app/ingestion/jobs.py processes the job
 # in-process immediately instead of enqueueing a real Cloud Task.
+# Cloud Storage bucket used to stage uploaded files between /upload and the
+# ingestion job. Empty = disabled, and uploads fall back to instance-local disk.
+#
+# That fallback is correct for local development and the test suite, and WRONG
+# for Cloud Run: instances have independent disks, so a Cloud Task can land on
+# the instance that never received the file. Set this in any multi-instance
+# deployment. See app/ingestion/storage.py.
+UPLOAD_BUCKET = os.getenv("UPLOAD_BUCKET", "")
 CLOUD_TASKS_QUEUE = os.getenv("CLOUD_TASKS_QUEUE", "ingest-queue")
 INGEST_TARGET_URL = os.getenv("INGEST_TARGET_URL", "")
 JOB_TTL_HOURS = int(os.getenv("JOB_TTL_HOURS", "48"))

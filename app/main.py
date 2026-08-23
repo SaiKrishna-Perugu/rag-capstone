@@ -9,6 +9,7 @@ Then open http://127.0.0.1:8000/docs for interactive Swagger UI.
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -36,7 +37,7 @@ from app import config, metrics
 from app.api import auth, security, streaming
 from app.api.middleware import AccessControlMiddleware, IdentityMiddleware
 from app.db import database
-from app.ingestion import jobs
+from app.ingestion import jobs, storage
 from app.llm import budget, cost
 from app.retrieval import cache, memory
 from app.retrieval.agent import run_agentic_rag
@@ -167,6 +168,24 @@ _EXPECTED_MIME = {
 }
 
 
+# Session ids that are safe as both a path segment and a SQL key. The charset is
+# what does the security work -- no dot, slash or backslash means no traversal.
+# The 64-char cap just keeps paths sane. Matches both crypto.randomUUID() and
+# ui.html's 'sid-<base36>' fallback; see _doc_session().
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _uploads_root() -> Path:
+    """The directory every uploaded file must land inside.
+
+    Resolved per call, not once at import: config.DOCS_DIR is monkeypatched by
+    the test suite and settable per deployment, and an import-time constant
+    silently stops matching the directory uploads actually go to -- which would
+    make the containment check below reject every legitimate upload.
+    """
+    return (Path(config.DOCS_DIR) / "uploads").resolve()
+
+
 class InternalJobRequest(BaseModel):
     job_id: str
 
@@ -181,8 +200,32 @@ def _doc_session(request: Request) -> str | None:
 
     None means "curated corpus only" -- the safe default for any caller that
     does not send the header.
+
+    **Validated against a character allowlist, and that validation is
+    load-bearing.** This value becomes a filesystem path segment in /upload
+    (docs/uploads/<session>/) and a SQL visibility key in hybrid_search().
+    Unvalidated, `../../app` escaped the uploads tree entirely and let an
+    anonymous POST overwrite app/ui.html, which serve_ui() re-reads from disk on
+    every request -- stored XSS on the public landing page from one
+    unauthenticated call.
+
+    An allowlist rather than a UUID parse, deliberately. ui.html's docSessionId()
+    emits crypto.randomUUID() only in a secure context and falls back to
+    'sid-<base36>' otherwise, and any visitor whose localStorage already holds
+    such a value keeps sending it forever. Requiring a UUID would silently demote
+    all of them to the curated corpus and make their existing uploads vanish.
+    The security requirement is "cannot escape the directory", not "is a UUID":
+    barring dot, forward slash and backslash satisfies it for every id shape the
+    client actually emits.
+
+    Returning None rather than raising keeps a malformed value degrading that
+    visitor to the curated corpus, the same posture auth.py takes for expired
+    tokens.
     """
-    return request.headers.get("X-Session-Id") or None
+    raw = request.headers.get("X-Session-Id")
+    if not raw or not _SESSION_ID_RE.fullmatch(raw):
+        return None
+    return raw
 
 
 def _enforce_daily_budget(request_id: str, endpoint: str) -> None:
@@ -462,8 +505,42 @@ async def upload_files(
                 },
             )
 
-        file_path = docs_dir / safe_name
-        file_path.write_bytes(content)
+        if storage.enabled():
+            # Durable staging. The bytes never touch this instance's disk, so
+            # the ingestion job can run anywhere. Not fail-open: a bucket error
+            # is a real 503 rather than a silent fallback to the local path,
+            # because that fallback is the failure mode this replaces.
+            try:
+                await asyncio.to_thread(storage.put, doc_session, safe_name, content)
+            except Exception as exc:
+                logger.error(json.dumps({
+                    "request_id": request_id, "event": "upload_staging_failed",
+                    "file": safe_name, "error": str(exc),
+                }), exc_info=True)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "Upload storage is unavailable. Please try again.",
+                        "request_id": request_id,
+                    },
+                )
+        else:
+            # Local-disk path: development, tests, and any single-instance
+            # deployment. Containment check is deliberately independent of
+            # _doc_session()'s validation -- two layers, because either alone is
+            # one refactor away from being the only thing standing between an
+            # anonymous POST and an arbitrary file write. The filename is
+            # sanitised above; every other component came from a request header.
+            file_path = (docs_dir / safe_name).resolve()
+            if not file_path.is_relative_to(_uploads_root()):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Invalid upload path.",
+                        "request_id": request_id,
+                    },
+                )
+            file_path.write_bytes(content)
         saved_files.append(safe_name)
 
     logger.info(f"Saved uploaded files: {saved_files}. Creating ingestion job...")

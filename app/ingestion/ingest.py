@@ -24,6 +24,7 @@ or via a CLI) rather than inside the request path of a chat endpoint.
 """
 import glob
 import hashlib
+import logging
 import os
 import sys
 from pathlib import Path
@@ -40,6 +41,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app import config
 from app.db import database
 from app.llm.providers import get_embeddings
+
+logger = logging.getLogger(__name__)
 
 # Extension -> loader class. Add new formats here -- everything else
 # (chunking, hashing, freshness tracking) works unchanged for any new type.
@@ -93,25 +96,52 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def run(force: bool = False, session_id: str | None = None, expires_at=None) -> dict:
+def run(
+    force: bool = False,
+    session_id: str | None = None,
+    expires_at=None,
+    only: list[str] | None = None,
+) -> dict:
     """
     Incremental ingestion. Set force=True to re-embed every file
     regardless of whether its content hash changed (e.g. after switching
     MODEL_PROVIDER, since embeddings from different providers aren't
     compatible with each other in the same collection).
 
-    `session_id`/`expires_at` scope a visitor's uploaded documents so they
-    are retrievable only by that visitor and expire on their own. They are
-    applied **only to files under DOCS_DIR/uploads/**, never to the curated
-    corpus. That distinction is load-bearing: this function rescans the whole
-    docs tree on every run, so tagging indiscriminately would quietly convert
-    the shared sample corpus into one visitor's private documents and make it
-    invisible to everyone else.
+    `session_id`/`expires_at` scope a visitor's uploaded documents so they are
+    retrievable only by that visitor and expire on their own. They are applied
+    **only to files under DOCS_DIR/uploads/<session_id>/**, never to the curated
+    corpus and never to another visitor's uploads.
+
+    That second exclusion is the one that bites. This function rescans the whole
+    docs tree on every run, so a guard of merely "is this under uploads/?" tags
+    EVERY visitor's pending upload with whichever session happens to be running
+    -- visitor B loses their document and visitor A silently gains it. The write
+    side already separates sessions into their own directories; this is the read
+    side agreeing with it.
+
+    `only` restricts ingestion to a specific list of basenames within this
+    session's directory. Callers that know exactly which files a job owns
+    (jobs.process_job) should pass it: a concurrent visitor's upload sitting in
+    the same tree is then never even considered, rather than merely being tagged
+    correctly.
 
     Returns a summary dict: {"added": [...], "updated": [...],
     "skipped_unchanged": [...], "failed": [{"file": ..., "error": ...}]}.
     """
-    uploads_root = str(Path(config.DOCS_DIR) / "uploads")
+    # Resolved Path objects, compared with is_relative_to() rather than string
+    # prefixes. _discover_files() goes through glob.glob(os.path.join(...)), which
+    # on Windows returns whatever separator mix DOCS_DIR was written with
+    # ("C:/x/y\\uploads\\s\\f.md"), while str(Path(...)) normalises to all
+    # backslashes. A startswith() between those two silently matches nothing, so
+    # every upload falls through and is written as curated corpus -- caught only
+    # by running this against a real database, since tmp_path in the unit tests
+    # produces consistent separators and hides it.
+    uploads_root = (Path(config.DOCS_DIR) / "uploads").resolve()
+    # The directory whose contents this run is allowed to claim ownership of.
+    # None when no session is in play (the curated-corpus CLI path).
+    session_root = (uploads_root / session_id) if session_id else None
+    only_names = set(only) if only else None
     files = _discover_files(config.DOCS_DIR)
     if not files:
         supported = ", ".join(sorted(LOADER_BY_EXTENSION))
@@ -132,6 +162,31 @@ def run(force: bool = False, session_id: str | None = None, expires_at=None) -> 
     summary = {"added": [], "updated": [], "skipped_unchanged": [], "failed": []}
 
     for path in files:
+        resolved = Path(path).resolve()
+        is_upload = resolved.is_relative_to(uploads_root)
+
+        # --- Ownership gate -------------------------------------------------
+        # Everything below decides whether THIS run is entitled to touch THIS
+        # file. It runs before the hash read so an unowned file costs nothing.
+        if is_upload:
+            if session_id is None:
+                # An upload with no owning session. Reachable from the plain CLI
+                # (`python -m app.ingestion.ingest`) whenever a /upload wrote
+                # files but its job never ran -- Firestore unreachable, enqueue
+                # failed. Ingesting it here would write session_id=NULL,
+                # expires_at=NULL: a private document silently promoted to the
+                # curated corpus, globally visible and never expiring.
+                summary["skipped_unchanged"].append(path)
+                logger.warning("Skipping %s: upload with no owning session.", path)
+                continue
+            if not resolved.is_relative_to(session_root):
+                # Another visitor's upload, sitting in the same tree. Not ours
+                # to tag, and tagging it is exactly the ownership leak.
+                continue
+            if only_names is not None and resolved.name not in only_names:
+                # Ours by directory, but not part of this job's file list.
+                continue
+
         try:
             current_hash = _file_hash(path)
         except OSError as exc:
@@ -170,9 +225,10 @@ def run(force: bool = False, session_id: str | None = None, expires_at=None) -> 
         # Batch embed all chunks for this file
         chunk_embeddings = embeddings.embed_documents(contents)
 
-        # Only visitor uploads carry a session and an expiry; curated docs
-        # stay global and permanent. See the note in this function's docstring.
-        is_upload = path.startswith(uploads_root)
+        # `is_upload` was resolved by the ownership gate at the top of the loop.
+        # Reaching here means: either a curated file, or an upload this run is
+        # entitled to claim. Only visitor uploads carry a session and an expiry;
+        # curated docs stay global and permanent.
 
         # Upsert into PostgreSQL
         database.upsert_chunks(
