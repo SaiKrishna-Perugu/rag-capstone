@@ -69,6 +69,15 @@ spec:
           value: "YOUR_PROJECT_ID"
         - name: OTEL_GCP_EXPORT
           value: "true"
+        # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
+        # Run instances have independent disks, so a Cloud Task can land on the
+        # instance that never received the upload; staging in GCS removes that
+        # dependency. Declared here rather than set only with `gcloud run
+        # services update` -- imperative-only is how MAX_CORPUS_CHUNKS, the
+        # upload limits and ENABLE_PII_REDACTION each drifted from this file.
+        # Unset = fall back to instance-local disk (local dev and tests).
+        - name: UPLOAD_BUCKET
+          value: 'REPLACE-WITH-UPLOAD-BUCKET'
         - name: CLOUD_TASKS_QUEUE
           value: "ingest-queue"
         # This service's own public URL -- Cloud Tasks needs it as the

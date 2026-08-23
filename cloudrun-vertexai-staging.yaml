@@ -85,6 +85,20 @@ spec:
           value: "300"
         - name: OTEL_GCP_EXPORT
           value: "true"
+        # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
+        # Run instances have independent disks, so a Cloud Task can land on the
+        # instance that never received the upload; staging in GCS removes that
+        # dependency. Declared here rather than set only with `gcloud run
+        # services update` -- imperative-only is how MAX_CORPUS_CHUNKS, the
+        # upload limits and ENABLE_PII_REDACTION each drifted from this file.
+        # Unset = fall back to instance-local disk (local dev and tests).
+        #
+        # Shared with production deliberately: object keys are prefixed by
+        # session, and staged files are deleted once ingested, so the two
+        # environments cannot collide on a key. Same simplification as the
+        # shared Firestore below.
+        - name: UPLOAD_BUCKET
+          value: 'rag-capstone-uploads-hybrid-rag-505311'
         # Separate queue from production's ingest-queue so a staging
         # deploy's async ingestion jobs can never target the wrong service.
         # Firestore IS shared with production -- Firestore Native is one

@@ -80,6 +80,15 @@ spec:
         # deploy's async ingestion jobs never target the wrong service --
         # create it once: `gcloud tasks queues create ingest-queue-staging
         # --location=us-central1 --max-attempts=3`.
+        # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
+        # Run instances have independent disks, so a Cloud Task can land on the
+        # instance that never received the upload; staging in GCS removes that
+        # dependency. Declared here rather than set only with `gcloud run
+        # services update` -- imperative-only is how MAX_CORPUS_CHUNKS, the
+        # upload limits and ENABLE_PII_REDACTION each drifted from this file.
+        # Unset = fall back to instance-local disk (local dev and tests).
+        - name: UPLOAD_BUCKET
+          value: 'REPLACE-WITH-UPLOAD-BUCKET'
         - name: CLOUD_TASKS_QUEUE
           value: "ingest-queue-staging"
         # This service's own public URL -- same chicken-and-egg problem as
