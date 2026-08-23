@@ -62,8 +62,15 @@ def test_upload_with_traversal_header_writes_nothing_outside_uploads(
     victim = tmp_path.parent / "victim.md"
     victim.write_text("ORIGINAL", encoding="utf-8")
 
+    # process_job is stubbed as well as enqueue_cloud_task, because /upload
+    # picks between them on config.GCP_PROJECT_ID: set (a .env locally) sends it
+    # to Cloud Tasks, unset (CI) sends it to BackgroundTasks -- which TestClient
+    # runs synchronously after the response, so the real job would execute and
+    # reach Firestore. Patching only one branch makes the test pass or fail
+    # depending on whose machine it runs on, which is exactly what happened.
     with patch("app.main.jobs.create_job", return_value="job-1"), \
          patch("app.main.jobs.enqueue_cloud_task"), \
+         patch("app.main.jobs.process_job"), \
          patch("app.main.database.get_chunk_count", return_value=0):
         client.post(
             "/upload",
@@ -277,6 +284,7 @@ def test_upload_stages_to_the_bucket_instead_of_local_disk(
     with patch("app.main.storage.put", return_value="uploads/s/x.md") as put, \
          patch("app.main.jobs.create_job", return_value="job-1"), \
          patch("app.main.jobs.enqueue_cloud_task"), \
+         patch("app.main.jobs.process_job"), \
          patch("app.main.database.get_chunk_count", return_value=0):
         r = client.post(
             "/upload",
