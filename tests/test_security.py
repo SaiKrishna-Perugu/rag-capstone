@@ -68,15 +68,17 @@ def test_normal_answer_passes_output_screening():
 
 # --- PII redaction -------------------------------------------------------
 
-def test_redaction_is_inert_when_disabled(monkeypatch):
+@pytest.mark.asyncio
+async def test_redaction_is_inert_when_disabled(monkeypatch):
     """Default posture: local dev and tests need no GCP setup, and logs stay
     readable."""
     monkeypatch.setattr(config, "ENABLE_PII_REDACTION", False)
     fields = {"question": "my ssn is 456-78-9012"}
-    assert security.redact_log_fields(fields) == fields
+    assert await security.redact_log_fields(fields) == fields
 
 
-def test_redaction_replaces_findings_with_info_type(monkeypatch):
+@pytest.mark.asyncio
+async def test_redaction_replaces_findings_with_info_type(monkeypatch):
     monkeypatch.setattr(config, "ENABLE_PII_REDACTION", True)
     monkeypatch.setattr(config, "GCP_PROJECT_ID", "test-project")
 
@@ -88,21 +90,22 @@ def test_redaction_replaces_findings_with_info_type(monkeypatch):
     client.deidentify_content.return_value = response
 
     with patch("app.api.security._get_dlp_client", return_value=client):
-        out = security.redact_log_fields({"question": "my ssn is 456-78-9012"})
+        out = await security.redact_log_fields({"question": "my ssn is 456-78-9012"})
 
     assert out["question"] == "my ssn is [US_SOCIAL_SECURITY_NUMBER]"
     # One API call for the whole log write, not one per field.
     assert client.deidentify_content.call_count == 1
 
 
-def test_redaction_fails_closed(monkeypatch):
+@pytest.mark.asyncio
+async def test_redaction_fails_closed(monkeypatch):
     """The deliberate departure from this codebase's fail-open norm. Falling
     back to the raw text would write exactly the PII this exists to remove."""
     monkeypatch.setattr(config, "ENABLE_PII_REDACTION", True)
     monkeypatch.setattr(config, "GCP_PROJECT_ID", "test-project")
 
     with patch("app.api.security._get_dlp_client", side_effect=RuntimeError("DLP down")):
-        out = security.redact_log_fields({"question": "my ssn is 456-78-9012"})
+        out = await security.redact_log_fields({"question": "my ssn is 456-78-9012"})
 
     assert "456-78-9012" not in out["question"]
     assert out["question"] == "[redaction unavailable]"

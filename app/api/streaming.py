@@ -75,14 +75,15 @@ async def stream_answer(
             latency_ms = int((time.perf_counter() - start) * 1000)
             metrics.record_latency(latency_ms)
             
+            redacted = await security.redact_log_fields({
+                "question": question,
+                "answer": cached_hit["answer"],
+            })
             logger.info(json.dumps({
                 "request_id": request_id,
                 "event": "ask-stream",
                 "cache": "HIT",
-                **security.redact_log_fields({
-                    "question": question,
-                    "answer": cached_hit["answer"],
-                }),
+                **redacted,
                 "similarity_score": cached_hit["similarity_score"],
                 "latency_ms": latency_ms,
                 # Not always zero -- contextualize_question() may have made
@@ -190,14 +191,15 @@ async def stream_answer(
         if not chunks:
             metrics.record_empty_retrieval()
             
+        redacted = await security.redact_log_fields({
+            "question": question,
+            "contextualized_query": contextualized_q,
+            "answer": final_answer,
+        })
         logger.info(json.dumps({
             "request_id": request_id,
             "event": "ask-stream",
-            **security.redact_log_fields({
-                "question": question,
-                "contextualized_query": contextualized_q,
-                "answer": final_answer,
-            }),
+            **redacted,
             "groundedness": groundedness,
             "num_sources": len(sources),
             "latency_ms": latency_ms,

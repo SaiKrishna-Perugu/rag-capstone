@@ -105,7 +105,17 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
-    allow_credentials=True,
+    # No cookie-based auth exists anywhere in this app -- Firebase identity
+    # travels as an `Authorization: Bearer` header (api/auth.py), session
+    # scoping as `X-Session-Id` (both set explicitly by ui.html's fetch()
+    # calls, neither relies on the browser's credentialed-request mode). With
+    # allow_credentials=True, Starlette's CORSMiddleware is spec-required to
+    # echo the request's own Origin back instead of a literal "*" -- so the
+    # default CORS_ORIGINS=* combined with True let any origin make
+    # credentialed cross-origin requests, verified live via curl. False here
+    # keeps the public demo's "*" default honest: unrestricted, but not
+    # credentialed.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -768,6 +778,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, cached_hit["answer"])
         latency_ms = int((time.perf_counter() - start) * 1000)
         metrics.record_latency(latency_ms)
+        redacted = await security.redact_log_fields({
+            "question": body.question,
+            "answer": cached_hit["answer"],
+        })
         logger.info(json.dumps({
             "request_id": request_id,
             "event": "ask",
@@ -776,10 +790,7 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             # data in logs. "anonymous" for unauthenticated visitors.
             "user": getattr(request.state, "identity", auth.ANONYMOUS).log_value,
             "cache": "HIT",
-            **security.redact_log_fields({
-                "question": body.question,
-                "answer": cached_hit["answer"],
-            }),
+            **redacted,
             "similarity_score": cached_hit["similarity_score"],
             "latency_ms": latency_ms,
             # Not always zero: with a session_id, contextualize_question()
@@ -832,15 +843,16 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
         result.answer = security.LEAKED_PROMPT_REPLACEMENT
         result.groundedness = "NOT_CHECKED"
 
+    redacted = await security.redact_log_fields({
+        "question": body.question,
+        "contextualized_query": contextualized_q,
+        "answer": result.answer,
+    })
     logger.info(json.dumps({
         "request_id": request_id,
         "event": "ask",
         "user": getattr(request.state, "identity", auth.ANONYMOUS).log_value,
-        **security.redact_log_fields({
-            "question": body.question,
-            "contextualized_query": contextualized_q,
-            "answer": result.answer,
-        }),
+        **redacted,
         "groundedness": result.groundedness,
         "num_sources": len(result.sources),
         "latency_ms": latency_ms,
@@ -934,14 +946,15 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
             await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, cached_hit["answer"])
         latency_ms = int((time.perf_counter() - start) * 1000)
         metrics.record_latency(latency_ms)
+        redacted = await security.redact_log_fields({
+            "question": body.question,
+            "answer": cached_hit["answer"],
+        })
         logger.info(json.dumps({
             "request_id": request_id,
             "event": "ask-agentic",
             "cache": "HIT",
-            **security.redact_log_fields({
-                "question": body.question,
-                "answer": cached_hit["answer"],
-            }),
+            **redacted,
             "similarity_score": cached_hit["similarity_score"],
             "latency_ms": latency_ms,
             **cost.current().as_log_fields(),
@@ -996,14 +1009,15 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
         final_state["answer"] = security.LEAKED_PROMPT_REPLACEMENT
         final_state["groundedness"] = "NOT_CHECKED"
 
+    redacted = await security.redact_log_fields({
+        "question": body.question,
+        "contextualized_query": contextualized_q,
+        "answer": final_state["answer"],
+    })
     logger.info(json.dumps({
         "request_id": request_id,
         "event": "ask-agentic",
-        **security.redact_log_fields({
-            "question": body.question,
-            "contextualized_query": contextualized_q,
-            "answer": final_state["answer"],
-        }),
+        **redacted,
         "final_query": final_state["current_query"],
         "groundedness": final_state["groundedness"],
         "retries_used": final_state["retry_count"],

@@ -32,6 +32,7 @@ discussing prompt injection is its own failure. ``screen_answer()`` is the
 mitigation that still applies in that case, because it checks the *effect*
 (instructions leaking into output) rather than the input text.
 """
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -143,7 +144,7 @@ def _get_dlp_client():
     return _dlp_client
 
 
-def redact_log_fields(fields: dict[str, str]) -> dict[str, str]:
+async def redact_log_fields(fields: dict[str, str]) -> dict[str, str]:
     """De-identify text headed for the request log, via Cloud DLP.
 
     ``app/main.py`` logs the verbatim question and answer, which on a public
@@ -173,10 +174,19 @@ def redact_log_fields(fields: dict[str, str]) -> dict[str, str]:
 
     One API call per log write regardless of field count: the fields go over
     as a single-row DLP table rather than one request each.
+
+    Async because the actual DLP call is synchronous network I/O
+    (`google-cloud-dlp`'s client has no asyncio variant); it runs via
+    `asyncio.to_thread` so it doesn't block the event loop under
+    concurrency -- six call sites across main.py/streaming.py, one per
+    logged request, all now `await` this.
     """
     if not config.ENABLE_PII_REDACTION or not fields:
         return fields
+    return await asyncio.to_thread(_redact_log_fields_blocking, fields)
 
+
+def _redact_log_fields_blocking(fields: dict[str, str]) -> dict[str, str]:
     keys = list(fields)
     try:
         from google.cloud import dlp_v2
