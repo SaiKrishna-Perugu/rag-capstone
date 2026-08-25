@@ -6,7 +6,7 @@ switching providers a one-line config change (MODEL_PROVIDER in .env)
 instead of a code change scattered across rag.py, agent.py, and eval*.py.
 
 Supported providers:
-  - "groq"     (default) -- uses GROQ_API_KEY, free tier Llama 3.3 70B.
+  - "groq"     (default) -- uses GROQ_API_KEY, free tier gpt-oss-20b.
                 Embeddings via FastEmbed (local ONNX, no API key needed).
   - "vertexai" -- uses GCP_PROJECT_ID / GCP_LOCATION, config.VERTEX_CHAT_MODEL /
                   VERTEX_EMBEDDING_MODEL. Requires `gcloud auth application-default
@@ -98,6 +98,51 @@ class _CostTrackingLLM:
             yield chunk
         if merged is not None:
             self._record(merged)
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+class _CostTrackingEmbeddings:
+    """Thin proxy recording estimated embedding spend, same pattern as
+    _CostTrackingLLM above and wrapping get_embeddings() for the same reason:
+    before this, embedding calls -- the ones /upload's ingestion path makes,
+    at a volume the caller controls -- were invisible to both per-request
+    cost reporting and DAILY_BUDGET_USD (see llm/budget.py; add_usage() is
+    its only feed).
+
+    Unlike chat completions, LangChain's Embeddings interface returns no
+    usage_metadata -- there is no token count to read off the response. Cost
+    here is therefore a character-count estimate (~4 chars/token, the
+    common rough ratio for English text), not an exact one -- consistent
+    with cost.py's documented posture that these figures are for relative
+    budgeting, not accounting; correct it via RAG_PRICE_<MODEL>_IN like any
+    other entry once real Cloud Billing numbers are available. FastEmbed
+    (Groq mode) prices at zero regardless, since it runs locally with no
+    per-call cost to attribute.
+    """
+
+    _CHARS_PER_TOKEN = 4
+
+    def __init__(self, wrapped, model: str):
+        self._wrapped = wrapped
+        self._model = model
+
+    def _record(self, texts: list[str]) -> None:
+        chars = sum(len(t) for t in texts)
+        tokens = chars // self._CHARS_PER_TOKEN
+        usd = cost.add_usage(self._model, tokens, 0, stage="embedding")
+        metrics.record_llm_usage(self._model, tokens, 0, usd)
+
+    def embed_documents(self, texts, *args, **kwargs):
+        result = self._wrapped.embed_documents(texts, *args, **kwargs)
+        self._record(texts)
+        return result
+
+    def embed_query(self, text, *args, **kwargs):
+        result = self._wrapped.embed_query(text, *args, **kwargs)
+        self._record([text])
+        return result
 
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
@@ -335,17 +380,19 @@ def get_embeddings():
         # lightweight local ONNX-based embeddings. No API key, no torch.
         # The model (~33MB) is downloaded once on first run to a local cache.
         from langchain_community.embeddings import FastEmbedEmbeddings
-        return FastEmbedEmbeddings(
+        raw = FastEmbedEmbeddings(
             model_name=config.GROQ_EMBEDDING_MODEL,
             cache_dir=config.FASTEMBED_CACHE_PATH,
         )
+        return _CostTrackingEmbeddings(raw, config.GROQ_EMBEDDING_MODEL)
 
     if config.MODEL_PROVIDER == "vertexai":
         from langchain_google_vertexai import VertexAIEmbeddings
-        return VertexAIEmbeddings(
+        raw = VertexAIEmbeddings(
             model_name=config.VERTEX_EMBEDDING_MODEL,
             project=config.GCP_PROJECT_ID,
             location=config.GCP_LOCATION,
         )
+        return _CostTrackingEmbeddings(raw, config.VERTEX_EMBEDDING_MODEL)
 
     raise ValueError(f"Unknown MODEL_PROVIDER: {config.MODEL_PROVIDER}")

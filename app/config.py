@@ -42,9 +42,12 @@ def _get_secret(secret_name: str, default: str = "") -> str:
             logger.warning(f"Failed to fetch secret {secret_name} from GCP Secret Manager: {e}")
     return default
 
-# --- Groq settings (free tier: Llama 3.3 70B) ------------------------------
+# --- Groq settings (free tier: gpt-oss-20b) ---------------------------------
+# Groq stopped serving any Llama chat model; the old llama-3.3-70b-versatile
+# default 404s. See app/llm/cost.py's pricing table for the matching price
+# row -- changing this without one silently zero-prices every call.
 GROQ_API_KEY = _get_secret("GROQ_API_KEY", "")
-GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-20b")
 # Groq doesn't offer an embeddings API, so when MODEL_PROVIDER=groq we use
 # FastEmbed (local ONNX-based embeddings, no API key, no torch dependency).
 # This model is ~33MB, downloaded once on first run.

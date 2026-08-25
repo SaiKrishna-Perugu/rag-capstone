@@ -30,7 +30,12 @@ from app.llm import budget
 _DEFAULT_PRICING = {
     "gemini-2.5-flash-lite": (0.10, 0.40),
     "gemini-2.5-flash": (0.30, 2.50),
-    "llama-3.3-70b-versatile": (0.59, 0.79),
+    "openai/gpt-oss-20b": (0.075, 0.30),
+    # Embedding models: input-only (output side is always 0, see
+    # llm/providers.py::_CostTrackingEmbeddings). FastEmbed models are
+    # absent here on purpose -- they run locally, so $0 is the correct
+    # price, not an unpriced gap.
+    "text-embedding-005": (0.10, 0.0),
 }
 
 
