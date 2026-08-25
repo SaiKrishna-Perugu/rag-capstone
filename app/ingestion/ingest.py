@@ -267,9 +267,20 @@ def print_summary(summary: dict) -> None:
 
 
 if __name__ == "__main__":
-    force = "--force" in sys.argv
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Incrementally (re-)ingest DOCS_DIR into the vector store."
+    )
+    parser.add_argument(
+        "--force", "-f", action="store_true",
+        help="Re-embed every file regardless of content hash "
+             "(e.g. after switching MODEL_PROVIDER).",
+    )
+    args = parser.parse_args()
+
     try:
-        summary = run(force=force)
+        summary = run(force=args.force)
         print_summary(summary)
         if summary["failed"] and not (summary["added"] or summary["updated"]):
             sys.exit(1)  # every file failed -- treat as a hard failure
