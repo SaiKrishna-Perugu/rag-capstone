@@ -79,8 +79,12 @@ jobs:
         with:
           python-version: "3.13"
 
+      # --group eval pulls in ragas + datasets (~249MB), kept out of the
+      # default sync so the Cloud Run image (Dockerfile's plain `uv sync
+      # --frozen`) doesn't ship eval-only deps. This is the one workflow
+      # that actually runs eval_ragas.py.
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --group eval
 
       # Ingests this repo's own docs/ into the ephemeral Postgres above --
       # eval_ragas.py's EVAL_SET is written against exactly those files.
