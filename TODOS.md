@@ -7,11 +7,6 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Open
 
-- **Firebase authorized-domains assumes one hostname.** Cloud Run serves
-  each service under two hostnames (legacy `*-uc.a.run.app` and newer
-  `*.<region>.run.app`, see CLAUDE.md's Deployment section) but the Firebase
-  Auth console's authorized-domains list may only have one of them. Needs a
-  check in the Firebase console — not fixable from this repo.
 - **`DAILY_BUDGET_USD` ships disabled (`0`).** Deliberately not set this
   session — `/metrics` is per-process and pull-only, so a real ceiling needs
   a number pulled from the Cloud Billing report, not guessed. When it is
@@ -63,6 +58,16 @@ Keep entries short; link to the commit or review doc that has the detail.
   emails the repo owner/watchers by default) if it doesn't answer. Chosen
   over Cloud Scheduler + Cloud Monitoring specifically because it needs no
   GCP setup beyond this file.
+- **Firebase authorized-domains assumes one hostname — checked, not
+  currently live.** Neither `cloudrun-*.yaml` sets `FIREBASE_WEB_API_KEY`/
+  `FIREBASE_AUTH_DOMAIN` in production or staging, and `main.py`'s `/config`
+  deliberately blanks `firebase.project_id` whenever `FIREBASE_WEB_API_KEY`
+  is unset (see `app/config.py`) specifically so `ui.html` hides sign-in
+  rather than show a button that can't work. No client-side Firebase flow
+  runs today, so the authorized-domains list has nothing to be wrong
+  about yet. Revisit this the day Firebase sign-in is actually turned on
+  (both hostnames will need to be in the console's authorized-domains list
+  at that point, not just the canonical one).
 - `AGENTS.md` — was untracked; now committed, same footing as `CLAUDE.md`.
 - `DEMO.md` — confirmed intentionally untracked per CLAUDE.md's repository
   voice rule (job-search/presentation material stays out of git). Not a
