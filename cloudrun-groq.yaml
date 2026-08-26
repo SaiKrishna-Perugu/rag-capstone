@@ -75,6 +75,24 @@ spec:
         # figure relates to the project's separate Cloud Billing budget.
         - name: DAILY_BUDGET_USD
           value: "0.25"
+        # The abuse bounds on /upload, all four of them, matching the
+        # vertexai configs. None were declared here at all, so a deploy from
+        # this file would have taken config.py's defaults: 50MB x 5 files
+        # (a 250MB request) and MAX_CORPUS_CHUNKS=0, meaning no corpus
+        # ceiling whatsoever. The upload caps are the pair the 08-22 review
+        # named; the corpus caps are the same defect in the same group, and
+        # fixing only the named two is how this class has been declared
+        # closed twice already without being closed.
+        - name: MAX_UPLOAD_FILES
+          value: "3"
+        - name: MAX_UPLOAD_SIZE_MB
+          value: "2"
+        - name: RATE_LIMIT
+          value: "10/minute"
+        - name: MAX_CORPUS_CHUNKS
+          value: "3000"
+        - name: MAX_SESSION_CHUNKS
+          value: "300"
         # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
         # Run instances have independent disks, so a Cloud Task can land on the
         # instance that never received the upload; staging in GCS removes that

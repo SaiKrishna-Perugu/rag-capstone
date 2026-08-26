@@ -104,6 +104,25 @@ spec:
         # against a fresh database.
         - name: EMBEDDING_DIMENSION
           value: '768'
+        # The two per-request upload bounds, checked before anything is
+        # written. Both were imperative-only until now, and the code
+        # defaults they fall back to are not demo-safe: 50MB x 5 files is a
+        # 250MB request on an endpoint anonymous visitors can reach. So a
+        # `gcloud run services replace` with these absent did not merely
+        # lose a setting, it raised the per-file ceiling 25x while
+        # reporting success. Staging demonstrated exactly that -- it was
+        # running on the code defaults, not on 2MB/3 files, because nobody
+        # re-ran the imperative update after its last replace.
+        - name: MAX_UPLOAD_FILES
+          value: '3'
+        - name: MAX_UPLOAD_SIZE_MB
+          value: '2'
+        # Matches the config.py default rather than changing it; declared
+        # so it survives a replace, since the fallback for an abuse control
+        # should never be silence. Per-IP and in-process, so maxScale above
+        # is the real multiplier -- at maxScale 2 this is up to 20/minute.
+        - name: RATE_LIMIT
+          value: '10/minute'
         # Ceiling on TOTAL indexed chunks; /upload returns 507 once reached.
         # Declared here rather than only set imperatively -- it was the
         # latter, which is precisely how staging ended up uncapped (unset =

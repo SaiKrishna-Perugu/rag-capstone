@@ -75,6 +75,21 @@ spec:
         # raised for staging traffic.
         - name: DAILY_BUDGET_USD
           value: "0.25"
+        # Same abuse bounds as production's cloudrun-groq.yaml, and same
+        # reason they are all declared rather than left to config.py: an
+        # undeclared bound falls back to a demo-unsafe default (50MB x 5
+        # files, and no corpus ceiling at all), which is not a setting to
+        # lose quietly on a `services replace`.
+        - name: MAX_UPLOAD_FILES
+          value: "3"
+        - name: MAX_UPLOAD_SIZE_MB
+          value: "2"
+        - name: RATE_LIMIT
+          value: "10/minute"
+        - name: MAX_CORPUS_CHUNKS
+          value: "3000"
+        - name: MAX_SESSION_CHUNKS
+          value: "300"
         # Deliberately shared with production: Firestore Native mode is
         # one database per GCP project by default, so conversation memory
         # (conversation_sessions) and job tracking (ingest_jobs) aren't

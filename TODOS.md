@@ -22,6 +22,17 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Resolved
 
+- **Upload/rate abuse bounds were imperative-only in every Cloud Run YAML.**
+  `MAX_UPLOAD_FILES`, `MAX_UPLOAD_SIZE_MB` and `RATE_LIMIT` were declared in
+  0 of 4 configs, so a `gcloud run services replace` dropped them to
+  `config.py`'s defaults — 50MB x 5 files, a 250MB request on an endpoint
+  anonymous visitors reach. Not hypothetical: **live staging was already in
+  that state**, running the code defaults rather than 2MB x 3, because the
+  imperative update was never re-run after its last replace. All four YAMLs
+  now declare them (plus `MAX_CORPUS_CHUNKS`/`MAX_SESSION_CHUNKS`, absent
+  entirely from both groq configs — same defect, same group), and both live
+  services were updated to match. Verified via `/config` on each.
+
 - CORS reflected any origin with credentials on — closed by turning off
   `allow_credentials` (nothing in this app uses cookie-based auth). See
   `app/main.py`.

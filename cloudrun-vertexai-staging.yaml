@@ -75,10 +75,22 @@ spec:
         # make the deployed value explicit and reviewable.
         - name: EMBEDDING_DIMENSION
           value: "768"
-        # Same caps as production, deliberately. Left unset, MAX_CORPUS_CHUNKS
-        # defaults to 0 (disabled) and staging silently stops being able to
-        # reproduce production's 507-when-full behaviour -- which is most of
-        # the reason staging exists.
+        # Same caps as production, deliberately -- staging exists to
+        # reproduce production's behaviour, and an upload path that accepts
+        # 25x larger files than production tests nothing useful. These were
+        # imperative-only and the live staging service had lost them: it was
+        # running on config.py's 50MB x 5 files, not on 2MB x 3, because the
+        # imperative update was never re-run after its last replace. That is
+        # the drift this file exists to prevent, caught in the act.
+        - name: MAX_UPLOAD_FILES
+          value: "3"
+        - name: MAX_UPLOAD_SIZE_MB
+          value: "2"
+        - name: RATE_LIMIT
+          value: "10/minute"
+        # Left unset, MAX_CORPUS_CHUNKS defaults to 0 (disabled) and staging
+        # silently stops being able to reproduce production's 507-when-full
+        # behaviour -- which is most of the reason staging exists.
         - name: MAX_CORPUS_CHUNKS
           value: "3000"
         - name: MAX_SESSION_CHUNKS
