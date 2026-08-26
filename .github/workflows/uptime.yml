@@ -1,0 +1,30 @@
+name: Demo Uptime Check
+
+# Nothing else pings the demo URL that README/DEMO.md hand out, so an outage
+# reads as silence rather than an alert -- see TODOS.md. This hits /health
+# (pure liveness probe, no dependency checks, see app/main.py) on a schedule
+# and fails the run if it doesn't answer, which GitHub emails to the repo
+# owner/watchers by default. Cheap and dependency-free on purpose: no GCP
+# Monitoring/Scheduler setup required, just this file.
+#
+# Targets the legacy `*-uc.a.run.app` hostname deliberately, not the newer
+# `*.<region>.run.app` one -- see CLAUDE.md's Deployment section: the two
+# DNS zones resolve independently, and the newer zone has been observed
+# going REFUSED for hours at a time while the legacy one stayed up. That's
+# also the hostname README/DEMO.md actually advertise.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /health
+        run: |
+          curl --fail --silent --show-error \
+            --retry 3 --retry-delay 5 --retry-connrefused \
+            --max-time 30 \
+            https://rag-capstone-jjinz2egfq-uc.a.run.app/health

@@ -12,10 +12,6 @@ Keep entries short; link to the commit or review doc that has the detail.
   `*.<region>.run.app`, see CLAUDE.md's Deployment section) but the Firebase
   Auth console's authorized-domains list may only have one of them. Needs a
   check in the Firebase console — not fixable from this repo.
-- **Nothing checks the advertised demo URL is alive.** No uptime check, no
-  alert. Candidate: a Cloud Scheduler job hitting `/health` plus a Cloud
-  Monitoring alerting policy, or a scheduled GitHub Action as a cheaper
-  alternative.
 - **`DAILY_BUDGET_USD` ships disabled (`0`).** Deliberately not set this
   session — `/metrics` is per-process and pull-only, so a real ceiling needs
   a number pulled from the Cloud Billing report, not guessed. When it is
@@ -61,6 +57,12 @@ Keep entries short; link to the commit or review doc that has the detail.
 - `.github/codeql/` — untracked, unwired to any workflow. Deleted rather
   than wired up (decision made 2026-08-24; revisit if CodeQL scanning is
   wanted later, it'd need a `codeql.yml` workflow authored from scratch).
+- **Nothing checked the advertised demo URL is alive.** Added
+  `.github/workflows/uptime.yml`: a scheduled Action hits `/health` on the
+  canonical `*-uc.a.run.app` hostname every 15 minutes and fails (GitHub
+  emails the repo owner/watchers by default) if it doesn't answer. Chosen
+  over Cloud Scheduler + Cloud Monitoring specifically because it needs no
+  GCP setup beyond this file.
 - `AGENTS.md` — was untracked; now committed, same footing as `CLAUDE.md`.
 - `DEMO.md` — confirmed intentionally untracked per CLAUDE.md's repository
   voice rule (job-search/presentation material stays out of git). Not a
