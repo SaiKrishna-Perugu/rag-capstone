@@ -114,6 +114,19 @@ spec:
         # MAX_CORPUS_CHUNKS budget and lock everyone else out.
         - name: MAX_SESSION_CHUNKS
           value: '300'
+        # Ceiling on estimated daily LLM+embedding spend (app/llm/budget.py,
+        # app/llm/cost.py); 0 disables it, which is how this shipped before.
+        # 0.25 leaves headroom under the project's separate Cloud Billing
+        # budget ("rag-capstone monthly guard", ~$0.70/day total across
+        # Cloud Run/Cloud SQL/Firestore/everything) for the parts of that
+        # total this ceiling doesn't cover. Declared here, not only via
+        # `gcloud run services update` -- imperative-only is the exact
+        # pattern that dropped MAX_CORPUS_CHUNKS/upload caps/
+        # ENABLE_PII_REDACTION from this file before. State is per-process
+        # (see budget.py), so the real ceiling is roughly this times
+        # maxScale.
+        - name: DAILY_BUDGET_USD
+          value: '0.25'
         # PUBLIC DEMO NOTE: the live production service intentionally runs
         # WITHOUT this secret and WITH ENABLE_UPLOADS=true -- anyone with the
         # URL can ask questions AND upload, bounded by the caps above rather

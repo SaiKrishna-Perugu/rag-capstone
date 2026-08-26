@@ -83,6 +83,12 @@ spec:
           value: "3000"
         - name: MAX_SESSION_CHUNKS
           value: "300"
+        # Same reasoning as production's cloudrun-vertexai.yaml: 0 (disabled)
+        # is how this shipped before. Staging shares the project's single
+        # Cloud Billing budget with production, so this is deliberately not
+        # raised for staging traffic.
+        - name: DAILY_BUDGET_USD
+          value: "0.25"
         - name: OTEL_GCP_EXPORT
           value: "true"
         # Durable staging for uploaded files (app/ingestion/storage.py). Cloud

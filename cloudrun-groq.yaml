@@ -69,6 +69,12 @@ spec:
           value: "YOUR_PROJECT_ID"
         - name: OTEL_GCP_EXPORT
           value: "true"
+        # Ceiling on estimated daily LLM+embedding spend (app/llm/budget.py,
+        # app/llm/cost.py); 0 disables it, which is how this shipped before.
+        # See cloudrun-vertexai.yaml's DAILY_BUDGET_USD comment for how this
+        # figure relates to the project's separate Cloud Billing budget.
+        - name: DAILY_BUDGET_USD
+          value: "0.25"
         # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
         # Run instances have independent disks, so a Cloud Task can land on the
         # instance that never received the upload; staging in GCS removes that

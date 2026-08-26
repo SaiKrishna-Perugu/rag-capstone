@@ -69,6 +69,12 @@ spec:
           value: "YOUR_PROJECT_ID"
         - name: OTEL_GCP_EXPORT
           value: "true"
+        # Same reasoning as production's cloudrun-groq.yaml: 0 (disabled)
+        # is how this shipped before. Staging shares the project's single
+        # Cloud Billing budget with production, so this is deliberately not
+        # raised for staging traffic.
+        - name: DAILY_BUDGET_USD
+          value: "0.25"
         # Deliberately shared with production: Firestore Native mode is
         # one database per GCP project by default, so conversation memory
         # (conversation_sessions) and job tracking (ingest_jobs) aren't

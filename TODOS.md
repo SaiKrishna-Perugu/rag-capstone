@@ -7,13 +7,8 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Open
 
-- **`DAILY_BUDGET_USD` ships disabled (`0`).** Deliberately not set this
-  session — `/metrics` is per-process and pull-only, so a real ceiling needs
-  a number pulled from the Cloud Billing report, not guessed. When it is
-  set: put it in the `cloudrun-*.yaml` files, not just `gcloud run services
-  update` — an imperative-only value resets on the next
-  `gcloud run services replace` (see `UPLOAD_BUCKET`'s commit for the same
-  pattern already fixed once).
+(nothing currently open from the 08-22 review)
+
 ## Watch for (coupling traps, not action items)
 
 - Changing `GROQ_CHAT_MODEL` without adding a matching row to
@@ -68,6 +63,16 @@ Keep entries short; link to the commit or review doc that has the detail.
   about yet. Revisit this the day Firebase sign-in is actually turned on
   (both hostnames will need to be in the console's authorized-domains list
   at that point, not just the canonical one).
+- **`DAILY_BUDGET_USD` ships disabled (`0`).** Set to `0.25` in all four
+  `cloudrun-*.yaml` files and applied live to both production and staging
+  via `gcloud run services update` (cd.yml deploys by image tag only and
+  never applies the YAML, so the YAML edit alone wouldn't have taken
+  effect). Figure grounded in the project's real Cloud Billing budget —
+  found an existing "rag-capstone monthly guard" of ₹2000/month
+  (≈$0.70/day total at the time, across the whole project) and picked
+  $0.25/day for the LLM+embedding slice specifically, leaving headroom for
+  the rest. Enabling the Cloud Billing API to read that budget was itself
+  a one-time step (`gcloud services enable cloudbilling.googleapis.com`).
 - `AGENTS.md` — was untracked; now committed, same footing as `CLAUDE.md`.
 - `DEMO.md` — confirmed intentionally untracked per CLAUDE.md's repository
   voice rule (job-search/presentation material stays out of git). Not a
