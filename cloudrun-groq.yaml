@@ -62,7 +62,7 @@ spec:
         - name: MODEL_PROVIDER
           value: "groq"
         # Needed even on the Groq path now -- Firestore (conversation
-        # memory, app/memory.py) and the Cloud Monitoring metrics export
+        # memory, app/retrieval/memory.py) and the Cloud Monitoring metrics export
         # both require a project ID regardless of which LLM provider is
         # in use.
         - name: GCP_PROJECT_ID

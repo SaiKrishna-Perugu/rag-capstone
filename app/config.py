@@ -157,11 +157,19 @@ CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
 # real quota. See maxScale in the Cloud Run YAMLs for why that matters.
 RATE_LIMIT = os.getenv("RATE_LIMIT", "10/minute")
 ENABLE_UPLOADS = os.getenv("ENABLE_UPLOADS", "true").lower() == "true"
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+# These two are the ANONYMOUS ceilings, and the defaults deliberately match
+# what production runs rather than being generous. They were 50MB and 5
+# files, which was wrong twice over: 50x5 is a 250MB request on an endpoint
+# anonymous visitors reach, and 50 was larger than the signed-in ceiling
+# below, so signing in *lowered* what you could upload. A default is what a
+# deployment falls back to when its env var is missing -- which has already
+# happened on this project -- so it has to be the safe value, not the
+# permissive one.
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "2"))
 # Number of files accepted per /upload request. The per-file size cap
 # above says nothing about how MANY files arrive, so without this a single
 # request could carry hundreds of small ones.
-MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "5"))
+MAX_UPLOAD_FILES = int(os.getenv("MAX_UPLOAD_FILES", "3"))
 # Ceiling on total indexed chunks, enforced before accepting an upload.
 # 0 disables it. This exists because an openly-writable demo corpus grows
 # without bound, and corpus bloat is not merely a storage cost -- retrieval
@@ -193,7 +201,9 @@ FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "") or GCP_PROJECT_ID
 FIREBASE_WEB_API_KEY = os.getenv("FIREBASE_WEB_API_KEY", "")
 FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN", "")
 # Raised ceilings for signed-in callers. Anonymous visitors keep the limits
-# above, so the demo stays usable without an account.
+# above, so the demo stays usable without an account. These must stay >= the
+# anonymous values or signing in becomes a downgrade; auth.upload_limits()
+# enforces that as a floor rather than trusting whoever sets the env vars.
 MAX_UPLOAD_FILES_AUTHED = int(os.getenv("MAX_UPLOAD_FILES_AUTHED", "10"))
 MAX_UPLOAD_SIZE_MB_AUTHED = int(os.getenv("MAX_UPLOAD_SIZE_MB_AUTHED", "10"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))

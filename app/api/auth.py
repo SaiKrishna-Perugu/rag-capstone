@@ -104,7 +104,19 @@ def upload_limits(identity: Identity) -> tuple[int, int]:
 
     Signing in raises the ceiling rather than being what grants access at
     all -- anonymous visitors can still upload, just less.
+
+    The authed values are floored at the anonymous ones instead of being
+    returned as configured. This used to be a plain swap, and the shipped
+    defaults were 50MB anonymous against 10MB authed -- so signing in cut
+    the per-file ceiling to a fifth, under a docstring promising the
+    opposite. Since all four values are independently settable by env, the
+    same inversion is one careless MAX_UPLOAD_SIZE_MB= away from returning;
+    max() makes "authenticated is never worse off" a property of the code
+    rather than of whoever last edited the config.
     """
     if identity.is_authenticated:
-        return config.MAX_UPLOAD_FILES_AUTHED, config.MAX_UPLOAD_SIZE_MB_AUTHED
+        return (
+            max(config.MAX_UPLOAD_FILES_AUTHED, config.MAX_UPLOAD_FILES),
+            max(config.MAX_UPLOAD_SIZE_MB_AUTHED, config.MAX_UPLOAD_SIZE_MB),
+        )
     return config.MAX_UPLOAD_FILES, config.MAX_UPLOAD_SIZE_MB

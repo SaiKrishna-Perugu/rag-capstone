@@ -66,3 +66,30 @@ def test_upload_limits_raise_when_authenticated(monkeypatch):
 
     assert auth.upload_limits(auth.ANONYMOUS) == (3, 2)
     assert auth.upload_limits(auth.Identity(uid="u1")) == (10, 10)
+
+
+def test_shipped_defaults_do_not_demote_authenticated_callers():
+    """Deliberately reads the real config rather than monkeypatching it.
+
+    The test above pins all four values first, so it asserted the intended
+    configuration and never the shipped one -- which is exactly how the
+    defaults sat inverted (50MB anonymous vs 10MB authed) under a green
+    suite. Whatever this module actually ships with has to satisfy the
+    contract too.
+    """
+    anon_files, anon_mb = auth.upload_limits(auth.ANONYMOUS)
+    authed_files, authed_mb = auth.upload_limits(auth.Identity(uid="u1"))
+
+    assert authed_files >= anon_files
+    assert authed_mb >= anon_mb
+
+
+def test_authenticated_is_never_worse_off_under_inverted_config(monkeypatch):
+    """An operator setting only MAX_UPLOAD_SIZE_MB must not silently demote
+    signed-in callers -- the floor is enforced in code, not in the config."""
+    monkeypatch.setattr(config, "MAX_UPLOAD_FILES", 20)
+    monkeypatch.setattr(config, "MAX_UPLOAD_SIZE_MB", 50)
+    monkeypatch.setattr(config, "MAX_UPLOAD_FILES_AUTHED", 10)
+    monkeypatch.setattr(config, "MAX_UPLOAD_SIZE_MB_AUTHED", 10)
+
+    assert auth.upload_limits(auth.Identity(uid="u1")) == (20, 50)

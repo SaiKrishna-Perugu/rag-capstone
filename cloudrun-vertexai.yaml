@@ -62,7 +62,7 @@ spec:
         - name: MODEL_PROVIDER
           value: 'vertexai'
         # Required by app/config.py for MODEL_PROVIDER=vertexai, and also
-        # by Firestore (conversation memory, app/memory.py) and the Cloud
+        # by Firestore (conversation memory, app/retrieval/memory.py) and the Cloud
         # Monitoring metrics export below.
         - name: GCP_PROJECT_ID
           value: 'YOUR_PROJECT_ID'
@@ -100,7 +100,7 @@ spec:
           value: 'https://REPLACE-WITH-SERVICE-URL.run.app'
         # text-embedding-005 is 768-dim, vs. FastEmbed/Groq's 384 -- this
         # sets the VECTOR(N) column width on first schema creation (see
-        # app/database.py init_db()); must be set before the first ingest
+        # app/db/database.py init_db()); must be set before the first ingest
         # against a fresh database.
         - name: EMBEDDING_DIMENSION
           value: '768'
