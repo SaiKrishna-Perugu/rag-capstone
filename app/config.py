@@ -156,6 +156,12 @@ CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
 # limiter is per-IP and in-process, so it is a speed bump rather than a
 # real quota. See maxScale in the Cloud Run YAMLs for why that matters.
 RATE_LIMIT = os.getenv("RATE_LIMIT", "10/minute")
+# Warm the embeddings/LLM clients on a background thread at startup, so the
+# first real request doesn't pay for credential acquisition and the first
+# connection (measured at ~20s on the live service). Off is the right
+# setting for `uvicorn --reload`, where every code edit would otherwise fire
+# a fresh embedding call. See main.py::_warm_providers.
+ENABLE_STARTUP_WARMUP = os.getenv("ENABLE_STARTUP_WARMUP", "true").lower() == "true"
 ENABLE_UPLOADS = os.getenv("ENABLE_UPLOADS", "true").lower() == "true"
 # These two are the ANONYMOUS ceilings, and the defaults deliberately match
 # what production runs rather than being generous. They were 50MB and 5

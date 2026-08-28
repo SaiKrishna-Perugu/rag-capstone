@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -59,11 +60,56 @@ logger.addHandler(_handler)
 logger.addHandler(logging.StreamHandler())  # also print to console
 
 
+def _warm_providers() -> None:
+    """Force the lazy provider setup that the first /ask would otherwise pay for.
+
+    Measured on the live service: `/health` answered in 0.35s while the very
+    next `/ask` took 20.6s, and every request after it was under 0.7s --
+    including a cache-missing question through the full three-call pipeline.
+    So the latency that looked like a container cold start was mostly lazy
+    initialisation: `get_embeddings()` is `lru_cache`d and builds its client,
+    acquires application-default credentials and opens a connection on first
+    use, not at import. `init_db()` already warms the database pool at
+    startup; this covers the other half.
+
+    A real `embed_query` is used rather than just constructing the client,
+    because the credential handshake and first round trip are the expensive
+    part. It is one embedding of one short string -- and now that
+    `_CostTrackingEmbeddings` exists it is a metered call, so keep it short.
+    Constructing `get_llm()` shares the credential work; it is deliberately
+    NOT invoked, since a chat call per container start would be real tokens
+    on every scale-up for a latency win the embedding call already gets.
+
+    Fails open, like everything else off the request path: an unreachable
+    provider here must degrade to the old lazy behaviour, never stop the
+    service from starting.
+    """
+    from app.llm.providers import get_embeddings, get_llm
+
+    try:
+        get_embeddings().embed_query("warmup")
+    except Exception as exc:
+        logger.warning(f"Provider warmup (embeddings) failed, falling back to lazy init: {exc}")
+    try:
+        get_llm()
+    except Exception as exc:
+        logger.warning(f"Provider warmup (llm) failed, falling back to lazy init: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init DB schema, clean uploaded files. Shutdown: close DB pool."""
+    """Startup: init DB schema, clean uploaded files, warm providers.
+    Shutdown: close DB pool."""
     # Initialise database schema (idempotent — safe on every cold start)
     database.init_db()
+
+    # Warm on a background thread rather than inline: the startup probe
+    # allows roughly 32s (initialDelay 2 + 3 x period 10) and the work here
+    # is a network round trip of unbounded duration, so blocking readiness
+    # on it trades a slow first request for a failed deploy. Daemon, so it
+    # can never hold shutdown open.
+    if config.ENABLE_STARTUP_WARMUP:
+        threading.Thread(target=_warm_providers, name="provider-warmup", daemon=True).start()
 
     # Only clear the dedicated uploads/ subdirectory, not all of docs_dir --
     # docs_dir also holds permanent, non-upload content (the sample_*
