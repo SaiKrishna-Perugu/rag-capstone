@@ -7,7 +7,14 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Open
 
-(nothing currently open from the 08-22 review)
+- **Cold start on the public URL (~25s to first answer).** Never re-measured
+  since the runtime image lost ~249MB of eval-only deps, so the current
+  number is unknown rather than known-bad. `minScale: 0` is the deliberate
+  cause (cost), and `startup-cpu-boost` is already on. Measure before
+  changing anything.
+- **The demo runs on a 90-day GCP trial.** Credit expiry is the likeliest
+  cause of a dead demo link, and no code change addresses it. Billing
+  decision, not an engineering one.
 
 ## Watch for (coupling traps, not action items)
 
@@ -22,6 +29,23 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Resolved
 
+- **Signing in lowered the upload ceiling.** `upload_limits()` swapped
+  between anon and authed config values with no floor, and the shipped
+  defaults were 50MB anon vs 10MB authed. Defaults are now 2MB/3 files
+  (matching production), and the authed values are floored at the anonymous
+  ones in code so the inversion can't return via a single env var. See
+  `7dcb54d`.
+- **Nine dead `app/*.py` paths** left over from `ebf0b35`'s package
+  reorganisation — 7 in `.env.example`, 2 in the Cloud Run YAMLs that the
+  review itself missed. `tests/test_doc_paths.py` now fails on any
+  unresolvable `app/...py` reference outside `notes/`.
+- **A failed upload becoming a permanent public document** — verified
+  closed, not assumed. The local-disk path is guarded in `ingest.run()`'s
+  ownership gate and covered by
+  `test_ingest_refuses_an_upload_with_no_owning_session`. The production
+  path stages to GCS, which `ingest.run()` never globs, on a bucket with
+  public access prevention enforced and a 7-day delete rule (both confirmed
+  live via `gcloud storage buckets describe`).
 - **Upload/rate abuse bounds were imperative-only in every Cloud Run YAML.**
   `MAX_UPLOAD_FILES`, `MAX_UPLOAD_SIZE_MB` and `RATE_LIMIT` were declared in
   0 of 4 configs, so a `gcloud run services replace` dropped them to
