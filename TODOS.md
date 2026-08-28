@@ -7,16 +7,18 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Open
 
-- **`startup-cpu-boost` is declared in `cloudrun-vertexai.yaml` but is NOT on
-  the live production service.** Confirmed by reading the live template
-  annotations, which carry only `maxScale` / `targetBurstCapacity` /
-  `cloudsql-instances`. The 08-22 review recorded this as already done, on
-  the strength of the YAML line — the same YAML-vs-live mistake it flagged
-  elsewhere. The live service also runs `containerConcurrency: 80` where
-  this YAML says 10, which suggests the vertexai YAML has never been
-  applied and the service is still carrying its original groq-shaped
-  template. To turn the boost on:
-  `gcloud run services update rag-capstone --region=us-central1 --cpu-boost`
+- **`cloudrun-vertexai.yaml` appears never to have been applied to the live
+  production service.** Live runs `containerConcurrency: 80` where that file
+  says 10, and until 2026-08-29 it was also missing the file's
+  `startup-cpu-boost`. The shape of the live template (concurrency 80,
+  `targetBurstCapacity: 100`, no `launch-stage`) is the *groq* config's, with
+  vertexai env vars layered on imperatively — consistent with the service
+  having been created from `cloudrun-groq.yaml` and never re-declared since.
+  Nothing is broken today, and `cd.yml` deploys by image tag so it never
+  touches this. It matters because the next `gcloud run services replace`
+  against the vertexai file will change more than whoever runs it expects.
+  Worth reconciling file-to-live deliberately rather than discovering it
+  during a deploy.
 - **GCP free-trial credits lapse around 2026-11-10** ($300 / 90 days;
   project created 2026-08-12). Credit expiry is the likeliest cause of a
   dead demo link, and no code change prevents it — it needs a billing
@@ -46,9 +48,13 @@ Keep entries short; link to the commit or review doc that has the detail.
   `/health` that fast is already up; the cost was lazy provider init —
   `get_embeddings()` building its client, acquiring credentials and opening
   a connection on first use. `lifespan` now warms it on a background thread
-  (`ENABLE_STARTUP_WARMUP`, default true). See `f7f7597`. What remains of
-  genuine container start is bounded by `startup-cpu-boost`, which is
-  listed as Open above because it is not actually enabled live.
+  (`ENABLE_STARTUP_WARMUP`, default true). See `f7f7597`.
+- **`startup-cpu-boost` was declared in `cloudrun-vertexai.yaml` but not
+  actually enabled on the live service** — the 08-22 review marked it done
+  from the YAML line without checking the running config. Enabled
+  2026-08-29 (revision `rag-capstone-00064-xh9`); live annotations now
+  carry `run.googleapis.com/startup-cpu-boost: "true"`. The broader
+  file-vs-live divergence it exposed is listed under Open.
 - **Signing in lowered the upload ceiling.** `upload_limits()` swapped
   between anon and authed config values with no floor, and the shipped
   defaults were 50MB anon vs 10MB authed. Defaults are now 2MB/3 files
