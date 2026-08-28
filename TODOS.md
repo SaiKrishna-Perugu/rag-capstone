@@ -7,14 +7,24 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Open
 
-- **Cold start on the public URL (~25s to first answer).** Never re-measured
-  since the runtime image lost ~249MB of eval-only deps, so the current
-  number is unknown rather than known-bad. `minScale: 0` is the deliberate
-  cause (cost), and `startup-cpu-boost` is already on. Measure before
-  changing anything.
-- **The demo runs on a 90-day GCP trial.** Credit expiry is the likeliest
-  cause of a dead demo link, and no code change addresses it. Billing
-  decision, not an engineering one.
+- **`startup-cpu-boost` is declared in `cloudrun-vertexai.yaml` but is NOT on
+  the live production service.** Confirmed by reading the live template
+  annotations, which carry only `maxScale` / `targetBurstCapacity` /
+  `cloudsql-instances`. The 08-22 review recorded this as already done, on
+  the strength of the YAML line — the same YAML-vs-live mistake it flagged
+  elsewhere. The live service also runs `containerConcurrency: 80` where
+  this YAML says 10, which suggests the vertexai YAML has never been
+  applied and the service is still carrying its original groq-shaped
+  template. To turn the boost on:
+  `gcloud run services update rag-capstone --region=us-central1 --cpu-boost`
+- **GCP free-trial credits lapse around 2026-11-10** ($300 / 90 days;
+  project created 2026-08-12). Credit expiry is the likeliest cause of a
+  dead demo link, and no code change prevents it — it needs a billing
+  decision (upgrade to a paid account, or accept the demo has an end date).
+  It is at least no longer *silent*: the uptime check added in `6bae1bd`
+  fails and emails on the next 15-minute tick once the service stops
+  answering. Whether the account has already been upgraded is not
+  determinable from the billing API — check the Cloud Console.
 
 ## Watch for (coupling traps, not action items)
 
@@ -29,6 +39,16 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Resolved
 
+- **"Cold start ~25s to first answer" — measured, and it was mostly not
+  cold start.** On the live service `/health` answered in 0.35s, the next
+  `/ask` took 20.6s, and everything after was under 0.7s (including a novel
+  question through the full three-call pipeline). A container serving
+  `/health` that fast is already up; the cost was lazy provider init —
+  `get_embeddings()` building its client, acquiring credentials and opening
+  a connection on first use. `lifespan` now warms it on a background thread
+  (`ENABLE_STARTUP_WARMUP`, default true). See `f7f7597`. What remains of
+  genuine container start is bounded by `startup-cpu-boost`, which is
+  listed as Open above because it is not actually enabled live.
 - **Signing in lowered the upload ceiling.** `upload_limits()` swapped
   between anon and authed config values with no floor, and the shipped
   defaults were 50MB anon vs 10MB authed. Defaults are now 2MB/3 files
