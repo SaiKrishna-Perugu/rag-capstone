@@ -188,6 +188,30 @@ spec:
         # MAX_CORPUS_CHUNKS budget and lock everyone else out.
         - name: MAX_SESSION_CHUNKS
           value: '300'
+        # Optional Firebase sign-in (app/api/auth.py). Additive, never a gate:
+        # signing in only raises the upload ceiling to
+        # MAX_UPLOAD_FILES_AUTHED/MAX_UPLOAD_SIZE_MB_AUTHED. Anonymous access
+        # is unaffected, so this cannot lock a visitor out.
+        #
+        # The web API key is a public identifier, not a credential -- it is
+        # served to every browser by GET /config and is meant to be. Access is
+        # controlled by Firebase authorized domains and security rules, not by
+        # keeping this string secret, so it belongs in the file rather than
+        # Secret Manager.
+        #
+        # These two must be REAL values or absent -- never placeholders.
+        # ui.html's initFirebase() bails only on an *empty* api_key, so a
+        # placeholder is truthy: it loads the Firebase SDK and renders a
+        # sign-in button that cannot work. Blank is the safe state.
+        #
+        # Deliberately not mirrored into cloudrun-vertexai-staging.yaml: only
+        # the two production hostnames are in Firebase's authorized-domains
+        # list, so a signed-in flow on the staging host would fail the domain
+        # check. Add the staging hostname there first if you want it.
+        - name: FIREBASE_WEB_API_KEY
+          value: 'AIzaSyDmdJd0yAO7lr3R-WTHzWx_-rfKscxcfdE'
+        - name: FIREBASE_AUTH_DOMAIN
+          value: 'hybrid-rag-505311.firebaseapp.com'
         # Ceiling on estimated daily LLM+embedding spend (app/llm/budget.py,
         # app/llm/cost.py); 0 disables it, which is how this shipped before.
         # 0.25 leaves headroom under the project's separate Cloud Billing
