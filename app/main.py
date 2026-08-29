@@ -908,6 +908,16 @@ async def delete_document(filename: str, request: Request) -> dict:
         # file a silent no-op, because ingest.run() would treat it as
         # unchanged and skip it. See database.delete_manifest_entry().
         await asyncio.to_thread(database.delete_manifest_entry, source)
+        # The corpus just changed, so cached answers may cite a document
+        # that no longer exists -- and a cache hit returns no sources, so
+        # the reader has nothing to check the claim against. Best-effort:
+        # the document IS deleted either way, and a stale cache entry is a
+        # worse outcome than a slower next question but not worth failing
+        # a successful deletion over.
+        try:
+            await asyncio.to_thread(database.invalidate_cache)
+        except Exception as exc:
+            logger.warning(f"Cache invalidation after delete failed: {exc}")
     except HTTPException:
         raise
     except Exception as exc:
@@ -975,14 +985,26 @@ async def cleanup_expired() -> dict:
     """
     try:
         deleted = await asyncio.to_thread(database.delete_expired_chunks)
+        # The cache needs the same sweep for a different reason: chunks
+        # expire so storage is reclaimed, cache rows expire so the table
+        # and its HNSW index stop growing without bound on a public
+        # endpoint. Pruned here rather than in its own job because the
+        # trigger and the failure posture are identical.
+        cache_pruned = await asyncio.to_thread(
+            database.prune_cache, config.MAX_CACHE_ROWS
+        )
     except Exception as exc:
         logger.error(
             json.dumps({"event": "error", "endpoint": "cleanup-expired", "error": str(exc)}),
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail={"error": str(exc)})
-    logger.info(json.dumps({"event": "cleanup_expired", "chunks_deleted": deleted}))
-    return {"chunks_deleted": deleted}
+    logger.info(json.dumps({
+        "event": "cleanup_expired",
+        "chunks_deleted": deleted,
+        "cache_rows_pruned": cache_pruned,
+    }))
+    return {"chunks_deleted": deleted, "cache_rows_pruned": cache_pruned}
 
 
 @app.post("/ask", response_model=AskResponse)

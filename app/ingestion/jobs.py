@@ -200,6 +200,25 @@ def process_job(job_id: str) -> None:
         _cleanup_files(files, session_id)
         raise
     _cleanup_files(files, session_id)
+
+    # New documents are retrievable now, so answers cached before this
+    # ingest were computed without them: the visitor uploads a file, asks
+    # the question it answers, and gets a pre-upload cached answer saying
+    # the documents do not cover it -- with no sources, since cache hits
+    # return none. cache.py already skips cache READS for a session that
+    # has uploads, which covers that visitor; this covers everyone else,
+    # whose cached answers are now equally out of date.
+    #
+    # Best-effort: the documents ARE ingested, and failing a finished job
+    # over a cache flush would turn a slower next question into a reported
+    # ingestion failure.
+    if summary.get("added") or summary.get("updated"):
+        try:
+            from app.db import database
+            database.invalidate_cache()
+        except Exception as exc:
+            logger.warning(f"Job {job_id}: cache invalidation after ingest failed: {exc}")
+
     update_job_status(job_id, "done", ingest_summary=summary)
 
 

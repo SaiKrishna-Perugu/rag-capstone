@@ -21,6 +21,7 @@ the request.
 """
 import logging
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg2
@@ -433,6 +434,7 @@ def cache_get(
         SELECT question, answer, groundedness,
                1 - (embedding <=> %s) AS similarity
         FROM semantic_cache
+        WHERE expires_at IS NULL OR expires_at > now()
         ORDER BY embedding <=> %s
         LIMIT 1
     """
@@ -463,18 +465,82 @@ def cache_set(
     groundedness: str,
     question_embedding: list[float],
 ) -> None:
-    """Store a Q&A pair in the semantic cache."""
+    """Store a Q&A pair in the semantic cache, with a TTL.
+
+    CACHE_TTL_HOURS bounds how long an entry can outlive the corpus it was
+    grounded in. It is a blunt instrument -- a cached answer is still stale
+    the moment its source document is deleted, which is why
+    invalidate_cache() exists and is called on every corpus mutation -- but
+    it also bounds the table's growth, which nothing else did.
+    """
     import numpy as np
 
     sql = """
-        INSERT INTO semantic_cache (question, answer, groundedness, embedding)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO semantic_cache (question, answer, groundedness, embedding, expires_at)
+        VALUES (%s, %s, %s, %s, %s)
     """
     emb = np.array(question_embedding, dtype=np.float32)
+    expires_at = (
+        datetime.now(UTC) + timedelta(hours=config.CACHE_TTL_HOURS)
+        if config.CACHE_TTL_HOURS > 0
+        else None
+    )
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (question, answer, groundedness, emb))
+            cur.execute(sql, (question, answer, groundedness, emb, expires_at))
+
+
+def invalidate_cache() -> int:
+    """Drop every cached answer. Returns the number removed.
+
+    Called whenever the corpus changes -- an upload finishing or a document
+    being deleted. Cached entries carry no record of which chunks produced
+    them, so there is no way to invalidate precisely; a cached answer can
+    otherwise outlive the document it cited and be replayed with a stale
+    GROUNDED verdict and (because cache hits return no sources) nothing for
+    the reader to check it against.
+
+    Flushing everything is deliberate over tracking provenance per entry:
+    the cache is a latency optimisation, so the cost of being wrong here is
+    a slower next question, while the cost of a stale answer is a confident
+    citation of a document that no longer exists. Uploads are rare compared
+    to questions on this workload.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM semantic_cache")
+            return cur.rowcount
+
+
+def prune_cache(max_rows: int) -> int:
+    """Delete expired entries, then trim to the newest `max_rows`.
+
+    Two bounds because they fail differently: the TTL bounds staleness but
+    not volume (a burst inside one TTL window is unbounded), and the row cap
+    bounds volume but not age. 0 disables the row cap.
+    """
+    removed = 0
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM semantic_cache WHERE expires_at IS NOT NULL AND expires_at <= now()"
+            )
+            removed += cur.rowcount
+            if max_rows > 0:
+                cur.execute(
+                    """
+                    DELETE FROM semantic_cache
+                    WHERE id NOT IN (
+                        SELECT id FROM semantic_cache
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    )
+                    """,
+                    (max_rows,),
+                )
+                removed += cur.rowcount
+    return removed
 
 
 # ---------------------------------------------------------------------------

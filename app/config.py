@@ -302,6 +302,16 @@ DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "0"))
 # admission decision uses it -- actual spend is still what cost.py records.
 BUDGET_REQUEST_ESTIMATE_USD = float(os.getenv("BUDGET_REQUEST_ESTIMATE_USD", "0.002"))
 
+# --- Semantic cache bounds --------------------------------------------------
+# The cache shipped with neither, so every uncached question on a public
+# endpoint added a permanent row: a bot asking distinct questions grew the
+# table and its HNSW index without limit, and made every lookup slower on
+# the way. These bound staleness and volume respectively -- both are needed,
+# since a TTL does not cap a burst inside one window and a row cap does not
+# cap age. 0 disables either.
+CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "24"))
+MAX_CACHE_ROWS = int(os.getenv("MAX_CACHE_ROWS", "5000"))
+
 # --- LLM Resilience -------------------------------------------------------
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))

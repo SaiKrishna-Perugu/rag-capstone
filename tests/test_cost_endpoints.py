@@ -132,3 +132,91 @@ def test_cache_hit_still_reports_contextualization_cost(client, mock_retrieval, 
     (entry,) = _events(captured_log, "ask")
     assert entry["cache"] == "HIT"
     assert entry["cost_by_stage"]["contextualize"] > 0
+
+
+# --- semantic cache bounds --------------------------------------------------
+# The cache shipped with no TTL, no size cap and no invalidation: every
+# uncached question on a public endpoint added a permanent row, and a cached
+# answer outlived the document it cited.
+
+def test_cache_set_stamps_a_ttl(monkeypatch):
+    """Without expires_at the table grows forever."""
+    from unittest.mock import MagicMock, patch
+
+    from app import config
+    from app.db import database
+
+    monkeypatch.setattr(config, "CACHE_TTL_HOURS", 24)
+    cur = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    with patch("app.db.database.get_conn") as gc:
+        gc.return_value.__enter__.return_value = conn
+        database.cache_set("q", "a", "GROUNDED", [0.1, 0.2])
+
+    params = cur.execute.call_args[0][1]
+    assert params[4] is not None, "cache row written with no expiry"
+
+
+def test_cache_set_ttl_can_be_disabled(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from app import config
+    from app.db import database
+
+    monkeypatch.setattr(config, "CACHE_TTL_HOURS", 0)
+    cur = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    with patch("app.db.database.get_conn") as gc:
+        gc.return_value.__enter__.return_value = conn
+        database.cache_set("q", "a", "GROUNDED", [0.1, 0.2])
+
+    assert cur.execute.call_args[0][1][4] is None
+
+
+def test_cache_get_excludes_expired_rows():
+    """An expired entry must not be served just because it is the nearest
+    neighbour -- the TTL is meaningless if reads ignore it."""
+    import inspect
+
+    from app.db import database
+
+    sql = inspect.getsource(database.cache_get)
+    assert "expires_at IS NULL OR expires_at > now()" in sql
+
+
+def test_prune_cache_deletes_expired_and_trims_to_cap():
+    from unittest.mock import MagicMock, patch
+
+    from app.db import database
+
+    cur = MagicMock()
+    cur.rowcount = 3
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    with patch("app.db.database.get_conn") as gc:
+        gc.return_value.__enter__.return_value = conn
+        removed = database.prune_cache(max_rows=100)
+
+    statements = " ".join(c[0][0] for c in cur.execute.call_args_list)
+    assert "expires_at <= now()" in statements   # age bound
+    assert "ORDER BY created_at DESC" in statements  # volume bound
+    assert removed == 6  # both deletes counted
+
+
+def test_prune_cache_row_cap_disabled_by_zero():
+    from unittest.mock import MagicMock, patch
+
+    from app.db import database
+
+    cur = MagicMock()
+    cur.rowcount = 1
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    with patch("app.db.database.get_conn") as gc:
+        gc.return_value.__enter__.return_value = conn
+        database.prune_cache(max_rows=0)
+
+    statements = " ".join(c[0][0] for c in cur.execute.call_args_list)
+    assert "ORDER BY created_at DESC" not in statements

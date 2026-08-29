@@ -60,11 +60,26 @@ CREATE TABLE IF NOT EXISTS semantic_cache (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Added after the table shipped, so ALTER rather than a column in the
+-- CREATE above -- CREATE TABLE IF NOT EXISTS is a no-op against the live
+-- table and would leave production without the column. Same pattern as
+-- chunks.session_id/expires_at above.
+--
+-- The cache had no expiry, no size cap and no eviction: every uncached
+-- question on a public endpoint inserted a permanent row, so a bot asking
+-- distinct questions grew the table and its HNSW index without bound, and
+-- every cache lookup got slower as it did. MAX_CORPUS_CHUNKS bounds
+-- documents; nothing bounded this.
+ALTER TABLE semantic_cache ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
 -- Same reasoning as idx_chunks_embedding_hnsw above. It matters more here
 -- if anything: the cache starts empty by definition, so an IVFFLAT index
 -- over it was guaranteed to be built with no rows to cluster.
 DROP INDEX IF EXISTS idx_cache_embedding;
 CREATE INDEX IF NOT EXISTS idx_cache_embedding_hnsw ON semantic_cache USING hnsw (embedding vector_cosine_ops);
+
+-- Ordering index for the size-cap prune, which deletes oldest-first.
+CREATE INDEX IF NOT EXISTS idx_cache_created_at ON semantic_cache (created_at);
 
 -- Ingest manifest: per-file content hash + last-ingested timestamp, used
 -- for incremental re-ingestion (skip unchanged files). Lives here rather

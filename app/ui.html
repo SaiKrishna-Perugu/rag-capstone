@@ -41,7 +41,10 @@
             --card: #FFFDFA;
             --ink: #16130F;
             --muted: #57504A;
-            --faint: #7A7166;
+            /* 4.5:1 is the floor, and #7A7166 cleared it by 0.06 at 9.5px --
+               any future tint of --paper would have pushed it under without
+               anything failing. #6B6257 is 5.5:1, which leaves room. */
+            --faint: #6B6257;
             --rule: #E4DCCE;
             --rule-soft: #EFE8DC;
             --accent: #A8442A;
@@ -213,6 +216,7 @@
         .source-card { padding: 15px 0; border-bottom: 1px solid var(--rule-soft); }
         .source-title { font-family: var(--mono); font-size: 12px; font-weight: 500; word-break: break-word; }
         .source-page { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 2px; }
+        .sources-note { font-size: 13px; line-height: 1.6; color: var(--muted); padding: 14px 0; }
         .source-excerpt { font-size: 13.5px; line-height: 1.6; color: var(--muted); margin-top: 7px; }
 
         /* --- documents rail --- */
@@ -273,7 +277,7 @@
 
         <p class="subtitle">Ask questions over a local document set. Every answer is checked against the passages it came from, and shows you the verdict.</p>
 
-        <div class="workspace">
+        <main class="workspace">
             <div class="col-main">
 
                 <!-- Every endpoint except /health and /ready sits behind
@@ -296,12 +300,15 @@
 
                 <div class="error-message" id="error-message"></div>
 
-                <div class="loader-container" id="loader">
+                <div class="loader-container" id="loader" role="status" aria-live="polite">
                     <div class="spinner"></div>
                     <div class="loader-text" id="loader-text">Retrieving passages and generating an answer&hellip;</div>
                 </div>
 
-                <div id="results-container">
+                <!-- aria-live: the answer arrives asynchronously, so without
+                     it a screen-reader user is never told anything happened.
+                     polite, not assertive: it should not interrupt. -->
+                <div id="results-container" aria-live="polite" aria-busy="false">
                     <!-- The receipt, first: the verdict is the point of the
                          product, so it reads before the answer rather than as a
                          footnote under it. -->
@@ -351,7 +358,7 @@
                     <div class="upload-error" id="upload-error"></div>
                 </div>
             </aside>
-        </div>
+        </main>
     </div>
 
     <script>
@@ -829,7 +836,17 @@
                     grid.appendChild(card);
                 });
             } else {
-                grid.innerHTML = `<div style="color: var(--muted)">No sources used.</div>`;
+                // Cache hits deliberately return no sources (see main.py),
+                // so this is the normal path for a repeated question, not an
+                // error. Say which it is -- "No sources used." under a
+                // SOURCES heading reads as though the citations were lost.
+                grid.innerHTML = "";
+                const note = document.createElement("div");
+                note.className = "sources-note";
+                note.textContent = data.cached
+                    ? "Answered from cache, so the original passages are not re-listed. Ask a slightly different question to see them."
+                    : "No passages were used for this answer.";
+                grid.appendChild(note);
             }
 
             // Render Stats
