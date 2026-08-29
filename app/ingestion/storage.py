@@ -89,6 +89,26 @@ def fetch_to(session_id: str | None, filenames: list[str], dest_dir) -> list[str
     return fetched
 
 
+def list_names(session_id: str | None) -> set[str]:
+    """Filenames currently staged for this session.
+
+    Used by /upload's per-visitor file cap to count files whose ingestion
+    job hasn't finished yet -- the chunks table only knows about files whose
+    job already ran, so without this two rapid back-to-back uploads race
+    past the cap (both count against a database that says the visitor has
+    zero documents). Mirrors the on-disk fallback in main.py's local path.
+    """
+    if not enabled():
+        return set()
+    bucket = _bucket()
+    prefix = f"uploads/{session_id or '_nosession'}/"
+    return {
+        blob.name[len(prefix):]
+        for blob in bucket.list_blobs(prefix=prefix)
+        if blob.name[len(prefix):]
+    }
+
+
 def delete(session_id: str | None, filenames: list[str]) -> None:
     """Drop staged objects once their chunks are in Postgres.
 

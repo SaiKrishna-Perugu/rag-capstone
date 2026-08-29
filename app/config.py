@@ -142,6 +142,20 @@ UPLOAD_TTL_HOURS = int(os.getenv("UPLOAD_TTL_HOURS", "24"))
 # rather than the size of any one upload.
 MAX_SESSION_CHUNKS = int(os.getenv("MAX_SESSION_CHUNKS", "300"))
 
+# Per-visitor ceiling on DISTINCT uploaded files, enforced across requests --
+# MAX_UPLOAD_FILES caps one request, and without this a visitor simply makes
+# repeated requests (3 files x N requests) to accumulate an unbounded number
+# of documents. Counted against live chunks plus files still staged for
+# pending jobs, so two rapid back-to-back uploads cannot race past it. 0
+# disables. Guests keep uploading with zero user data; signing in raises the
+# ceiling (see MAX_SESSION_FILES_AUTHED).
+MAX_SESSION_FILES = int(os.getenv("MAX_SESSION_FILES", "6"))
+# Raised per-visitor file ceiling for signed-in callers. Floored at the
+# anonymous value in auth.session_file_limit() -- same rule as the per-request
+# limits: signing in must never be a downgrade, no matter how the env vars
+# are set.
+MAX_SESSION_FILES_AUTHED = int(os.getenv("MAX_SESSION_FILES_AUTHED", "30"))
+
 # --- Metrics (OpenTelemetry) -------------------------------------------------
 # Prometheus export (GET /metrics) is always on and needs no GCP config.
 # Cloud Monitoring push is opt-in -- requires GCP_PROJECT_ID too.

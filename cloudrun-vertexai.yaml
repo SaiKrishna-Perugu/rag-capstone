@@ -188,6 +188,14 @@ spec:
         # MAX_CORPUS_CHUNKS budget and lock everyone else out.
         - name: MAX_SESSION_CHUNKS
           value: '300'
+        # Per-visitor cap on DISTINCT files across ALL requests (guests);
+        # raised for signed-in callers by MAX_SESSION_FILES_AUTHED.
+        # MAX_UPLOAD_FILES caps one request; without this a visitor just
+        # makes more requests.
+        - name: MAX_SESSION_FILES
+          value: '6'
+        - name: MAX_SESSION_FILES_AUTHED
+          value: '30'
         # Optional Firebase sign-in (app/api/auth.py). Additive, never a gate:
         # signing in only raises the upload ceiling to
         # MAX_UPLOAD_FILES_AUTHED/MAX_UPLOAD_SIZE_MB_AUTHED. Anonymous access

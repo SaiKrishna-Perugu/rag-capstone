@@ -90,6 +90,14 @@ spec:
           value: "3000"
         - name: MAX_SESSION_CHUNKS
           value: "300"
+        # Per-visitor cap on DISTINCT files across ALL requests (guests);
+        # raised for signed-in callers by MAX_SESSION_FILES_AUTHED.
+        # MAX_UPLOAD_FILES caps one request; without this a visitor just
+        # makes more requests.
+        - name: MAX_SESSION_FILES
+          value: "6"
+        - name: MAX_SESSION_FILES_AUTHED
+          value: "30"
         # Deliberately shared with production: Firestore Native mode is
         # one database per GCP project by default, so conversation memory
         # (conversation_sessions) and job tracking (ingest_jobs) aren't

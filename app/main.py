@@ -148,7 +148,26 @@ app = FastAPI(
 )
 
 # --- Production middleware ------------------------------------------------
-limiter = Limiter(key_func=get_remote_address)
+# get_remote_address() keys on the socket peer, which behind Cloud Run's
+# Google Front End is the GFE for EVERY visitor -- one shared bucket. Verified
+# live: a plain 11-request burst 429'd the limiter, meaning any visitor (or
+# one accidentally-retrying browser tab) can lock every other visitor out of
+# /ask for a minute. Keying on the leftmost X-Forwarded-For entry gives each
+# real client its own bucket instead. Known trade-off, accepted deliberately:
+# a client can spoof that header to rotate buckets, but the limiter is a
+# speed bump rather than a quota (see config.RATE_LIMIT's comment and the
+# maxScale cap in the Cloud Run YAMLs) -- a spoofable speed bump beats a
+# shared bucket that turns one noisy visitor into everyone's outage.
+def _rate_limit_key(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -175,6 +194,39 @@ app.add_middleware(AccessControlMiddleware)
 # before the access gate, which matters only for ordering clarity -- the two
 # are independent, and IdentityMiddleware never rejects anything.
 app.add_middleware(IdentityMiddleware)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Browser-facing hardening headers on every response, including the
+    middleware-generated 401/403/404s (this is the outermost middleware).
+
+    CSP ships as Report-Only on purpose: the allowlist below covers every
+    asset the UI loads (fonts, marked.js, DOMPurify, Firebase), but a
+    wrong entry in an enforcing policy silently breaks sign-in or rendering,
+    and this codebase cannot exercise the Firebase popup flow from CI.
+    Deployments should promote it to `Content-Security-Policy` after
+    confirming a clean console in a signed-in session.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Content-Security-Policy-Report-Only",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
+        "https://cdnjs.cloudflare.com https://www.gstatic.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self' https://securetoken.googleapis.com "
+        "https://identitytoolkit.googleapis.com https://apis.google.com "
+        "https://firestore.googleapis.com https://www.gstatic.com; "
+        "frame-src https://apis.google.com; "
+        "object-src 'none'; base-uri 'self'",
+    )
+    return response
 
 
 class AskRequest(BaseModel):
@@ -359,6 +411,13 @@ def get_ui_config(request: Request) -> dict:
         # discover it via a 400/413 after waiting for an upload to fail.
         "max_upload_files": max_files,
         "max_upload_size_mb": max_mb,
+        # Per-visitor TOTAL file cap (distinct files across all requests),
+        # and the raised value signing in would give them -- the UI needs
+        # both to state the guest limit and make the sign-in CTA concrete.
+        "max_session_files": auth.session_file_limit(identity),
+        "authed_max_session_files": max(
+            config.MAX_SESSION_FILES_AUTHED, config.MAX_SESSION_FILES
+        ),
         "authenticated": identity.is_authenticated,
         "user_email": identity.email,
         # Advertised so the UI can show what signing in would gain. Shown
@@ -423,6 +482,27 @@ async def upload_files(
             },
         )
 
+    # Declared-size gate, checked BEFORE any file bytes are read. Without it
+    # the per-file size cap below only fires after `await file.read()` has
+    # already pulled the entire part into memory -- so the 2MB limit was
+    # enforced with an unbounded read first. Multipart framing (boundaries,
+    # headers) adds some overhead, so the cap carries 1MB of slack; the true
+    # request bound remains Cloud Run's own 32MB body limit.
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit():
+        total_cap = max_files * max_size_mb * 1024 * 1024 + 1024 * 1024
+        if int(declared) > total_cap:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": (
+                        f"Request too large ({int(declared) // (1024 * 1024)}MB). "
+                        f"Max {max_files} files x {max_size_mb}MB per upload."
+                    ),
+                    "request_id": request_id,
+                },
+            )
+
     # Ceiling on the shared corpus, for deployments that accept uploads from
     # anonymous visitors. Checked before writing anything; a full corpus is a
     # refusal, not a partial ingest. Fails open on a database error -- the
@@ -464,6 +544,53 @@ async def upload_files(
                     "error": (
                         "The demo knowledge base is full "
                         f"({current} chunks). Uploads are paused until it is reset."
+                    ),
+                    "request_id": request_id,
+                },
+            )
+
+    # Per-visitor ceiling on DISTINCT files, enforced across requests.
+    # MAX_UPLOAD_FILES caps one request; without this a guest simply makes
+    # repeated 3-file requests and accumulates unbounded documents. The count
+    # is live chunks PLUS files still staged for pending ingestion jobs --
+    # the database alone lags a just-made upload, so two rapid back-to-back
+    # requests would otherwise both see "zero documents" and race past the
+    # cap. Same-name re-uploads replace, not add: the batch is unioned into
+    # the existing set before comparing. Fails open on a counting error --
+    # abuse mitigation, not a correctness invariant (same posture as the
+    # chunk caps above).
+    if doc_session and config.MAX_SESSION_FILES > 0:
+        session_cap = auth.session_file_limit(identity)
+        owned: set[str] = set()
+        try:
+            rows = await asyncio.to_thread(database.list_session_documents, doc_session)
+            owned |= {Path(r["source"]).name for r in rows}
+        except Exception as e:
+            logger.warning(f"Session document count failed, allowing upload: {e}")
+        try:
+            if storage.enabled():
+                owned |= await asyncio.to_thread(storage.list_names, doc_session)
+            else:
+                # Local-disk path (dev/tests): files staged by an earlier
+                # /upload whose job hasn't run yet sit in the session dir.
+                staged_dir = Path(config.DOCS_DIR) / "uploads" / doc_session
+                if staged_dir.exists():
+                    owned |= {p.name for p in staged_dir.iterdir() if p.is_file()}
+        except Exception as e:
+            logger.warning(f"Staged-file count failed, allowing upload: {e}")
+        batch_names = {
+            Path(f.filename).name if f.filename else "uploaded_file" for f in files
+        }
+        if len(owned | batch_names) > session_cap:
+            raise HTTPException(
+                status_code=507,
+                detail={
+                    "error": (
+                        f"You've reached this demo's per-visitor limit of "
+                        f"{session_cap} uploaded files ({len(owned)} already stored). "
+                        f"Sign in to raise it to "
+                        f"{max(config.MAX_SESSION_FILES_AUTHED, config.MAX_SESSION_FILES)}, "
+                        f"or remove some of your documents below."
                     ),
                     "request_id": request_id,
                 },

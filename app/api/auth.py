@@ -120,3 +120,17 @@ def upload_limits(identity: Identity) -> tuple[int, int]:
             max(config.MAX_UPLOAD_SIZE_MB_AUTHED, config.MAX_UPLOAD_SIZE_MB),
         )
     return config.MAX_UPLOAD_FILES, config.MAX_UPLOAD_SIZE_MB
+
+
+def session_file_limit(identity: Identity) -> int:
+    """Per-visitor cap on DISTINCT uploaded files for this caller.
+
+    Same floor rule as upload_limits(): the authed ceiling can never be
+    lower than the anonymous one, regardless of who last edited the env
+    vars -- a downgrade-on-sign-in is a bug that already happened once
+    (see upload_limits above) and must not be able to return via a single
+    careless env var here.
+    """
+    if identity.is_authenticated:
+        return max(config.MAX_SESSION_FILES_AUTHED, config.MAX_SESSION_FILES)
+    return config.MAX_SESSION_FILES

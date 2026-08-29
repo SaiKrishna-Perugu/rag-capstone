@@ -55,6 +55,7 @@ support for those -- no need to reinvent them as custom middleware.
 """
 
 import logging
+import secrets
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -114,9 +115,11 @@ def _verify_oidc_token(request: Request) -> bool:
     """
     if not config.TASKS_SERVICE_ACCOUNT_EMAIL:
         # Not yet migrated to OIDC: fall back to the shared key, and deny
-        # outright if that is unset too.
+        # outright if that is unset too. compare_digest: both the key and the
+        # OIDC identity below are secrets whose values must not be recoverable
+        # through response timing.
         provided = request.headers.get("X-API-Key", "")
-        return bool(config.API_KEY) and provided == config.API_KEY
+        return bool(config.API_KEY) and secrets.compare_digest(provided, config.API_KEY)
 
     header = request.headers.get("Authorization", "")
     if not header.lower().startswith("bearer "):
@@ -141,7 +144,8 @@ def _verify_oidc_token(request: Request) -> bool:
         return False
 
     email = claims.get("email")
-    if email != config.TASKS_SERVICE_ACCOUNT_EMAIL:
+    if not (email and isinstance(email, str)
+            and secrets.compare_digest(email, config.TASKS_SERVICE_ACCOUNT_EMAIL)):
         logger.warning(f"Rejected /internal request: unexpected OIDC identity {email!r}")
         return False
     if not claims.get("email_verified", False):
@@ -172,18 +176,21 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
         if path in _ADMIN_PATHS:
             if not config.ADMIN_KEY:
                 return _not_found()
-            if request.headers.get("X-Admin-Key", "") != config.ADMIN_KEY:
+            provided_admin = request.headers.get("X-Admin-Key", "")
+            if not secrets.compare_digest(provided_admin, config.ADMIN_KEY):
                 return _not_found()
             return await call_next(request)
 
         # 4. Public -- open by design on the demo, key-gated when API_KEY is
         #    set (staging, or any deployment meant to be wholly private).
         if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES):
-            if config.API_KEY and request.headers.get("X-API-Key", "") != config.API_KEY:
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Invalid or missing API key."},
-                )
+            if config.API_KEY:
+                provided_key = request.headers.get("X-API-Key", "")
+                if not secrets.compare_digest(provided_key, config.API_KEY):
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Invalid or missing API key."},
+                    )
             return await call_next(request)
 
         # 5. Anything unlisted is closed by default.

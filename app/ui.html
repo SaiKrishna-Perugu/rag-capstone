@@ -6,10 +6,19 @@
     <title>Agentic RAG Explorer</title>
     <!-- Use Inter font for a modern look -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Marked.js for parsing markdown in responses -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Marked.js for parsing markdown in responses. Pinned + SRI: an
+         unpinned URL floats with upstream releases (jsDelivr currently
+         serves v15.0.12 for this path, NOT the package's actual latest),
+         and a tampered or changed file would run in this page's origin.
+         The fallback guard in renderAnswer() covers the case where either
+         script fails SRI validation and never loads. -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"
+            integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+"
+            crossorigin="anonymous"></script>
     <!-- DOMPurify for XSS protection -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"
+            integrity="sha384-cwS6YdhLI7XS60eoDiC+egV0qHp8zI+Cms46R0nbn8JrmoAzV9uFL60etMZhAnSu"
+            crossorigin="anonymous"></script>
     <style>
         :root {
             --bg-color: #0f172a; /* Slate 900 */
@@ -523,7 +532,15 @@
         // /config at load. These are a UX affordance only -- app/main.py
         // enforces the real limits, since anything here is trivially
         // bypassed by posting to /upload directly.
-        const UPLOAD_LIMITS = { files: 5, sizeMb: 50 };
+        // Defaults match config.py's code defaults, NOT the old generous
+        // 5/50: this object is only a fallback for the window before
+        // /config responds, and a fallback more permissive than the server
+        // is a promise the server will break with a 400/413.
+        // sessionFiles = per-visitor TOTAL (distinct files across all
+        // requests), not per-request -- enforced alongside the server's cap.
+        const UPLOAD_LIMITS = { files: 3, sizeMb: 2, sessionFiles: 6 };
+        let sessionFileCount = 0;   // this visitor's stored + staged files
+        let authedSessionFiles = 30;
 
         // --- Optional Firebase sign-in ----------------------------------
         // Loaded lazily from CDN only when /config says Firebase is
@@ -678,16 +695,20 @@
                         // waiting for a failed upload.
                         UPLOAD_LIMITS.files = cfg.max_upload_files || UPLOAD_LIMITS.files;
                         UPLOAD_LIMITS.sizeMb = cfg.max_upload_size_mb || UPLOAD_LIMITS.sizeMb;
+                        UPLOAD_LIMITS.sessionFiles = cfg.max_session_files || UPLOAD_LIMITS.sessionFiles;
+                        authedSessionFiles = cfg.authed_max_session_files || authedSessionFiles;
                         const label = document.getElementById('upload-label');
                         if (label) {
                             let text = `+ Upload documents (PDF, TXT, MD, CSV) — up to `
-                                     + `${UPLOAD_LIMITS.files} files, ${UPLOAD_LIMITS.sizeMb}MB each`;
+                                     + `${UPLOAD_LIMITS.files} files, ${UPLOAD_LIMITS.sizeMb}MB each, `
+                                     + `${UPLOAD_LIMITS.sessionFiles} total`;
                             // Advertise the upgrade rather than hiding it, so
                             // signing in has a visible reason to exist.
                             if (!cfg.authenticated && cfg.firebase && cfg.firebase.api_key
-                                && cfg.authed_max_upload_files > UPLOAD_LIMITS.files) {
-                                text += ` (sign in for ${cfg.authed_max_upload_files} files,`
-                                      + ` ${cfg.authed_max_upload_size_mb}MB)`;
+                                && (cfg.authed_max_upload_files > UPLOAD_LIMITS.files
+                                    || authedSessionFiles > UPLOAD_LIMITS.sessionFiles)) {
+                                text += ` (sign in for ${cfg.authed_max_upload_files} files per upload, `
+                                      + `${authedSessionFiles} total)`;
                             }
                             label.textContent = text;
                         }
@@ -716,6 +737,10 @@
             } catch (err) {
                 return;   // listing is a convenience; never break the page over it
             }
+            // Drives the per-visitor upload gate in handleFileUpload: the
+            // server counts stored chunks + staged files; this mirrors it
+            // so the visitor sees the limit before the server says 507.
+            sessionFileCount = docs.length;
 
             for (const doc of docs) {
                 const row = document.createElement('div');
@@ -868,7 +893,7 @@
                                 
                                 if (data.token) {
                                     fullAnswer += data.token;
-                                    document.getElementById('answer-content').innerHTML = DOMPurify.sanitize(marked.parse(fullAnswer));
+                                    renderAnswer(fullAnswer);
                                 } else if (data.type === 'final') {
                                     renderFinalResults(data);
                                 }
@@ -892,10 +917,24 @@
             }
         }
 
+        // Single render path for model answers. Markdown is parsed then
+        // sanitized BEFORE it ever touches innerHTML; if either CDN script
+        // failed to load (offline, SRI mismatch after a pin change), fall
+        // back to textContent so the answer still displays as plain text
+        // rather than silently never rendering.
+        function renderAnswer(text) {
+            const el = document.getElementById('answer-content');
+            if (window.marked && window.DOMPurify) {
+                el.innerHTML = DOMPurify.sanitize(marked.parse(text));
+            } else {
+                el.textContent = text;
+            }
+        }
+
         function renderFinalResults(data) {
             // Ensure final answer is fully rendered
             if (data.answer) {
-                document.getElementById('answer-content').innerHTML = DOMPurify.sanitize(marked.parse(data.answer));
+                renderAnswer(data.answer);
                 document.getElementById('copy-btn').style.display = 'inline-block';
                 // Store raw text for copying
                 document.getElementById('copy-btn').dataset.answer = data.answer;

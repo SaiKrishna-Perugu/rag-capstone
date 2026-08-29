@@ -93,6 +93,14 @@ spec:
           value: "3000"
         - name: MAX_SESSION_CHUNKS
           value: "300"
+        # Per-visitor cap on DISTINCT files across ALL requests (guests);
+        # raised for signed-in callers by MAX_SESSION_FILES_AUTHED.
+        # MAX_UPLOAD_FILES caps one request; without this a visitor just
+        # makes more requests.
+        - name: MAX_SESSION_FILES
+          value: "6"
+        - name: MAX_SESSION_FILES_AUTHED
+          value: "30"
         # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
         # Run instances have independent disks, so a Cloud Task can land on the
         # instance that never received the upload; staging in GCS removes that
