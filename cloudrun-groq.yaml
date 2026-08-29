@@ -86,7 +86,7 @@ spec:
         - name: MAX_UPLOAD_FILES
           value: "3"
         - name: MAX_UPLOAD_SIZE_MB
-          value: "2"
+          value: "3"
         - name: RATE_LIMIT
           value: "10/minute"
         - name: MAX_CORPUS_CHUNKS

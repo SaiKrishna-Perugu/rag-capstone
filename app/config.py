@@ -185,7 +185,7 @@ ENABLE_UPLOADS = os.getenv("ENABLE_UPLOADS", "true").lower() == "true"
 # deployment falls back to when its env var is missing -- which has already
 # happened on this project -- so it has to be the safe value, not the
 # permissive one.
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "2"))
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "3"))
 # Number of files accepted per /upload request. The per-file size cap
 # above says nothing about how MANY files arrive, so without this a single
 # request could carry hundreds of small ones.
@@ -224,7 +224,7 @@ FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN", "")
 # above, so the demo stays usable without an account. These must stay >= the
 # anonymous values or signing in becomes a downgrade; auth.upload_limits()
 # enforces that as a floor rather than trusting whoever sets the env vars.
-MAX_UPLOAD_FILES_AUTHED = int(os.getenv("MAX_UPLOAD_FILES_AUTHED", "10"))
+MAX_UPLOAD_FILES_AUTHED = int(os.getenv("MAX_UPLOAD_FILES_AUTHED", "5"))
 MAX_UPLOAD_SIZE_MB_AUTHED = int(os.getenv("MAX_UPLOAD_SIZE_MB_AUTHED", "10"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "2000"))
 

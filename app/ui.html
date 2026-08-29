@@ -374,7 +374,7 @@
         // is a promise the server will break with a 400/413.
         // sessionFiles = per-visitor TOTAL (distinct files across all
         // requests), not per-request -- enforced alongside the server's cap.
-        const UPLOAD_LIMITS = { files: 3, sizeMb: 2, sessionFiles: 6 };
+        const UPLOAD_LIMITS = { files: 3, sizeMb: 3, sessionFiles: 6 };
         let sessionFileCount = 0;   // this visitor's stored + staged files
         let authedSessionFiles = 30;
 
