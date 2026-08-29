@@ -137,6 +137,25 @@ Keep entries short; link to the commit or review doc that has the detail.
   emails the repo owner/watchers by default) if it doesn't answer. Chosen
   over Cloud Scheduler + Cloud Monitoring specifically because it needs no
   GCP setup beyond this file.
+- **Turning Firebase sign-in on** (verified 2026-08-29; it is inert, not
+  broken). Two env vars on the running service are the whole switch:
+  `FIREBASE_WEB_API_KEY` and `FIREBASE_AUTH_DOMAIN`
+  (`hybrid-rag-505311.firebaseapp.com`). `FIREBASE_PROJECT_ID` defaults to
+  `GCP_PROJECT_ID`. No image rebuild — the code path is live and inert.
+  Console side: register a Web App, enable the Google sign-in provider, and
+  add **both** Cloud Run hostnames to Authentication → Settings →
+  Authorized domains, exactly as they resolve:
+  `rag-capstone-jjinz2egfq-uc.a.run.app` and
+  `rag-capstone-1057080140820.us-central1.run.app` — note the second keeps
+  the `rag-capstone-` prefix; the bare `<project-number>.us-central1.run.app`
+  is not a real host and would silently fail sign-in on that zone.
+  **Do not add these to the YAMLs as placeholders.** The repo's habit for
+  unknown-at-write-time values (`INGEST_TARGET_URL`, `UPLOAD_BUCKET`) is a
+  placeholder string, and it is actively harmful here: `ui.html`'s
+  `initFirebase()` only bails on an *empty* `api_key`, so a placeholder is
+  truthy, loads the Firebase SDK, and renders a sign-in button that cannot
+  work — the exact failure the blank-check exists to prevent. Declare them
+  only once the real values exist.
 - **Firebase authorized-domains assumes one hostname — checked, not
   currently live.** Neither `cloudrun-*.yaml` sets `FIREBASE_WEB_API_KEY`/
   `FIREBASE_AUTH_DOMAIN` in production or staging, and `main.py`'s `/config`
