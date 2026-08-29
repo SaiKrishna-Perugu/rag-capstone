@@ -24,6 +24,9 @@ Keep entries short; link to the commit or review doc that has the detail.
   to deploy, so simply removing them breaks CI/CD. The fix is splitting it
   into two service accounts, not trimming roles.
 - **`containerConcurrency: 80` is not backed by the pools underneath it.**
+  *(Reconfirmed by the 08-29 four-lens review, independently, from both the
+  developer and DevOps lenses. Still open: the fix is a load test plus a
+  sizing decision, not an edit.)*
   `DATABASE_POOL_MAX` defaults to 10 and no Cloud Run config overrides it,
   and `psycopg2`'s `ThreadedConnectionPool` raises `PoolError` immediately
   on exhaustion rather than queueing — `database.get_conn()` doesn't catch
@@ -110,6 +113,48 @@ Keep entries short; link to the commit or review doc that has the detail.
   extension.
 
 ## Resolved
+
+### Four-lens review (2026-08-29)
+
+Code, testing, front-end and CI/CD passes, with Codex as an independent
+second voice. Full report: `~/.gstack/projects/.../main-four-lens-review-20260829.md`.
+Codex's top finding was wrong on the deployed service and the probe that
+disproved it is recorded there -- claims were verified, not relayed.
+
+- **CD could deploy past a failed quality gate.** cd.yml, ci.yml and
+  eval.yml were independent workflows on the same push with nothing
+  ordering them, and the human at the production approval gate is shown
+  neither result. The workflow argued PR checks made this safe, which is
+  true for merges and false for direct pushes -- how this repo is worked.
+  A `require-green-checks` job now waits for both to pass for the exact
+  SHA, failing closed, with an audited `workflow_dispatch` override so a
+  red eval cannot block a hotfix. See `0bd109d`.
+- **The canary asserted nothing** -- `sleep 120` then 100% traffic, so a
+  revision that booted and then 500'd was promoted automatically. It now
+  probes the canary revision's own URL for readiness and a real answer.
+- **Config drift was invisible.** CD preserves live config by design, so
+  the YAMLs are not the source of truth; a post-deploy step now reports the
+  live values rather than applying the file (applying it takes the demo
+  offline).
+- **The semantic cache was unbounded** -- no TTL, no size cap, no eviction,
+  on a public endpoint. Now bounded on both axes and pruned by the existing
+  sweep, and invalidated whenever the corpus changes, since a cached answer
+  could outlive the document it cited and cache hits return no sources.
+- **The daily budget was check-then-spend**, so concurrent requests all
+  passed a ceiling none had paid for. Now an atomic reserve/release.
+- **Conversation history was a read-modify-write with no transaction**, so
+  simultaneous turns dropped each other.
+- **Firebase verification blocked the event loop** ahead of rate limiting.
+- **`/upload` accepted requests it could never ingest**, returning 202 and
+  then failing the job with a misleading error; and it buffered whole files
+  before checking their size.
+- **Four a11y defects** in the new UI: contrast 0.06 above the floor, no
+  `<h1>`, no `<main>`, no `aria-live` on results.
+- **Three dead CSS variables and a stale `<title>`** left by the Ledger
+  rewrite, live in production.
+- **The agentic loop had one test** covering only the happy path; its
+  retry, rewrite and fallback branches now have ten.
+
 
 ### Security audit (2026-08-29)
 
