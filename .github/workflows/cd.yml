@@ -1,9 +1,16 @@
 name: CD Pipeline
 
-# Runs on push to main only -- PRs are gated by ci.yml + eval.yml as
-# required status checks (once branch protection is enabled, see README
-# "Deploying to GCP" one-time setup), so a merge to main already implies
-# lint/tests/eval passed.
+# Runs on push to main only. This USED to reason that PRs are gated by
+# ci.yml + eval.yml as required status checks, so a merge to main already
+# implies lint/tests/eval passed -- but that only holds for merges. Direct
+# pushes to main, which is how this repo is actually worked, run cd.yml,
+# ci.yml and eval.yml as three independent workflows on the same event with
+# nothing ordering them. CD could therefore build, deploy to staging and
+# reach the production gate while the tests and the paid eval were still
+# running, or after they had already failed. The human at the approval gate
+# is not shown either result. The require-green-checks job below closes
+# that: it waits for both workflows to conclude for THIS commit and fails
+# if either did not succeed.
 #
 # INERT until the one-time GCP + GitHub setup documented in README
 # "Deploying to GCP" is completed by hand -- Workload Identity Federation,
@@ -14,6 +21,18 @@ name: CD Pipeline
 on:
   push:
     branches: [ "main" ]
+  # Manual trigger, and the only way past require-green-checks. Without it
+  # a red eval.yml -- including one red for infrastructure reasons rather
+  # than quality, which has happened here (a too-short RunConfig timeout
+  # reports NaN and reads as a quality collapse) -- would block every
+  # production deploy with no override, hotfixes included. Fail closed by
+  # default, with one deliberate, audited way through.
+  workflow_dispatch:
+    inputs:
+      skip_quality_gate:
+        description: "Deploy without waiting for CI/eval to pass (emergency only)"
+        type: boolean
+        default: false
 
 permissions:
   id-token: write   # required for Workload Identity Federation
@@ -46,7 +65,71 @@ env:
   SERVICE_ACCOUNT: rag-capstone-sa@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
 
 jobs:
+  # Gate: nothing deploys until CI and the eval gate have BOTH concluded
+  # successfully for this exact SHA.
+  #
+  # Polls the Actions API rather than using `workflow_run`, deliberately.
+  # workflow_run would invert the trigger -- CD would fire on another
+  # workflow's completion, losing this workflow's own concurrency group and
+  # the push context the image tag is built from. Polling keeps CD a
+  # push-triggered pipeline and adds the ordering that was missing.
+  #
+  # Fails closed: an eval that errors, times out, or never runs blocks the
+  # deploy rather than being read as "not failed". A quality gate that
+  # passes when it did not run is the failure mode this exists to prevent
+  # (see eval.yml's note on RAGAS reporting NaN for a timed-out job).
+  require-green-checks:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Note an intentional bypass
+        if: inputs.skip_quality_gate
+        run: |
+          echo "::warning::Quality gate skipped by explicit workflow_dispatch input. \
+          CI and eval results for ${{ github.sha }} were NOT checked."
+
+      - name: Wait for CI and eval to pass for this commit
+        if: ${{ !inputs.skip_quality_gate }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # ~20 min ceiling: the eval gate makes real LLM calls and is the
+          # slow one. Exceeding it fails the deploy rather than proceeding.
+          deadline=$(( $(date +%s) + 1200 ))
+          for wf in ci.yml eval.yml; do
+            echo "::group::waiting on $wf for $SHA"
+            while :; do
+              status=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$SHA&per_page=1" \
+                        --jq '.workflow_runs[0].status // "missing"')
+              conclusion=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$SHA&per_page=1" \
+                        --jq '.workflow_runs[0].conclusion // ""')
+              echo "$wf: status=$status conclusion=$conclusion"
+
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" = "success" ]; then
+                  echo "$wf passed."
+                  break
+                fi
+                echo "::error::$wf concluded '$conclusion' for $SHA -- refusing to deploy."
+                exit 1
+              fi
+
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::Timed out waiting for $wf on $SHA (last status: $status). Refusing to deploy."
+                exit 1
+              fi
+              sleep 15
+            done
+            echo "::endgroup::"
+          done
+
   build-and-push:
+    needs: require-green-checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -161,7 +244,46 @@ jobs:
             --image=${{ env.IMAGE }} \
             --region=us-central1 --no-traffic --tag=canary
           gcloud run services update-traffic rag-capstone --region=us-central1 --to-tags=canary=10
-          sleep 120
+
+          # Probe the canary revision directly before giving it everything.
+          # This step used to be `sleep 120` and nothing else: a revision
+          # that booted and then 500'd on every request was promoted to
+          # 100% automatically, because "did not crash on startup" was the
+          # only thing being checked. The canary URL addresses THAT revision
+          # specifically, so this tests the new code rather than whatever is
+          # currently serving.
+          CANARY=$(gcloud run services describe rag-capstone --region=us-central1 \
+                    --format='value(status.traffic.filter("tag:canary").extract("url"))' | tr -d '[]')
+          if [ -z "$CANARY" ]; then
+            echo "::error::Could not resolve the canary URL -- refusing to promote."
+            exit 1
+          fi
+          echo "Probing canary: $CANARY"
+
+          # Give it a moment to take traffic, then assert it actually serves.
+          sleep 30
+          for i in 1 2 3 4 5 6; do
+            if curl -sf --max-time 30 "$CANARY/ready" >/dev/null; then
+              echo "canary /ready ok (attempt $i)"; break
+            fi
+            if [ "$i" = "6" ]; then
+              echo "::error::Canary never became ready -- refusing to promote."
+              exit 1
+            fi
+            sleep 15
+          done
+
+          # /ready only proves dependencies resolve. Ask a real question, so
+          # a revision that is up but cannot retrieve or generate is caught
+          # here rather than by a visitor.
+          if ! curl -sf --max-time 120 -X POST "$CANARY/ask" \
+                -H 'Content-Type: application/json' \
+                -d '{"question": "What is the refund policy?"}' | grep -q '"groundedness"'; then
+            echo "::error::Canary answered /ask without a groundedness verdict -- refusing to promote."
+            exit 1
+          fi
+          echo "Canary passed health and functional probes."
+
           gcloud run services update-traffic rag-capstone --region=us-central1 --to-latest
           # --to-latest moves TRAFFIC but leaves the tag attached, so the
           # revision now serving 100% of production keeps answering on
@@ -171,3 +293,35 @@ jobs:
           # who trusts the name. The tag is reassigned on the next deploy
           # either way; this just stops it meaning the wrong thing in between.
           gcloud run services update-traffic rag-capstone --region=us-central1 --remove-tags=canary
+
+      # CD deploys by image tag and deliberately preserves the service's live
+      # env/secret configuration, which means the four cloudrun-*.yaml files
+      # are NOT the deployment source of truth and drift is neither applied
+      # nor noticed. That is not theoretical: this session found three live
+      # settings that had silently diverged from the checked-in config
+      # (startup-cpu-boost declared but never enabled, containerConcurrency
+      # 80 against a declared 10, and the upload caps missing from every
+      # YAML), each found by hand.
+      #
+      # Applying the YAML would fix drift and take the demo offline -- it
+      # re-mounts API_KEY, resets INGEST_TARGET_URL to a placeholder and
+      # drops TASKS_SERVICE_ACCOUNT_EMAIL (see cloudrun-vertexai.yaml). So
+      # this reports drift instead of correcting it, and does not fail the
+      # deploy: the intent is that someone reads it, not that a legitimate
+      # imperative change blocks shipping.
+      - name: Report config drift against the checked-in manifest
+        continue-on-error: true
+        run: |
+          echo "Live values for settings the YAML also declares:"
+          gcloud run services describe rag-capstone --region=us-central1 \
+            --format='value(spec.template.spec.containerConcurrency)' \
+            | sed 's/^/  containerConcurrency: /'
+          gcloud run services describe rag-capstone --region=us-central1 \
+            --format='value(spec.template.metadata.annotations)' \
+            | tr ';' '\n' | grep -E 'maxScale|cpu-boost' | sed 's/^/  /'
+          for k in MAX_UPLOAD_FILES MAX_UPLOAD_SIZE_MB MAX_SESSION_FILES RATE_LIMIT DAILY_BUDGET_USD ENABLE_UPLOADS; do
+            v=$(gcloud run services describe rag-capstone --region=us-central1 \
+                  --format="value(spec.template.spec.containers[0].env.filter(\"name:$k\").extract(\"value\"))" | tr -d '[]')
+            printf '  %s=%s\n' "$k" "${v:-<unset, falls back to config.py>}"
+          done
+          echo "Compare against cloudrun-vertexai.yaml before assuming the file describes production."

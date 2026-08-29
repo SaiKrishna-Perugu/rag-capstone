@@ -1,9 +1,23 @@
+# Deliberately a floating patch tag, NOT a digest pin. A review flagged all
+# three images here as mutable supply-chain inputs, which is true -- the same
+# git SHA can rebuild on different bytes. But this repo has no dependabot or
+# renovate, so a digest pin would never be bumped, and the base image would
+# stop receiving CVE fixes for a service that is on the public internet.
+# Floating on 3.13-slim trades build reproducibility for patch delivery,
+# which is the right way round here. Pin by digest the day something exists
+# to update the pin.
 FROM python:3.13-slim
 
 WORKDIR /app
 
 # Install uv directly from the official image (avoids pip entirely)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Version-pinned, unlike the base image above, and for the opposite reason:
+# `:latest` here is unbounded, so a uv major release could change what
+# `uv sync --frozen` does between two builds of the same commit. uv is a
+# build-time tool with no runtime attack surface in the shipped image, so
+# pinning it costs no security patching -- it only removes a way for the
+# build to change under us. Bump deliberately.
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
 
 # Install OS-level dependencies for psycopg2 (libpq) -- psycopg2-binary
 # bundles its own libpq, but having the system one avoids edge cases in
