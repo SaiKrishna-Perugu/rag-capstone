@@ -199,6 +199,15 @@ def list_session_documents(session_id: str) -> list[dict]:
     Backs the "your documents" list in the UI. Curated corpus files
     (session_id IS NULL) never appear -- a visitor manages their own uploads,
     not the shared sample set.
+
+    Expired rows are excluded, matching get_chunk_count() and
+    hybrid_search(). Without that filter this function disagreed with the
+    rest of the codebase about what a visitor owns, and the disagreement was
+    load-bearing in two places: /documents listed documents that retrieval
+    could no longer find, and /upload's per-visitor file cap counted them
+    against MAX_SESSION_FILES -- so a visitor whose uploads had expired
+    stayed locked out of uploading by documents that no longer existed for
+    any other purpose.
     """
     sql = """
         SELECT source,
@@ -207,6 +216,7 @@ def list_session_documents(session_id: str) -> list[dict]:
                MAX(expires_at)     AS expires_at
         FROM chunks
         WHERE session_id = %s
+          AND (expires_at IS NULL OR expires_at > now())
         GROUP BY source
         ORDER BY MIN(ingested_at)
     """

@@ -27,7 +27,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # docstrings and comments cross-reference sibling modules constantly, and
 # those references rot exactly like the ones in Markdown do.
 SCANNED_SUFFIXES = {".md", ".py", ".yaml", ".yml", ".html"}
-SCANNED_NAMES = {".env.example"}
+# Extensionless files that still carry instructions a reader follows.
+# Dockerfile earns its place the hard way: it told operators to run
+# `python -m app.ingest` long after that module moved, and no sweep saw it
+# because every scan keyed on a suffix this file does not have.
+SCANNED_NAMES = {".env.example", "Dockerfile"}
 
 SKIP_DIRS = {
     ".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_cache",
@@ -87,6 +91,39 @@ def test_referenced_module_paths_exist():
         + "\n  ".join(sorted(dead))
         + "\n\napp/ is organised into packages (api/, db/, ingestion/, llm/, "
           "retrieval/) -- a path like app/memory.py is pre-ebf0b35."
+    )
+
+
+MODULE_RE = re.compile(r"-m\s+(app(?:\.[A-Za-z0-9_]+)+)")
+
+
+def test_documented_module_invocations_resolve():
+    """`python -m app.foo.bar` in docs must name a real module.
+
+    The slash-form check above does not see these: the Dockerfile told
+    operators to run `python -m app.ingest` for eight months after
+    ebf0b35 moved it to app.ingestion.ingest, and every doc-path sweep
+    missed it because the string contains no `/`. Anyone following the
+    image's own instruction got ModuleNotFoundError and an unbuilt corpus.
+    """
+    dead: list[str] = []
+
+    for file in _scanned_files():
+        try:
+            text = file.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for dotted in set(MODULE_RE.findall(text)):
+            rel = Path(dotted.replace(".", "/"))
+            if (REPO_ROOT / rel).with_suffix(".py").is_file():
+                continue
+            if (REPO_ROOT / rel / "__init__.py").is_file():
+                continue
+            dead.append(f"{file.relative_to(REPO_ROOT).as_posix()}: python -m {dotted}")
+
+    assert not dead, (
+        "Documentation tells the reader to run modules that do not exist:\n  "
+        + "\n  ".join(sorted(dead))
     )
 
 

@@ -18,7 +18,7 @@ RUN uv sync --frozen
 COPY . .
 
 # NOTE: documents are now ingested into PostgreSQL (Cloud SQL + pgvector),
-# not a local chroma_db/ directory. Run `uv run python -m app.ingest`
+# not a local chroma_db/ directory. Run `uv run python -m app.ingestion.ingest`
 # after deploying with DATABASE_URL configured, or as part of a CI/CD
 # step that has access to the database.
 
