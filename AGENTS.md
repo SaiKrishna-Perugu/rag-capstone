@@ -437,17 +437,20 @@ command is recorded in `cloudrun-vertexai.yaml` next to that env var.
 `cd.yml` deploys by image tag, which preserves each service's existing
 env/secret configuration, so it never changes provider on its own.
 
-That last property has a consequence worth knowing before any
-`gcloud run services replace`: **`cloudrun-vertexai.yaml` appears never to
-have been applied to production.** The live template runs
-`containerConcurrency: 80` where that file says 10, carries
-`targetBurstCapacity: 100` which only the *groq* file sets, and until
-2026-08-29 was missing the `startup-cpu-boost` the file has declared for
-months. The shape is `cloudrun-groq.yaml`'s, with Vertex AI env vars
-layered on imperatively — consistent with the service having been created
-from the groq config and never re-declared. Nothing is broken, and
-`cd.yml` never touches it; the risk is entirely in assuming a `replace`
-against the vertexai file is a no-op. See `TODOS.md`.
+That last property had a consequence worth recording: **until 2026-08-29
+`cloudrun-vertexai.yaml` had never been applied to production at all.** The
+live template ran `containerConcurrency: 80` where that file said 10,
+carried a `targetBurstCapacity` and `livenessProbe` only the *groq* file
+sets, and was missing the `startup-cpu-boost` the file had declared for
+months — the shape was `cloudrun-groq.yaml`'s, with Vertex AI env vars
+layered on imperatively. The file has since been reconciled to match what
+is actually serving traffic, and the boost enabled, so applying it is no
+longer a leap. Two things that reconciliation is worth remembering for:
+its `startupProbe` had declared a ~32s budget that was never in force
+(production uses Cloud Run's default tcpSocket probe, 240s), and
+`containerConcurrency: 10` may have been a real intent that simply never
+took effect — treat changing it as a deliberate, load-tested change rather
+than a correction.
 
 The `cloudrun-*.yaml` configs mount `DATABASE_URL` from Secret Manager
 and connect to Cloud SQL via the Auth Proxy sidecar

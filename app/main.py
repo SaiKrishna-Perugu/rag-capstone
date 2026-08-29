@@ -103,11 +103,15 @@ async def lifespan(app: FastAPI):
     # Initialise database schema (idempotent — safe on every cold start)
     database.init_db()
 
-    # Warm on a background thread rather than inline: the startup probe
-    # allows roughly 32s (initialDelay 2 + 3 x period 10) and the work here
-    # is a network round trip of unbounded duration, so blocking readiness
-    # on it trades a slow first request for a failed deploy. Daemon, so it
-    # can never hold shutdown open.
+    # Warm on a background thread rather than inline. The work here is a
+    # network round trip of unbounded duration -- credential acquisition
+    # against a provider that may be slow or down -- and blocking readiness
+    # on that trades a slow first request for a failed deploy. Production's
+    # startup probe does allow 240s (Cloud Run's default tcpSocket probe;
+    # the tighter httpGet one this repo's YAML used to declare was never
+    # actually applied), but "usually finishes inside the budget" is not a
+    # property worth depending on for something entirely off the request
+    # path. Daemon, so it can never hold shutdown open.
     if config.ENABLE_STARTUP_WARMUP:
         threading.Thread(target=_warm_providers, name="provider-warmup", daemon=True).start()
 

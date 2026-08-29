@@ -15,11 +15,30 @@ spec:
         # limiter approximately honest (worst case 2x) and caps worst-case
         # compute on a publicly reachable demo.
         autoscaling.knative.dev/maxScale: '2'
+        # Enabled on the live service 2026-08-29. It had been declared here
+        # for months without being applied, and a review read the line and
+        # recorded the work as done -- which is the argument for the
+        # reconciliation note below.
         run.googleapis.com/startup-cpu-boost: 'true'
+        autoscaling.knative.dev/targetBurstCapacity: '100'
         # Cloud SQL Auth Proxy sidecar (auto-manages secure connections)
         run.googleapis.com/cloudsql-instances: YOUR_PROJECT_ID:us-central1:rag-capstone-db
     spec:
-      containerConcurrency: 10
+      # 80, matching the live service, not the 10 this file used to declare.
+      # The values in this block were reconciled against production on
+      # 2026-08-29 after the divergence was found: live ran 80 with a
+      # targetBurstCapacity and a livenessProbe that only cloudrun-groq.yaml
+      # sets, i.e. the service was created from the groq config and had Vertex
+      # AI env vars layered on imperatively, so nothing here had ever been
+      # applied. They now describe the configuration that is actually running
+      # and serving traffic, so filling in the placeholders and applying this
+      # file yields the tested setup rather than an untried one.
+      #
+      # If 10 was a deliberate intent -- lower concurrency per instance for a
+      # request that makes three LLM calls -- that is a real change to make
+      # and load-test on purpose, not to reintroduce by leaving it written
+      # down here where it has never taken effect.
+      containerConcurrency: 80
       timeoutSeconds: 300
       # Must be rag-capstone-sa, NOT the default compute service account:
       # rag-capstone-sa is the identity holding secretmanager.secretAccessor
@@ -37,14 +56,25 @@ spec:
           limits:
             cpu: '2'
             memory: 2Gi
+        # Matches the live service. The previous declaration here was an
+        # httpGet on /health with initialDelay 2 / period 10 / threshold 3 --
+        # a ~32s budget that has never actually been in force, since
+        # production runs Cloud Run's default tcpSocket probe. Anything
+        # reasoning about "how long may startup take" must read this as 240s.
         startupProbe:
+          tcpSocket:
+            port: 8080
+          failureThreshold: 1
+          periodSeconds: 240
+          timeoutSeconds: 240
+        livenessProbe:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 2
-          timeoutSeconds: 2
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 1
           failureThreshold: 3
-          periodSeconds: 10
         env:
         # Regex-only screening; no tokens, no extra latency.
         - name: ENABLE_INJECTION_SCREENING

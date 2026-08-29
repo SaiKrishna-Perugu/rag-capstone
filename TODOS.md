@@ -7,18 +7,6 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Open
 
-- **`cloudrun-vertexai.yaml` appears never to have been applied to the live
-  production service.** Live runs `containerConcurrency: 80` where that file
-  says 10, and until 2026-08-29 it was also missing the file's
-  `startup-cpu-boost`. The shape of the live template (concurrency 80,
-  `targetBurstCapacity: 100`, no `launch-stage`) is the *groq* config's, with
-  vertexai env vars layered on imperatively — consistent with the service
-  having been created from `cloudrun-groq.yaml` and never re-declared since.
-  Nothing is broken today, and `cd.yml` deploys by image tag so it never
-  touches this. It matters because the next `gcloud run services replace`
-  against the vertexai file will change more than whoever runs it expects.
-  Worth reconciling file-to-live deliberately rather than discovering it
-  during a deploy.
 - **GCP free-trial credits lapse around 2026-11-10** ($300 / 90 days;
   project created 2026-08-12). Credit expiry is the likeliest cause of a
   dead demo link, and no code change prevents it — it needs a billing
@@ -41,6 +29,19 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Resolved
 
+- **`cloudrun-vertexai.yaml` had never been applied to production** — live
+  ran `containerConcurrency: 80` against the file's 10, plus a
+  `targetBurstCapacity` and `livenessProbe` only `cloudrun-groq.yaml` sets,
+  i.e. the service was created from the groq config with Vertex AI env vars
+  layered on imperatively. Reconciled file-to-live on 2026-08-29: the file
+  now describes the configuration actually serving traffic, so filling in
+  the placeholders and applying it yields the tested setup. Also corrected
+  the declared `startupProbe`, which claimed a ~32s budget that has never
+  been in force (production runs Cloud Run's default tcpSocket probe at
+  240s) — and the comment in `main.py::_warm_providers` that had cited that
+  32s figure. If `containerConcurrency: 10` was deliberate, it is a real
+  change to make and load-test, not one to leave written where it never
+  took effect.
 - **"Cold start ~25s to first answer" — measured, and it was mostly not
   cold start.** On the live service `/health` answered in 0.35s, the next
   `/ask` took 20.6s, and everything after was under 0.7s (including a novel
