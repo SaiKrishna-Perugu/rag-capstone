@@ -98,6 +98,14 @@ spec:
           value: "6"
         - name: MAX_SESSION_FILES_AUTHED
           value: "30"
+        # Bounds on the semantic cache. It shipped with none, so every
+        # uncached question on a public endpoint added a permanent row and
+        # its HNSW index grew without limit. Both are needed: the TTL does
+        # not cap a burst inside one window, the row cap does not cap age.
+        - name: CACHE_TTL_HOURS
+          value: "24"
+        - name: MAX_CACHE_ROWS
+          value: "5000"
         # Deliberately shared with production: Firestore Native mode is
         # one database per GCP project by default, so conversation memory
         # (conversation_sessions) and job tracking (ingest_jobs) aren't

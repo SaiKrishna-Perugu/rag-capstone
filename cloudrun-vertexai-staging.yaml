@@ -52,11 +52,16 @@ spec:
         # Regex-only screening; no tokens, no extra latency.
         - name: ENABLE_INJECTION_SCREENING
           value: "true"
-        # Deliberately false: this fails CLOSED, so turning it on before
-        # running `gcloud services enable dlp.googleapis.com` replaces every
-        # logged question/answer with "[redaction unavailable]".
+        # TRUE, matching production. This was "false" with a note saying
+        # enabling it before `gcloud services enable dlp.googleapis.com`
+        # would replace every logged question/answer with "[redaction
+        # unavailable]" -- correct at the time, but DLP has since been
+        # enabled on this project and production has run with redaction on
+        # for weeks. Leaving staging on the opposite setting meant the one
+        # environment meant to reproduce production could not catch a DLP
+        # regression in the control that exists to protect visitors' text.
         - name: ENABLE_PII_REDACTION
-          value: "false"
+          value: "true"
         - name: MODEL_PROVIDER
           value: "vertexai"
         - name: GCP_PROJECT_ID
@@ -103,6 +108,14 @@ spec:
           value: "6"
         - name: MAX_SESSION_FILES_AUTHED
           value: "30"
+        # Bounds on the semantic cache. It shipped with none, so every
+        # uncached question on a public endpoint added a permanent row and
+        # its HNSW index grew without limit. Both are needed: the TTL does
+        # not cap a burst inside one window, the row cap does not cap age.
+        - name: CACHE_TTL_HOURS
+          value: "24"
+        - name: MAX_CACHE_ROWS
+          value: "5000"
         # Same reasoning as production's cloudrun-vertexai.yaml: 0 (disabled)
         # is how this shipped before. Staging shares the project's single
         # Cloud Billing budget with production, so this is deliberately not
