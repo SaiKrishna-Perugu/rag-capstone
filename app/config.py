@@ -293,6 +293,14 @@ GROUNDEDNESS_SAMPLE_RATE = float(os.getenv("GROUNDEDNESS_SAMPLE_RATE", "1.0"))
 # worst case is about twice this number. This is abuse and runaway
 # mitigation; the authoritative stop remains the billing budget alert.
 DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "0"))
+# Placeholder cost reserved for one in-flight /ask* request, so the ceiling
+# above cannot be walked past by requests that were all admitted before any
+# of them recorded spend (see llm/budget.py::try_admit). Deliberately close
+# to a real request rather than worst-case: a measured /ask on
+# gemini-2.5-flash-lite runs roughly $0.0015 across its three calls, and
+# over-reserving would refuse traffic the budget could afford. Only the
+# admission decision uses it -- actual spend is still what cost.py records.
+BUDGET_REQUEST_ESTIMATE_USD = float(os.getenv("BUDGET_REQUEST_ESTIMATE_USD", "0.002"))
 
 # --- LLM Resilience -------------------------------------------------------
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))

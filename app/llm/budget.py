@@ -48,6 +48,14 @@ class DailyBudget:
         self._lock = threading.Lock()
         self._day: datetime.date | None = None
         self._spent_usd = 0.0
+        # Estimated spend of requests admitted but not yet finished. Without
+        # it the ceiling was check-then-spend: is_exceeded() only sees money
+        # already recorded, so N requests arriving together all read the same
+        # under-limit total, all pass, and all then make their paid calls.
+        # At containerConcurrency 80 that is up to 80 requests past a ceiling
+        # meant to stop the first one. Counting in-flight work closes the
+        # window between admission and the first add_usage().
+        self._reserved_usd = 0.0
 
     @staticmethod
     def _today() -> datetime.date:
@@ -75,11 +83,52 @@ class DailyBudget:
             return False  # disabled
         return self.spent_today() >= limit
 
+    def try_admit(self, estimate_usd: float) -> bool:
+        """Reserve `estimate_usd` for one request, or refuse it.
+
+        Atomic check-and-reserve: the decision and the reservation happen
+        under one lock, so concurrent callers cannot all observe the same
+        pre-spend total. Every True must be paired with a release() in a
+        finally block, or the reservation leaks and the process refuses
+        traffic it could have served.
+
+        Returns True when the budget is disabled -- an unset ceiling admits
+        everything, same as is_exceeded().
+        """
+        limit = config.DAILY_BUDGET_USD
+        if limit <= 0:
+            return True
+        with self._lock:
+            if self._today() != self._day:
+                self._day = self._today()
+                self._spent_usd = 0.0
+                self._reserved_usd = 0.0
+            if self._spent_usd + self._reserved_usd >= limit:
+                return False
+            self._reserved_usd += estimate_usd
+            return True
+
+    def release(self, estimate_usd: float) -> None:
+        """Drop a reservation once the request is done.
+
+        The real cost was recorded through record() by cost.add_usage() as
+        each call completed; this only removes the placeholder. Floored at
+        zero so a double release cannot drive the counter negative and
+        silently raise the effective ceiling.
+        """
+        with self._lock:
+            self._reserved_usd = max(0.0, self._reserved_usd - estimate_usd)
+
+    def reserved(self) -> float:
+        with self._lock:
+            return self._reserved_usd
+
     def reset(self) -> None:
         """Clear state. For tests -- production relies on the date rollover."""
         with self._lock:
             self._day = None
             self._spent_usd = 0.0
+            self._reserved_usd = 0.0
 
 
 _budget = DailyBudget()
@@ -95,6 +144,22 @@ def spent_today() -> float:
 
 def is_exceeded() -> bool:
     return _budget.is_exceeded()
+
+
+def try_admit(estimate_usd: float | None = None) -> bool:
+    return _budget.try_admit(
+        config.BUDGET_REQUEST_ESTIMATE_USD if estimate_usd is None else estimate_usd
+    )
+
+
+def release(estimate_usd: float | None = None) -> None:
+    _budget.release(
+        config.BUDGET_REQUEST_ESTIMATE_USD if estimate_usd is None else estimate_usd
+    )
+
+
+def reserved() -> float:
+    return _budget.reserved()
 
 
 def reset() -> None:

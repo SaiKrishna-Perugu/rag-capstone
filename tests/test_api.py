@@ -2,6 +2,30 @@ from unittest.mock import patch
 
 from app import config
 
+# /upload requires an owning session: without one the file can never be
+# ingested (ingest.run()'s ownership gate refuses it), so the endpoint now
+# refuses at the boundary instead of returning 202 and failing the job with
+# a misleading error. Browsers always send this header; these tests are
+# "anonymous" in the sense of not signed in, which is a different axis.
+_SESSION = {"X-Session-Id": "test-session"}
+
+
+def test_upload_without_session_header_is_refused(client):
+    """The 400 that replaced a 202-then-fail. The message must name the
+    header, because that is the only thing the caller can act on."""
+    files = {"files": ("notes.txt", b"hello world", "text/plain")}
+    response = client.post("/upload", files=files)
+    assert response.status_code == 400
+    assert "X-Session-Id" in response.json()["detail"]["error"]
+
+
+def test_upload_with_malformed_session_header_is_refused(client):
+    """_doc_session's allowlist returns None for a traversal attempt, and
+    None must now be refused rather than silently treated as 'no session'."""
+    files = {"files": ("notes.txt", b"hello world", "text/plain")}
+    response = client.post("/upload", files=files, headers={"X-Session-Id": "../../app"})
+    assert response.status_code == 400
+
 
 def test_health_check(client):
     # /health is a pure liveness probe -- doesn't touch the vector store,
@@ -32,7 +56,7 @@ def test_ask_endpoint_success(client, mock_cache, mock_retrieval, mock_llm_answe
 def test_upload_endpoint_validation(client):
     # Test uploading a disallowed file type
     files = {"files": ("test.exe", b"malicious payload", "application/x-msdownload")}
-    response = client.post("/upload", files=files)
+    response = client.post("/upload", files=files, headers=_SESSION)
     assert response.status_code == 400
     detail = response.json()["detail"]
     assert "Unsupported file type" in detail["error"]
@@ -41,7 +65,7 @@ def test_upload_endpoint_validation(client):
 def test_upload_endpoint_disabled(client, monkeypatch):
     monkeypatch.setattr(config, "ENABLE_UPLOADS", False)
     files = {"files": ("test.txt", b"hello", "text/plain")}
-    response = client.post("/upload", files=files)
+    response = client.post("/upload", files=files, headers=_SESSION)
     assert response.status_code == 403
     assert "disabled" in response.json()["detail"]["error"].lower()
 
@@ -58,7 +82,7 @@ def test_upload_rejects_html_metacharacters_in_filename(client):
     the server-side check covers both, but only one is expressible through
     this client."""
     files = {"files": ("evil<img src=x onerror=alert(1)>.txt", b"hello", "text/plain")}
-    response = client.post("/upload", files=files)
+    response = client.post("/upload", files=files, headers=_SESSION)
     assert response.status_code == 400
     assert "may not contain" in response.json()["detail"]["error"]
 
@@ -73,7 +97,7 @@ def test_anonymous_upload_still_works(client, monkeypatch, tmp_path):
     with patch("app.ingestion.jobs.create_job", return_value="job-anon"):
         with patch("app.ingestion.jobs.process_job"):
             files = {"files": ("notes.txt", b"hello world", "text/plain")}
-            response = client.post("/upload", files=files)   # no auth headers
+            response = client.post("/upload", files=files, headers=_SESSION)   # no auth headers
     assert response.status_code == 202
 
 
@@ -83,7 +107,7 @@ def test_upload_rejects_too_many_files(client, monkeypatch):
     hundreds of small ones into a publicly-writable demo corpus."""
     monkeypatch.setattr(config, "MAX_UPLOAD_FILES", 2)
     files = [("files", (f"doc{i}.txt", b"hello", "text/plain")) for i in range(3)]
-    response = client.post("/upload", files=files)
+    response = client.post("/upload", files=files, headers=_SESSION)
     assert response.status_code == 400
     assert "Too many files" in response.json()["detail"]["error"]
 
@@ -94,7 +118,7 @@ def test_upload_rejects_when_corpus_full(client, monkeypatch):
     monkeypatch.setattr(config, "MAX_CORPUS_CHUNKS", 10)
     monkeypatch.setattr("app.main.database.get_chunk_count", lambda: 10)
     files = {"files": ("test.txt", b"hello", "text/plain")}
-    response = client.post("/upload", files=files)
+    response = client.post("/upload", files=files, headers=_SESSION)
     assert response.status_code == 507
     assert "full" in response.json()["detail"]["error"].lower()
 
@@ -113,7 +137,7 @@ def test_upload_corpus_check_fails_open(client, monkeypatch, tmp_path):
     with patch("app.ingestion.jobs.create_job", return_value="job-123"):
         with patch("app.ingestion.jobs.process_job"):
             files = {"files": ("test.txt", b"hello", "text/plain")}
-            response = client.post("/upload", files=files)
+            response = client.post("/upload", files=files, headers=_SESSION)
     assert response.status_code == 202
 
 def test_upload_endpoint_success_processes_in_background_without_gcp(client, monkeypatch, tmp_path):
@@ -129,7 +153,7 @@ def test_upload_endpoint_success_processes_in_background_without_gcp(client, mon
     with patch("app.ingestion.jobs.create_job", return_value="job-123") as mock_create:
         with patch("app.ingestion.jobs.process_job") as mock_process:
             files = {"files": ("test.txt", b"hello world", "text/plain")}
-            response = client.post("/upload", files=files)
+            response = client.post("/upload", files=files, headers=_SESSION)
 
     assert response.status_code == 202
     data = response.json()
@@ -144,7 +168,7 @@ def test_upload_endpoint_enqueues_cloud_task_when_gcp_configured(client, monkeyp
     with patch("app.ingestion.jobs.create_job", return_value="job-456"):
         with patch("app.ingestion.jobs.enqueue_cloud_task") as mock_enqueue:
             files = {"files": ("test.txt", b"hello world", "text/plain")}
-            response = client.post("/upload", files=files)
+            response = client.post("/upload", files=files, headers=_SESSION)
 
     assert response.status_code == 202
     mock_enqueue.assert_called_once_with("job-456")
@@ -153,7 +177,7 @@ def test_upload_endpoint_job_tracking_unavailable(client, monkeypatch, tmp_path)
     monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
     with patch("app.ingestion.jobs.create_job", side_effect=RuntimeError("Firestore is not configured")):
         files = {"files": ("test.txt", b"hello world", "text/plain")}
-        response = client.post("/upload", files=files)
+        response = client.post("/upload", files=files, headers=_SESSION)
     assert response.status_code == 503
 
 def test_get_job_status_found(client):

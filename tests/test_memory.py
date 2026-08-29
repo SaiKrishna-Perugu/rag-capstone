@@ -62,13 +62,52 @@ def test_history_capped_at_five_turns():
     mock_client = MagicMock()
     mock_client.collection.return_value.document.return_value = mock_doc_ref
 
-    with patch("app.retrieval.memory._get_client", return_value=mock_client):
-        memory.add_to_history("session-1", "new question", "new answer")
+    # The write goes through the transaction, not doc_ref.set -- see
+    # memory._apply_turn. Driving it directly keeps this test about the
+    # capping rule rather than about Firestore's transaction protocol.
+    txn = MagicMock()
+    memory._apply_turn(txn, mock_doc_ref, "new question", "new answer")
 
-    written = mock_doc_ref.set.call_args[0][0]
+    written = txn.set.call_args[0][1]
     assert len(written["turns"]) == 5
     assert written["turns"][-1] == {"question": "new question", "answer": "new answer"}
     assert written["turns"][0]["question"] == "q1"  # oldest (q0) evicted
+    # Read must join the transaction, or the append races exactly as before.
+    mock_doc_ref.get.assert_called_once_with(transaction=txn)
+
+
+def test_add_to_history_commits_through_a_transaction():
+    """add_to_history swallows every exception, so a transaction that never
+    commits would be indistinguishable from success. Assert the wrapper
+    actually runs the callback and writes."""
+    from unittest.mock import ANY
+
+    from app.retrieval import memory
+
+    snap = MagicMock()
+    snap.exists = False
+    doc_ref = MagicMock()
+    doc_ref.get.return_value = snap
+
+    txn = MagicMock()
+    client = MagicMock()
+    client.collection.return_value.document.return_value = doc_ref
+    client.transaction.return_value = txn
+
+    # Stand in for firestore.transactional: return a callable that invokes
+    # the wrapped function, which is what the real decorator does once the
+    # transaction is open.
+    fake_firestore = MagicMock()
+    fake_firestore.transactional = lambda fn: fn
+
+    with patch("app.retrieval.memory._get_client", return_value=client), \
+         patch.dict("sys.modules", {"google.cloud.firestore": fake_firestore}), \
+         patch("google.cloud.firestore", fake_firestore, create=True):
+        memory.add_to_history("session-1", "q", "a")
+
+    txn.set.assert_called_once_with(doc_ref, ANY)
+    written = txn.set.call_args[0][1]
+    assert written["turns"] == [{"question": "q", "answer": "a"}]
 
 
 def test_contextualize_question_rewrites_with_history():

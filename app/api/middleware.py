@@ -54,6 +54,7 @@ FastAPI app in main.py because FastAPI/Starlette provide first-class
 support for those -- no need to reinvent them as custom middleware.
 """
 
+import asyncio
 import logging
 import secrets
 
@@ -211,7 +212,14 @@ class IdentityMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
-        request.state.identity = auth.identity_from_header(
-            request.headers.get("Authorization")
+        # verify_firebase_token does synchronous network I/O (fetching and
+        # caching Google's signing certs) plus RSA verification. Calling it
+        # straight from async middleware blocks the event loop for every
+        # request in the process, and this middleware runs BEFORE rate
+        # limiting -- so a burst of junk bearer tokens stalls /health and
+        # /ready too, on a service whose liveness probe has a 1s timeout.
+        # A thread keeps the loop free; identity resolution stays fail-open.
+        request.state.identity = await asyncio.to_thread(
+            auth.identity_from_header, request.headers.get("Authorization")
         )
         return await call_next(request)

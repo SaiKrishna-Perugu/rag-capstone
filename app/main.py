@@ -208,7 +208,23 @@ async def add_security_headers(request: Request, call_next):
     Deployments should promote it to `Content-Security-Policy` after
     confirming a clean console in a signed-in session.
     """
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    finally:
+        # Release any budget reservation _enforce_daily_budget took, however
+        # the request ended. A leaked reservation is permanent for the life
+        # of the process and silently lowers the effective ceiling until
+        # restart, so this runs on the exception path too.
+        #
+        # For /ask-stream this releases when the StreamingResponse is
+        # returned, not when the last token is sent -- the reservation
+        # therefore under-covers a long stream. Actual spend is still
+        # recorded by cost.add_usage() as each call completes, so the
+        # accounting stays right; only the admission window is narrower.
+        if getattr(request.state, "budget_reserved", False):
+            budget.release()
+            request.state.budget_reserved = False
+
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -362,7 +378,7 @@ def _doc_session(request: Request) -> str | None:
     return raw
 
 
-def _enforce_daily_budget(request_id: str, endpoint: str) -> None:
+def _enforce_daily_budget(request_id: str, endpoint: str, request: Request | None = None) -> None:
     """Refuse the request if today's estimated LLM spend ceiling is reached.
 
     Called AFTER injection screening (which is free and gives a more useful
@@ -375,8 +391,22 @@ def _enforce_daily_budget(request_id: str, endpoint: str) -> None:
     will not help -- the service is deliberately unavailable until the UTC
     day rolls over. See app/llm/budget.py for why the number is an estimate
     and why the counter is per-process.
+
+    Admission RESERVES an estimated request cost rather than only reading
+    spend-to-date, so concurrent callers cannot all pass a check none of
+    them has yet paid for. Every caller that gets past this function must
+    call budget.release() in a finally block.
     """
-    if not budget.is_exceeded():
+    if budget.try_admit():
+        # Flag the reservation so add_security_headers -- the outermost
+        # middleware, and the one place every request path converges -- can
+        # release it however the request ends, including on an unhandled
+        # exception. Doing it here rather than with try/finally in each
+        # handler keeps three long handlers from each needing a correct
+        # finally, which is the kind of thing that gets missed when a fourth
+        # endpoint is added.
+        if request is not None:
+            request.state.budget_reserved = True
         return
     metrics.record_budget_exceeded()
     logger.warning(json.dumps({
@@ -531,6 +561,31 @@ async def upload_files(
     # cap is abuse mitigation, not a correctness invariant, and a transient
     # DB blip shouldn't reject a legitimate upload.
     doc_session = _doc_session(request)
+
+    # An upload with no owning session can never be ingested: ingest.run()'s
+    # ownership gate refuses every file under uploads/ when session_id is
+    # None, precisely so an orphaned file cannot be promoted into the curated
+    # corpus. Accepting the request anyway returned 202 and then failed the
+    # job with "No supported files found in 'docs'" -- which is untrue and
+    # unactionable, since the file's type was never the problem. Probed on
+    # the live service before fixing: job e9c415a6 ended `failed` with that
+    # message for a plain .md upload.
+    #
+    # 400 at the boundary instead. The header is missing or malformed (see
+    # _doc_session's allowlist), and naming it is the only way the caller can
+    # act. Browsers always send it; this is the path an API client hits.
+    if not doc_session:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "Uploads require an X-Session-Id header identifying the "
+                    "owning session. It may contain only letters, digits, "
+                    "hyphens and underscores."
+                ),
+                "request_id": request_id,
+            },
+        )
 
     # Per-session ceiling, checked first: without it one visitor can consume
     # the entire global budget below and lock everyone else out of uploading.
@@ -959,7 +1014,7 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
                     "request_id": request_id},
         )
 
-    _enforce_daily_budget(request_id, "ask")
+    _enforce_daily_budget(request_id, "ask", request)
 
     # --- Conversation Memory: Contextualize Question ----------------------
     contextualized_q = await asyncio.to_thread(
@@ -1089,7 +1144,7 @@ async def ask_stream(request: Request, body: AskRequest):
     Clients should read the stream for `{"token": "..."}` payloads,
     followed by a `{"type": "final", ...}` payload at the end.
     """
-    _enforce_daily_budget(str(uuid.uuid4()), "ask-stream")
+    _enforce_daily_budget(str(uuid.uuid4()), "ask-stream", request)
 
     return StreamingResponse(
         streaming.stream_answer(
@@ -1129,7 +1184,7 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
                     "request_id": request_id},
         )
 
-    _enforce_daily_budget(request_id, "ask-agentic")
+    _enforce_daily_budget(request_id, "ask-agentic", request)
 
     # --- Conversation Memory: Contextualize Question ----------------------
     contextualized_q = await asyncio.to_thread(
