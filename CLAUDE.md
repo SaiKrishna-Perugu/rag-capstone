@@ -387,7 +387,12 @@ be called with the same question to compare behavior.
   and does client construction, credential acquisition and its first
   connection on first *use*, so the first visitor to ask anything paid for
   all of it. Post-deploy the same shape of request returns in **2.85s**,
-  which is the pipeline's own three-call cost. It warms on a thread rather
+  which is the pipeline's own three-call cost. The warmup narrows that
+  window rather than closing it: a request landing within a few seconds of
+  container start still races the warmup and waits on the same `lru_cache`
+  construction (observed once at 19.9s immediately after a revision
+  switch). In normal traffic the uptime check wakes the instance well
+  before a visitor arrives, which is the case it is built for. It warms on a thread rather
   than inline because the work is an unbounded network round trip and
   blocking readiness on it would trade a slow first request for a failed
   deploy — **not** because of a tight probe budget: production uses Cloud
