@@ -52,7 +52,10 @@ tradeoff is written up in `app/retrieval/hybrid.py`'s module docstring.
 
 Two levers exist for that cost without changing the pipeline:
 `GROUNDEDNESS_SAMPLE_RATE` (the check is a whole extra LLM call over the same
-context) and `DAILY_BUDGET_USD` (a hard per-day ceiling). Both ship inert.
+context) and `DAILY_BUDGET_USD` (a hard per-day ceiling). The sampling lever
+ships inert at 1.0; the budget is set to $0.25/day in the Cloud Run configs,
+chosen to sit under the project's own Cloud Billing budget rather than picked
+out of the air.
 
 ## Architecture
 
@@ -247,6 +250,9 @@ uv run python eval.py
 
 **5. Run the RAGAS eval harness**: Standardized RAGAS metrics (slower, more expensive, deep analysis of retrieval/generation):
 ```bash
+# ragas and datasets live in the `eval` dependency group, not the default
+# install -- they add ~249MB that has no business in the Cloud Run image.
+uv sync --frozen --group eval
 uv run python eval_ragas.py
 ```
 This scores four standardized RAGAS metrics: **Faithfulness** (hallucination
@@ -786,6 +792,7 @@ app/
     providers.py  # get_llm()/get_embeddings() factory -- the only place that branches on MODEL_PROVIDER
     circuit.py    # circuit breaker per provider; backs the failover in providers.py
     cost.py       # per-request token/cost attribution, broken down by pipeline stage
+    budget.py     # daily spend ceiling (DAILY_BUDGET_USD), fed by cost.add_usage()
   retrieval/
     hybrid.py     # hybrid retrieval (tsvector + pgvector, RRF) + LLM reranking
     rag.py        # single-pass retrieve -> generate -> groundedness check
@@ -795,6 +802,7 @@ app/
   ingestion/
     ingest.py     # load -> chunk -> embed -> persist; incremental via content hash
     jobs.py       # async job tracking (Firestore) + Cloud Tasks enqueueing
+    storage.py    # stages uploads in Cloud Storage so a job isn't tied to one instance
   api/
     middleware.py # tiered access (probe/public/admin/internal) + optional Firebase identity
     auth.py       # optional Firebase identity -- additive, raises upload limits, never gates
@@ -806,13 +814,16 @@ scripts/
   check_thresholds.py # CI eval-gate: fails the build if eval_ragas.py's scores drop below floor
 eval.py         # custom eval harness (LLM-as-judge, correctness + groundedness)
 eval_ragas.py   # RAGAS eval harness (faithfulness, relevancy, precision, recall)
+TODOS.md        # deferred decisions and open items, with the measurement behind each
 .github/workflows/
   ci.yml          # lint + fully-mocked unit tests
   eval.yml        # eval-gate: real Vertex AI calls against an ephemeral Postgres, blocks bad PRs
   cd.yml          # build -> deploy staging -> smoke test -> canary-promote to production
-  cloudrun-groq.yaml         # Declarative Cloud Run configuration for Groq (production)
-  cloudrun-groq-staging.yaml # Same, for the staging service cd.yml deploys to
-  cloudrun-vertexai.yaml     # Declarative Cloud Run configuration for Vertex AI
+  uptime.yml      # scheduled /health check on the demo URL; a failed run emails the owner
+cloudrun-groq.yaml             # Declarative Cloud Run configuration for Groq (production)
+cloudrun-groq-staging.yaml     # Same, for the staging service cd.yml deploys to
+cloudrun-vertexai.yaml         # Declarative Cloud Run configuration for Vertex AI
+cloudrun-vertexai-staging.yaml # Same, for staging -- this is what is actually deployed
 Dockerfile
 pyproject.toml
 ```

@@ -36,6 +36,9 @@ uv run pytest tests/test_rag.py::test_generate_answer  # single test
 
 # Eval harnesses (require a populated Postgres vector store -- DATABASE_URL -- and live API access -- not mocked)
 uv run python eval.py          # custom LLM-as-judge: correctness + groundedness
+# eval_ragas.py needs the `eval` dependency group (ragas + datasets, ~249MB,
+# deliberately excluded from the default sync and so from the Docker image):
+uv sync --frozen --group eval
 uv run python eval_ragas.py    # RAGAS: faithfulness, relevancy, context precision/recall
 ```
 
@@ -218,7 +221,9 @@ be called with the same question to compare behavior.
   mid-stream would restart the answer and the reader would watch it
   duplicate itself.
 - `llm/budget.py` — daily LLM spend ceiling (`DAILY_BUDGET_USD`, 0 =
-  disabled, and it ships disabled). Distinct from `circuit.py`: the breaker
+  disabled). The code default is still 0, but all four `cloudrun-*.yaml`
+  set it to `0.25`, chosen to sit under the project's separate Cloud
+  Billing budget rather than guessed. Distinct from `circuit.py`: the breaker
   stops calls to a provider that is *broken*, this stops calls that are
   merely *expensive*, and a healthy provider plus a scripted loop against a
   public URL trips neither retry, failover nor rate limiting. Fed from
@@ -363,8 +368,18 @@ be called with the same question to compare behavior.
 - `main.py` — FastAPI app/routes; every `/ask*` request is logged as one
   structured JSON line to `logs/requests.log` (question, sources,
   groundedness, retries, latency) — this is the primary observability
-  signal, check it when debugging request behavior. `/health` is a pure
-  liveness probe (`{"status": "ok"}`, no dependency checks) — `/ready`
+  signal, check it when debugging request behavior. The `lifespan` startup
+  hook runs `init_db()` and then warms the providers on a **background
+  thread** (`_warm_providers`, `ENABLE_STARTUP_WARMUP`, default true).
+  That exists because of a measurement, not a hunch: on the live service
+  `/health` answered in 0.35s while the very next `/ask` took **20.6s** and
+  every request after it was under 0.7s. `get_embeddings()` is `lru_cache`d
+  and does client construction, credential acquisition and its first
+  connection on first *use*, so the first visitor to ask anything paid for
+  all of it. It warms on a thread rather than inline because the startup
+  probe allows only ~32s and this is an unbounded network round trip —
+  blocking readiness on it trades a slow first request for a failed deploy.
+  Fails open. `/health` is a pure liveness probe (`{"status": "ok"}`, no dependency checks) — `/ready`
   is the one that checks the vector store and is what Cloud Run's
   readiness probe hits. `/config` exposes non-secret runtime flags for
   `ui.html` to adapt to: `enable_uploads`, `model_provider`, the upload
@@ -421,6 +436,18 @@ against production re-enables auth and locks visitors out; the restore
 command is recorded in `cloudrun-vertexai.yaml` next to that env var.
 `cd.yml` deploys by image tag, which preserves each service's existing
 env/secret configuration, so it never changes provider on its own.
+
+That last property has a consequence worth knowing before any
+`gcloud run services replace`: **`cloudrun-vertexai.yaml` appears never to
+have been applied to production.** The live template runs
+`containerConcurrency: 80` where that file says 10, carries
+`targetBurstCapacity: 100` which only the *groq* file sets, and until
+2026-08-29 was missing the `startup-cpu-boost` the file has declared for
+months. The shape is `cloudrun-groq.yaml`'s, with Vertex AI env vars
+layered on imperatively — consistent with the service having been created
+from the groq config and never re-declared. Nothing is broken, and
+`cd.yml` never touches it; the risk is entirely in assuming a `replace`
+against the vertexai file is a no-op. See `TODOS.md`.
 
 The `cloudrun-*.yaml` configs mount `DATABASE_URL` from Secret Manager
 and connect to Cloud SQL via the Auth Proxy sidecar
