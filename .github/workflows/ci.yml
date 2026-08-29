@@ -9,9 +9,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-    
+    # No GROQ_API_KEY here on purpose. This suite is fully mocked -- it
+    # patches config.GROQ_API_KEY directly (tests/test_circuit.py) and never
+    # reads the env var -- and config.py's _IS_CI check keys off
+    # GITHUB_ACTIONS, so the key-required guard already relaxes itself here.
+    # Wiring a live secret into a job that cannot use it is how an
+    # integration test added later starts making real paid calls without
+    # anyone deciding it should. eval.yml is where real API calls belong,
+    # deliberately kept separate for exactly that reason.
+
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 

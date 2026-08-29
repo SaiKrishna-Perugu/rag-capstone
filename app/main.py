@@ -236,6 +236,28 @@ class AskRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Optional session ID for conversation memory.")
 
 
+def _honor_hallucination_opt_out(requested: bool) -> bool:
+    """Whether to respect a caller's `check_hallucination=False`.
+
+    The groundedness verdict is the demo's central claim -- it is what
+    distinguishes an answer from an assertion -- and on the open public tier
+    any anonymous caller could switch it off per request. That is not an
+    abuse lever (skipping a judge call makes a request cheaper, not more
+    expensive) but it does mean the displayed verdict is only as trustworthy
+    as the client that asked for it.
+
+    So the opt-out is honored only where the deployment is gated by
+    API_KEY: staging and private integrations, where the caller is known and
+    may legitimately want the latency back. With no API_KEY -- the public
+    demo -- every answer is judged, regardless of what the body says. The
+    sampling lever (GROUNDEDNESS_SAMPLE_RATE) remains the operator-side way
+    to trade verdicts for cost, which is the right place for that decision.
+    """
+    if config.API_KEY:
+        return requested
+    return True
+
+
 class SourceChunk(BaseModel):
     source: str
     page: int | None = None
@@ -988,7 +1010,7 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             answer_question,
             question=contextualized_q,
             k=body.top_k,
-            check_hallucination=body.check_hallucination,
+            check_hallucination=_honor_hallucination_opt_out(body.check_hallucination),
             session_id=_doc_session(request),
         )
     except Exception as exc:

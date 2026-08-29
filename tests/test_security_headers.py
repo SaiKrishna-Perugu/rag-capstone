@@ -43,3 +43,28 @@ def test_rate_limit_key_ignores_whitespace_only_forwarded_for():
     req.headers = {"x-forwarded-for": " , "}
     req.client.host = "127.0.0.1"
     assert _rate_limit_key(req) == "127.0.0.1"
+
+
+# --- groundedness opt-out is operator-controlled, not client-controlled -----
+
+def test_hallucination_opt_out_ignored_on_the_public_tier(monkeypatch):
+    """With no API_KEY the deployment is the open demo, where the
+    groundedness verdict is the whole claim -- an anonymous caller must not
+    be able to switch it off per request."""
+    from app import config
+    from app.main import _honor_hallucination_opt_out
+
+    monkeypatch.setattr(config, "API_KEY", "")
+    assert _honor_hallucination_opt_out(False) is True
+    assert _honor_hallucination_opt_out(True) is True
+
+
+def test_hallucination_opt_out_honored_when_api_key_gates_the_deployment(monkeypatch):
+    """Staging and private integrations: the caller is known, and trading the
+    verdict for latency is theirs to choose."""
+    from app import config
+    from app.main import _honor_hallucination_opt_out
+
+    monkeypatch.setattr(config, "API_KEY", "a-real-key")
+    assert _honor_hallucination_opt_out(False) is False
+    assert _honor_hallucination_opt_out(True) is True
