@@ -26,18 +26,32 @@ spec:
     spec:
       # 80, matching the live service, not the 10 this file used to declare.
       # The values in this block were reconciled against production on
-      # 2026-08-29 after the divergence was found: live ran 80 with a
-      # targetBurstCapacity and a livenessProbe that only cloudrun-groq.yaml
-      # sets, i.e. the service was created from the groq config and had Vertex
-      # AI env vars layered on imperatively, so nothing here had ever been
-      # applied. They now describe the configuration that is actually running
-      # and serving traffic, so filling in the placeholders and applying this
-      # file yields the tested setup rather than an untried one.
+      # 2026-08-29, after it turned out nothing in this file had ever been
+      # applied: live ran concurrency 80 against this file's 10, and carried a
+      # targetBurstCapacity and livenessProbe this file did not declare at all.
+      #
+      # **Applying this file is still not a no-op, and is not safe unattended.**
+      # It mounts API_KEY from Secret Manager (see the note above that env var),
+      # which takes the public demo offline; it resets INGEST_TARGET_URL to its
+      # placeholder, which breaks Cloud Tasks' callback so uploads enqueue and
+      # never process; and it does not declare TASKS_SERVICE_ACCOUNT_EMAIL,
+      # which production sets imperatively and which gates /internal/*. What
+      # reconciliation bought is that the *shape* below is no longer a
+      # surprise -- not that `services replace` is safe to run casually.
       #
       # If 10 was a deliberate intent -- lower concurrency per instance for a
       # request that makes three LLM calls -- that is a real change to make
       # and load-test on purpose, not to reintroduce by leaving it written
       # down here where it has never taken effect.
+      #
+      # Note what 80 does NOT buy, before raising it further: DATABASE_POOL_MAX
+      # defaults to 10 (app/config.py) and no config here overrides it, and
+      # psycopg2's ThreadedConnectionPool raises PoolError immediately on
+      # exhaustion rather than queueing -- app/db/database.py::get_conn does
+      # not catch it. Blocking work also funnels through asyncio.to_thread,
+      # whose default executor is min(32, cpu+4) ~= 6 threads at cpu: '2'.
+      # Effective safe concurrency for anything touching Postgres is therefore
+      # nearer 10 than 80; the extra admission mostly buys queueing.
       containerConcurrency: 80
       timeoutSeconds: 300
       # Must be rag-capstone-sa, NOT the default compute service account:
@@ -67,6 +81,17 @@ spec:
           failureThreshold: 1
           periodSeconds: 240
           timeoutSeconds: 240
+        # Mirrors the live service exactly, including timeoutSeconds: 1 --
+        # which is worth knowing about rather than inheriting silently. /health
+        # is a sync handler on the anyio worker pool, so on a saturated
+        # instance (concurrency 80, 2 vCPU) three /health replies slower than
+        # 1s inside 45s restart the container and take every in-flight /ask
+        # with them, up to the 300s request timeout. That makes it a load
+        # amplifier under exactly the conditions a liveness probe is supposed
+        # to survive. 3-5s would be the safer value; it is left at 1 here so
+        # this file keeps describing what is actually deployed, and changing
+        # it is a deliberate production change (see TODOS.md), not a silent
+        # edit to a config file.
         livenessProbe:
           httpGet:
             path: /health

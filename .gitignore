@@ -26,6 +26,15 @@ htmlcov/
 # from, not a place for project documentation.
 notes/
 
+# Same rule, different filenames. Both of these declare themselves
+# deliberately untracked, but "untracked" is not a property a file keeps on
+# its own -- a single `git add -A` commits them. The repository-voice rule in
+# CLAUDE.md says demo scripts and session narratives must not reach the
+# tracked repo, so it is enforced here rather than left to whoever types the
+# next add.
+DEMO.md
+AUTOPLAN-REVIEW-*.md
+
 # FastEmbed model cache (baked into the Docker image at build time instead --
 # see Dockerfile; this is just the local dev equivalent)
 .fastembed_cache/

@@ -823,7 +823,7 @@ TODOS.md        # deferred decisions and open items, with the measurement behind
 cloudrun-groq.yaml             # Declarative Cloud Run configuration for Groq (production)
 cloudrun-groq-staging.yaml     # Same, for the staging service cd.yml deploys to
 cloudrun-vertexai.yaml         # Declarative Cloud Run configuration for Vertex AI
-cloudrun-vertexai-staging.yaml # Same, for staging -- this is what is actually deployed
+cloudrun-vertexai-staging.yaml # Same, for staging. Vertex AI is the provider both live services run
 Dockerfile
 pyproject.toml
 ```

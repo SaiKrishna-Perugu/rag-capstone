@@ -253,6 +253,16 @@ be called with the same question to compare behavior.
   docstring). Manifest entries are written per-file, immediately after
   that file's chunks are upserted, so an interrupted run doesn't lose
   progress.
+- `ingestion/storage.py` — stages uploaded bytes in Cloud Storage
+  (`UPLOAD_BUCKET`) instead of the serving instance's disk, and is why an
+  ingestion job can run on an instance that never handled the upload. Cloud
+  Run instances have independent disks, so `/upload` writing locally and
+  then enqueueing a task against the load-balanced URL meant the task could
+  land elsewhere and ingest nothing while reporting `done`. Deliberately
+  **not** fail-open, matching `jobs.py`: a bucket error is a 503, because
+  falling back to local disk restores exactly that failure invisibly. Inert
+  with `UPLOAD_BUCKET` unset (local dev and tests), and that path still
+  fails loudly on a missing file rather than reporting success.
 - `ingestion/jobs.py` — async ingestion job tracking, backing `/upload`'s
   `202 {job_id}` + `GET /jobs/{job_id}` polling contract (see `main.py`
   below). Job records live in Firestore's `ingest_jobs` collection, same
@@ -376,10 +386,13 @@ be called with the same question to compare behavior.
   every request after it was under 0.7s. `get_embeddings()` is `lru_cache`d
   and does client construction, credential acquisition and its first
   connection on first *use*, so the first visitor to ask anything paid for
-  all of it. It warms on a thread rather than inline because the startup
-  probe allows only ~32s and this is an unbounded network round trip —
-  blocking readiness on it trades a slow first request for a failed deploy.
-  Fails open. `/health` is a pure liveness probe (`{"status": "ok"}`, no dependency checks) — `/ready`
+  all of it. Post-deploy the same shape of request returns in **2.85s**,
+  which is the pipeline's own three-call cost. It warms on a thread rather
+  than inline because the work is an unbounded network round trip and
+  blocking readiness on it would trade a slow first request for a failed
+  deploy — **not** because of a tight probe budget: production uses Cloud
+  Run's default tcpSocket startup probe (240s). The ~32s httpGet budget this
+  repo's YAML used to declare was never actually in force. Fails open. `/health` is a pure liveness probe (`{"status": "ok"}`, no dependency checks) — `/ready`
   is the one that checks the vector store and is what Cloud Run's
   readiness probe hits. `/config` exposes non-secret runtime flags for
   `ui.html` to adapt to: `enable_uploads`, `model_provider`, the upload
@@ -389,7 +402,9 @@ be called with the same question to compare behavior.
   handled exceptions log via `logger.error(json_payload, exc_info=True)`,
   not `logger.exception()` — keep that convention (`G201` is ignored in
   `pyproject.toml` for it).
-  `/upload` itself doesn't run ingestion inline — it saves files, creates
+  `/upload` itself doesn't run ingestion inline — it stages the files
+  (`ingestion/storage.py` → Cloud Storage in any deployment with
+  `UPLOAD_BUCKET` set; instance-local disk only when it is unset), creates
   a job via `jobs.create_job()`, and returns `202 {job_id}` immediately;
   `GET /jobs/{job_id}` and `POST /internal/process-ingest-job` (the
   latter is Cloud Tasks' HTTP target, on the **internal** tier — it accepts
@@ -440,12 +455,18 @@ env/secret configuration, so it never changes provider on its own.
 That last property had a consequence worth recording: **until 2026-08-29
 `cloudrun-vertexai.yaml` had never been applied to production at all.** The
 live template ran `containerConcurrency: 80` where that file said 10,
-carried a `targetBurstCapacity` and `livenessProbe` only the *groq* file
-sets, and was missing the `startup-cpu-boost` the file had declared for
-months — the shape was `cloudrun-groq.yaml`'s, with Vertex AI env vars
-layered on imperatively. The file has since been reconciled to match what
-is actually serving traffic, and the boost enabled, so applying it is no
-longer a leap. Two things that reconciliation is worth remembering for:
+carried a `targetBurstCapacity` and a `livenessProbe` that this file did
+not declare at all, and was missing the `startup-cpu-boost` the file had
+declared for months. (An earlier version of this note said those two
+settings were unique to `cloudrun-groq.yaml`. They are not — all four
+configs set them; the vertexai *production* file was simply the one
+missing them.) The file has since been reconciled to describe what is
+actually serving traffic, and the boost enabled. That does **not** make
+`gcloud run services replace` safe to run casually against production: it
+still re-mounts `API_KEY` (taking the public demo offline), resets
+`INGEST_TARGET_URL` to a placeholder (breaking the Cloud Tasks callback),
+and omits `TASKS_SERVICE_ACCOUNT_EMAIL` entirely. Two more things that
+reconciliation is worth remembering for:
 its `startupProbe` had declared a ~32s budget that was never in force
 (production uses Cloud Run's default tcpSocket probe, 240s), and
 `containerConcurrency: 10` may have been a real intent that simply never

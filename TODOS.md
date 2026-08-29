@@ -7,6 +7,25 @@ Keep entries short; link to the commit or review doc that has the detail.
 
 ## Open
 
+- **`containerConcurrency: 80` is not backed by the pools underneath it.**
+  `DATABASE_POOL_MAX` defaults to 10 and no Cloud Run config overrides it,
+  and `psycopg2`'s `ThreadedConnectionPool` raises `PoolError` immediately
+  on exhaustion rather than queueing — `database.get_conn()` doesn't catch
+  it. Blocking work also funnels through `asyncio.to_thread`, whose default
+  executor is `min(32, cpu+4)` ≈ 6 threads at `cpu: '2'`. So effective safe
+  concurrency for anything touching Postgres is nearer 10 than 80. Not
+  changed here because raising `DATABASE_POOL_MAX` multiplies by `maxScale`
+  against Cloud SQL's own connection limit — size it against the instance
+  tier and load-test, don't guess. Low urgency: demo traffic is nowhere
+  near it.
+- **The `livenessProbe` can restart a busy container.** `timeoutSeconds: 1`
+  on `/health` with `failureThreshold: 3` / `periodSeconds: 15`, against
+  concurrency 80 on 2 vCPU: three slow replies inside 45s restart the
+  instance and drop every in-flight `/ask`. That is a load amplifier under
+  exactly the conditions a liveness probe should survive. 3–5s is the safer
+  timeout. Left at 1 so `cloudrun-vertexai.yaml` keeps describing what is
+  actually deployed; changing it is a production change, not a config-file
+  edit.
 - **GCP free-trial credits lapse around 2026-11-10** ($300 / 90 days;
   project created 2026-08-12). Credit expiry is the likeliest cause of a
   dead demo link, and no code change prevents it — it needs a billing

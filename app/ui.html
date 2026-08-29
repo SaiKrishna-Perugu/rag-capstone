@@ -772,9 +772,16 @@
         ];
         let loadingInterval;
         // Cloud Run runs this demo at minScale=0, so the first request after an
-        // idle period pays a container cold start (~10-25s). Without a word of
+        // idle period still pays a container cold start. Without a word of
         // explanation that is indistinguishable from a hung page -- which is
         // exactly how a healthy service gets reported as down.
+        //
+        // The wait used to be ~10-25s and is now a few seconds: most of it was
+        // lazy provider init (credential acquisition, first connection) rather
+        // than container start, and main.py::_warm_providers now does that at
+        // startup. Measured post-deploy at 2.85s for a full cache-missing
+        // question. The banner is kept because minScale=0 means *some* wait
+        // remains, but it must not keep promising 25s.
         let coldStartTimer;
 
         function handleKeyPress(e) {
@@ -806,7 +813,7 @@
                 clearInterval(loadingInterval);
                 loaderText.innerText =
                     "Waking the service up -- the first question after an idle "
-                    + "period takes up to ~25s. Following questions are fast.";
+                    + "period takes a few seconds longer. Following questions are fast.";
             }, 6000);
 
             try {
