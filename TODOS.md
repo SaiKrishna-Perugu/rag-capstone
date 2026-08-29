@@ -49,7 +49,10 @@ Keep entries short; link to the commit or review doc that has the detail.
   `/health` that fast is already up; the cost was lazy provider init —
   `get_embeddings()` building its client, acquiring credentials and opening
   a connection on first use. `lifespan` now warms it on a background thread
-  (`ENABLE_STARTUP_WARMUP`, default true). See `f7f7597`.
+  (`ENABLE_STARTUP_WARMUP`, default true). See `f7f7597`. Confirmed against
+  production after deploy (revision `rag-capstone-00140-neq`): a novel
+  question through the full three-call pipeline returned in **2.85s**, down
+  from 20.6s. What remains is the pipeline's real cost, not lazy init.
 - **`startup-cpu-boost` was declared in `cloudrun-vertexai.yaml` but not
   actually enabled on the live service** — the 08-22 review marked it done
   from the YAML line without checking the running config. Enabled
