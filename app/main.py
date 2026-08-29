@@ -50,6 +50,11 @@ from app.retrieval.rag import answer_question
 # parseable without a log-shipping stack; Cloud Logging ingests it as
 # structured JSON automatically. This is the first thing to read when
 # debugging request behaviour.
+# Read size for the bounded upload loop in /upload. 64KiB is large enough
+# that the loop is not the bottleneck and small enough that the overshoot
+# past a rejected file's limit is negligible.
+_UPLOAD_CHUNK_BYTES = 64 * 1024
+
 LOG_PATH = Path("logs")
 LOG_PATH.mkdir(exist_ok=True)
 logger = logging.getLogger("rag_service")
@@ -729,7 +734,34 @@ async def upload_files(
                 },
             )
 
-        content = await file.read()
+        # Read in bounded chunks and stop the moment the cap is crossed,
+        # rather than `await file.read()` on the whole part and measuring
+        # afterwards. The declared-Content-Length gate above is the cheap
+        # first line, but Content-Length is optional and caller-supplied --
+        # a chunked upload, or a lying header, gets past it, and the old
+        # read pulled the entire part into memory before the size check
+        # below could object. One byte past the limit is enough to refuse,
+        # so nothing larger is ever held.
+        max_bytes = max_size_mb * 1024 * 1024
+        chunks: list[bytes] = []
+        read_bytes = 0
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            read_bytes += len(chunk)
+            if read_bytes > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "error": (
+                            f"File {safe_name} is larger than the {max_size_mb}MB limit."
+                        ),
+                        "request_id": request_id,
+                    },
+                )
+            chunks.append(chunk)
+        content = b"".join(chunks)
 
         # Magic-byte check. The extension whitelist above is trivially
         # defeated by renaming, and these files are parsed by document
@@ -759,16 +791,6 @@ async def upload_files(
             )
 
         # Check file size against this caller's ceiling, not the global one.
-        max_bytes = max_size_mb * 1024 * 1024
-        if len(content) > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "error": f"File {safe_name} too large ({len(content) / 1024 / 1024:.1f}MB). Max: {max_size_mb}MB.",
-                    "request_id": request_id,
-                },
-            )
-
         if storage.enabled():
             # Durable staging. The bytes never touch this instance's disk, so
             # the ingestion job can run anywhere. Not fail-open: a bucket error

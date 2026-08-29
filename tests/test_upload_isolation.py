@@ -367,3 +367,49 @@ def test_process_job_fails_when_staged_files_are_missing_from_the_bucket(
 
     ran.assert_not_called()
     assert statuses[-1] == "failed"
+
+
+# --- bounded upload reads ---------------------------------------------------
+
+def test_oversized_file_is_refused_without_buffering_all_of_it(client, tmp_path, monkeypatch):
+    """The per-file cap used to be enforced after `await file.read()` had
+    already pulled the whole part into memory. The Content-Length pre-gate
+    does not cover a chunked or mis-declared upload, so the read itself has
+    to be bounded."""
+    from app import config
+
+    monkeypatch.setattr(config, "DOCS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "MAX_UPLOAD_SIZE_MB", 1)
+    monkeypatch.setattr(config, "MAX_UPLOAD_FILES", 3)
+
+    oversized = b"x" * (3 * 1024 * 1024)   # 3MB against a 1MB cap
+    resp = client.post(
+        "/upload",
+        files={"files": ("big.txt", oversized, "text/plain")},
+        headers={"X-Session-Id": "sess-big"},
+    )
+
+    assert resp.status_code == 413
+    assert "larger than" in resp.json()["detail"]["error"]
+    # Nothing may reach disk when the file is refused.
+    staged = list((tmp_path / "uploads").rglob("*")) if (tmp_path / "uploads").exists() else []
+    assert [p for p in staged if p.is_file()] == []
+
+
+def test_upload_reads_in_bounded_chunks():
+    """Guards the mechanism, not just the outcome: a future refactor back to
+    a single unbounded read would still return 413 for the test above while
+    reinstating the memory exposure."""
+    import inspect
+
+    from app import main
+
+    src = inspect.getsource(main.upload_files)
+    # Strip comments first: this function's comments legitimately quote the
+    # old `await file.read()` when explaining why it changed, and matching
+    # those would make the assertion below fail on documentation.
+    code = "\n".join(
+        line for line in src.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "await file.read(_UPLOAD_CHUNK_BYTES)" in code, "upload no longer reads in bounded chunks"
+    assert "await file.read()" not in code, "unbounded read reintroduced"
