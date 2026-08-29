@@ -98,11 +98,20 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # ~20 min ceiling: the eval gate makes real LLM calls and is the
-          # slow one. Exceeding it fails the deploy rather than proceeding.
-          deadline=$(( $(date +%s) + 1200 ))
+          # Per-workflow budgets, NOT one shared deadline. The first version
+          # of this computed a single 20-minute deadline before the loop, so
+          # ci.yml and eval.yml drew from the same clock: a 4-minute CI run
+          # followed by an 18-minute eval blew the budget and reported a
+          # timeout even though both had passed, blocking a deploy for no
+          # reason. eval makes real LLM calls against Vertex and is legitimately
+          # the slow one, so it gets its own, larger allowance.
           for wf in ci.yml eval.yml; do
-            echo "::group::waiting on $wf for $SHA"
+            case "$wf" in
+              eval.yml) budget=2400 ;;   # 40 min: real LLM calls, per-metric
+              *)        budget=900  ;;   # 15 min: lint + mocked tests
+            esac
+            deadline=$(( $(date +%s) + budget ))
+            echo "::group::waiting on $wf for $SHA (up to ${budget}s)"
             while :; do
               status=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$SHA&per_page=1" \
                         --jq '.workflow_runs[0].status // "missing"')
@@ -115,12 +124,17 @@ jobs:
                   echo "$wf passed."
                   break
                 fi
-                echo "::error::$wf concluded '$conclusion' for $SHA -- refusing to deploy."
+                echo "::error::$wf concluded '$conclusion' for $SHA -- refusing to deploy. \
+                See https://github.com/$REPO/actions/workflows/$wf. To ship anyway, \
+                re-run this workflow via Actions > CD Pipeline > Run workflow with \
+                'Deploy without waiting for CI/eval to pass' checked."
                 exit 1
               fi
 
               if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "::error::Timed out waiting for $wf on $SHA (last status: $status). Refusing to deploy."
+                echo "::error::Timed out after ${budget}s waiting for $wf on $SHA \
+                (last status: $status). Refusing to deploy. If $wf is simply slower \
+                than this budget, raise it here rather than skipping the gate."
                 exit 1
               fi
               sleep 15
