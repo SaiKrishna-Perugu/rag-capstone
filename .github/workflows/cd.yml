@@ -266,12 +266,27 @@ jobs:
           # only thing being checked. The canary URL addresses THAT revision
           # specifically, so this tests the new code rather than whatever is
           # currently serving.
+          # gcloud's extract() renders a LIST, so this comes back as
+          # ['https://canary---...'] -- brackets AND single quotes. The first
+          # version stripped only the brackets, leaving the quotes in the
+          # variable, so every curl got 'https://...'/ready as its URL and
+          # failed instantly. Six attempts later the gate reported "canary
+          # never became ready" about a canary that was serving both /ready
+          # and /ask correctly, and blocked a good deploy. Strip quotes and
+          # any stray CR too, then confirm the result actually looks like a
+          # URL rather than trusting a non-empty string.
           CANARY=$(gcloud run services describe rag-capstone --region=us-central1 \
-                    --format='value(status.traffic.filter("tag:canary").extract("url"))' | tr -d '[]')
-          if [ -z "$CANARY" ]; then
-            echo "::error::Could not resolve the canary URL -- refusing to promote."
-            exit 1
-          fi
+                    --format='value(status.traffic.filter("tag:canary").extract("url"))' \
+                    | tr -d "[]'\"" | tr -d '\r' | xargs)
+          case "$CANARY" in
+            https://*) : ;;
+            *)
+              echo "::error::Could not resolve a usable canary URL (got: '$CANARY'). \
+              This is a pipeline problem, not a bad revision -- do not treat it as a \
+              failed canary."
+              exit 1
+              ;;
+          esac
           echo "Probing canary: $CANARY"
 
           # Give it a moment to take traffic, then assert it actually serves.
@@ -281,7 +296,13 @@ jobs:
               echo "canary /ready ok (attempt $i)"; break
             fi
             if [ "$i" = "6" ]; then
-              echo "::error::Canary never became ready -- refusing to promote."
+              echo "::error::Canary at $CANARY never became ready after 6 attempts -- \
+              refusing to promote. Check the revision's logs; if it serves /ready when \
+              probed by hand, suspect this probe rather than the revision."
+              # Print what curl actually saw, so the next person does not have to
+              # guess whether the revision or the probe is at fault.
+              curl -s -o /dev/null -w 'last attempt: http=%{http_code} exit=%{exitcode} url=%{url_effective}\n' \
+                --max-time 30 "$CANARY/ready" || true
               exit 1
             fi
             sleep 15
