@@ -201,17 +201,86 @@ app.add_middleware(AccessControlMiddleware)
 app.add_middleware(IdentityMiddleware)
 
 
+def _csp_policy() -> str:
+    """The Content-Security-Policy value, built from config.
+
+    Built rather than hardcoded for one reason: the Firebase auth helper is
+    framed from the deployment's OWN authDomain, so a literal
+    `<project>.firebaseapp.com` in the source would be correct here and
+    wrong in every other deployment -- and wrong silently, since a bad
+    frame-src only shows up when someone tries to sign in.
+
+    With Firebase unconfigured the auth hosts are left out entirely: a
+    deployment that cannot sign in should not advertise the endpoints for
+    it, and the UI hides the button in that case anyway.
+    """
+    script = [
+        "'self'", "'unsafe-inline'",
+        "https://cdn.jsdelivr.net", "https://cdnjs.cloudflare.com",
+        "https://www.gstatic.com",
+    ]
+    connect = ["'self'"]
+    frame: list[str] = []
+
+    if config.FIREBASE_WEB_API_KEY:
+        # apis.google.com belongs in script-src, not just connect/frame:
+        # signInWithPopup loads apis.google.com/js/api.js plus a gapi
+        # iframes bundle. Measured against the live service -- both were
+        # refused before this was added.
+        script.append("https://apis.google.com")
+        connect += [
+            "https://securetoken.googleapis.com",
+            "https://identitytoolkit.googleapis.com",
+            "https://apis.google.com",
+            "https://firestore.googleapis.com",
+            "https://www.gstatic.com",
+        ]
+        frame.append("https://apis.google.com")
+        if config.FIREBASE_AUTH_DOMAIN:
+            frame.append(f"https://{config.FIREBASE_AUTH_DOMAIN}")
+
+    parts = [
+        "default-src 'self'",
+        "script-src " + " ".join(script),
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src https://fonts.gstatic.com",
+        "img-src 'self' data:",
+        "connect-src " + " ".join(connect),
+        "object-src 'none'",
+        "base-uri 'self'",
+    ]
+    if frame:
+        parts.insert(6, "frame-src " + " ".join(frame))
+    else:
+        parts.insert(6, "frame-src 'none'")
+    return "; ".join(parts)
+
+
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     """Browser-facing hardening headers on every response, including the
     middleware-generated 401/403/404s (this is the outermost middleware).
 
-    CSP ships as Report-Only on purpose: the allowlist below covers every
-    asset the UI loads (fonts, marked.js, DOMPurify, Firebase), but a
-    wrong entry in an enforcing policy silently breaks sign-in or rendering,
-    and this codebase cannot exercise the Firebase popup flow from CI.
-    Deployments should promote it to `Content-Security-Policy` after
-    confirming a clean console in a signed-in session.
+    CSP ships as Report-Only on purpose, and Report-Only has already earned
+    its keep: driving the live sign-in button in a browser produced two
+    violations the allowlist did not cover, either of which would have
+    broken sign-in silently under an enforcing policy.
+
+      * `apis.google.com/js/api.js` was refused by script-src. The host was
+        in connect-src and frame-src but not script-src, which is the one
+        that actually loads Firebase's popup helper.
+      * The auth helper iframe is framed from the project's authDomain
+        (`<project>.firebaseapp.com`), not from apis.google.com, so
+        frame-src refused it too.
+
+    Both are fixed below. `_csp_policy()` builds the header from config so
+    the authDomain is whatever the deployment actually uses rather than one
+    project's hardcoded hostname.
+
+    Still Report-Only. Completing a real Google sign-in needs a human, and
+    only that exercises the post-redirect leg -- promoting on the strength
+    of a flow nobody finished is how the silent break happens. Promotion
+    path: sign in for real, confirm a clean console, then rename the header.
     """
     try:
         response = await call_next(request)
@@ -235,17 +304,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault(
         "Content-Security-Policy-Report-Only",
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
-        "https://cdnjs.cloudflare.com https://www.gstatic.com; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
-        "connect-src 'self' https://securetoken.googleapis.com "
-        "https://identitytoolkit.googleapis.com https://apis.google.com "
-        "https://firestore.googleapis.com https://www.gstatic.com; "
-        "frame-src https://apis.google.com; "
-        "object-src 'none'; base-uri 'self'",
+        _csp_policy(),
     )
     return response
 

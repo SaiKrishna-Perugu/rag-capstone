@@ -68,3 +68,60 @@ def test_hallucination_opt_out_honored_when_api_key_gates_the_deployment(monkeyp
     monkeypatch.setattr(config, "API_KEY", "a-real-key")
     assert _honor_hallucination_opt_out(False) is False
     assert _honor_hallucination_opt_out(True) is True
+
+
+# --- CSP allowlist ----------------------------------------------------------
+# Both assertions below pin violations MEASURED against the live service by
+# driving the sign-in button in a real browser. Either would have broken
+# sign-in silently the moment the policy was promoted to enforcing.
+
+def _directive(policy: str, name: str) -> str:
+    for part in policy.split("; "):
+        if part.startswith(name + " "):
+            return part
+    return ""
+
+
+def test_csp_allows_the_firebase_popup_helper_script(monkeypatch):
+    """signInWithPopup loads apis.google.com/js/api.js. The host was in
+    connect-src and frame-src but NOT script-src, which is the directive
+    that actually governs loading it."""
+    from app import config, main
+
+    monkeypatch.setattr(config, "FIREBASE_WEB_API_KEY", "k")
+    monkeypatch.setattr(config, "FIREBASE_AUTH_DOMAIN", "proj.firebaseapp.com")
+    assert "https://apis.google.com" in _directive(main._csp_policy(), "script-src")
+
+
+def test_csp_frames_the_deployments_own_auth_domain(monkeypatch):
+    """The auth helper iframe comes from the project's authDomain, not from
+    apis.google.com. Derived from config so it is right for whichever
+    project is deployed, instead of one hostname baked into the source."""
+    from app import config, main
+
+    monkeypatch.setattr(config, "FIREBASE_WEB_API_KEY", "k")
+    monkeypatch.setattr(config, "FIREBASE_AUTH_DOMAIN", "someone-else.firebaseapp.com")
+    frame = _directive(main._csp_policy(), "frame-src")
+    assert "https://someone-else.firebaseapp.com" in frame
+    assert "hybrid-rag" not in frame, "a project hostname is hardcoded in the policy"
+
+
+def test_csp_drops_auth_hosts_when_firebase_is_unconfigured(monkeypatch):
+    """A deployment that cannot sign in should not advertise the endpoints
+    for it. The UI hides the button in this case anyway."""
+    from app import config, main
+
+    monkeypatch.setattr(config, "FIREBASE_WEB_API_KEY", "")
+    policy = main._csp_policy()
+    assert _directive(policy, "frame-src") == "frame-src 'none'"
+    assert "identitytoolkit" not in policy
+    assert "apis.google.com" not in policy
+
+
+def test_csp_is_still_report_only(client):
+    """Deliberate. Promoting needs a completed Google sign-in, which no
+    automated check here can perform -- and the post-redirect leg is exactly
+    where an unmeasured violation would hide."""
+    resp = client.get("/health")
+    assert "Content-Security-Policy-Report-Only" in resp.headers
+    assert "Content-Security-Policy" not in resp.headers

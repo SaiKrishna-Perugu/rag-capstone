@@ -44,13 +44,19 @@ Keep entries short; link to the commit or review doc that has the detail.
   timeout. Left at 1 so `cloudrun-vertexai.yaml` keeps describing what is
   actually deployed; changing it is a production change, not a config-file
   edit.
-- **CSP ships `Report-Only`, not enforcing.** The allowlist covers fonts,
-  jsDelivr, cdnjs, gstatic/Firebase and the popup endpoints, but a wrong
-  entry in an *enforcing* policy silently breaks sign-in — and the Firebase
-  popup flow cannot be exercised from CI. Promotion path: deploy, sign in,
-  ask a question, upload a file, confirm zero violation reports in the
-  DevTools console, then rename the header to `Content-Security-Policy` in
-  `app/main.py`. One-line diff.
+- **CSP ships `Report-Only`, not enforcing.** *(2026-08-31: the allowlist
+  was measured against the live service by driving the sign-in button in a
+  browser, and it was WRONG in two places — `apis.google.com` was missing
+  from `script-src`, and the auth helper iframe is framed from the
+  deployment's own authDomain, not from `apis.google.com`. Either would
+  have broken sign-in silently on promotion. Both fixed, and the policy is
+  now built from config so the authDomain follows the deployment.)*
+  Still Report-Only, and the remaining step genuinely needs a human:
+  completing a real Google sign-in is the only way to exercise the
+  post-redirect leg, which is exactly where an unmeasured violation would
+  hide. Promotion path: sign in for real on the live URL, confirm a clean
+  console, then rename the header in `app/main.py::add_security_headers`.
+  One-line diff.
 - **GCP free-trial credits lapse around 2026-11-10** ($300 / 90 days;
   project created 2026-08-12). Credit expiry is the likeliest cause of a
   dead demo link, and no code change prevents it — it needs a billing
