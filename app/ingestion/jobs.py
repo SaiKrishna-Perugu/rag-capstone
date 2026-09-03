@@ -36,7 +36,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app import config
-from app.ingestion import ingest, storage
+from app.ingestion import errors, ingest, storage
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +101,24 @@ def update_job_status(
     status: str,
     ingest_summary: dict | None = None,
     error: str | None = None,
+    error_code: str | None = None,
+    warning: str | None = None,
 ) -> None:
+    """Record a job's outcome.
+
+    `error` is visitor-facing and must already be classified -- this record is
+    returned verbatim by `/jobs/{id}` and rendered by ui.html, so a raw
+    provider exception put here reaches an anonymous browser. `error_code` is
+    the stable label for logs and metrics; it survives rewording of the
+    message. `warning` carries partial success: the job is done, but some
+    file in it is not queryable.
+    """
     _jobs_collection().document(job_id).update({
         "status": status,
         "ingest_summary": ingest_summary,
         "error": error,
+        "error_code": error_code,
+        "warning": warning,
         "updated_at": datetime.now(UTC),
     })
 
@@ -211,8 +224,16 @@ def process_job(job_id: str) -> None:
             only=files or None,
         )
     except Exception as exc:
-        logger.error(f"Job {job_id} failed: {exc}", exc_info=True)
-        update_job_status(job_id, "failed", error=str(exc))
+        # The full exception goes to the logs; the visitor gets a classified
+        # message. `/jobs/{id}` returns this record verbatim and ui.html
+        # renders `error` directly, so str(exc) here put provider URLs, the
+        # project id and the upload bucket's name in front of anonymous
+        # visitors -- see app/ingestion/errors.py.
+        failure = errors.classify(exc)
+        logger.error(
+            f"Job {job_id} failed ({failure.code}): {exc}", exc_info=True
+        )
+        update_job_status(job_id, "failed", error=failure.message, error_code=failure.code)
         _cleanup_files(files, session_id)
         raise
     _cleanup_files(files, session_id)
@@ -234,6 +255,37 @@ def process_job(job_id: str) -> None:
             database.invalidate_cache()
         except Exception as exc:
             logger.warning(f"Job {job_id}: cache invalidation after ingest failed: {exc}")
+
+    # ingest.run() isolates failures per file, so it returns normally even
+    # when nothing was indexed. Reporting that as "done" is the worst of the
+    # outcomes available: the visitor is told their upload succeeded, then
+    # asks a question about a document that was never ingested and is told
+    # the documents do not cover it. Nothing anywhere says why.
+    failed = summary.get("failed") or []
+    indexed = (summary.get("added") or []) + (summary.get("updated") or [])
+    if failed and not indexed:
+        failure = errors.classify(failed[0].get("error", ""))
+        logger.error(
+            f"Job {job_id} indexed nothing ({failure.code}); "
+            f"per-file errors: {failed}"
+        )
+        update_job_status(
+            job_id, "failed", error=failure.message,
+            error_code=failure.code, ingest_summary=summary,
+        )
+        raise RuntimeError(failure.message)
+
+    if failed:
+        # Partial success. The job is done -- some documents ARE queryable --
+        # but the visitor must not have to infer that a file is missing from
+        # its absence in a later answer.
+        names = ", ".join(Path(f.get("file", "?")).name for f in failed)
+        logger.warning(f"Job {job_id} completed with {len(failed)} failed file(s): {failed}")
+        update_job_status(
+            job_id, "done", ingest_summary=summary,
+            warning=f"Some files could not be processed: {names}.",
+        )
+        return
 
     update_job_status(job_id, "done", ingest_summary=summary)
 

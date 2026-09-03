@@ -78,7 +78,13 @@ def test_process_job_failure_marks_failed_and_reraises():
     statuses = [call.args[0]["status"] for call in mock_doc_ref.update.call_args_list]
     assert statuses == ["processing", "failed"]
     last_update = mock_doc_ref.update.call_args_list[-1].args[0]
-    assert "boom" in last_update["error"]
+    # The recorded error is classified, NOT str(exc): this record is returned
+    # verbatim by /jobs/{id} and rendered by ui.html, so the raw text reached
+    # an anonymous browser. See app/ingestion/errors.py. The original is in
+    # the logs, keyed by job id.
+    assert "boom" not in last_update["error"]
+    assert last_update["error_code"] == "internal"
+    assert last_update["error"]
 
 
 def test_enqueue_cloud_task_calls_cloud_tasks_client(monkeypatch):

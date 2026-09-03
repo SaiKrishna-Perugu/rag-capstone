@@ -945,7 +945,17 @@
                 const summary = job.ingest_summary || {};
                 const added = (summary.added || []).length;
                 const updated = (summary.updated || []).length;
-                uploadStatus.innerText = `Processed ${files.length} document(s): ${added} added, ${updated} updated.`;
+                // A job can finish with some files indexed and others not --
+                // ingestion isolates failures per file. Reporting only the
+                // successes would leave the visitor to discover the gap by
+                // asking a question the missing document was supposed to
+                // answer, which is the least useful moment to find out.
+                let status = `Processed ${added + updated} of ${files.length} document(s): `
+                    + `${added} added, ${updated} updated.`;
+                if (job.warning) {
+                    status += " " + job.warning;
+                }
+                uploadStatus.innerText = status;
                 uploadStatus.style.display = 'block';
                 await refreshDocuments();
             } catch (err) {

@@ -260,30 +260,40 @@ def run(
         metadatas = [chunk.metadata for chunk in chunks]
         content_hashes = [_content_hash(c) for c in contents]
 
-        # Batch embed all chunks for this file, in request-sized pieces.
-        chunk_embeddings = _embed_in_batches(embeddings, contents)
+        # Embedding and persistence are inside the per-file guard for the same
+        # reason loading is. They were not, and the asymmetry was invisible
+        # until it mattered: a file whose chunks exceeded the embedding
+        # provider's per-request ceiling raised out of run() entirely, so a
+        # batch of five documents lost the four that were fine, and the job
+        # reported a provider error rather than naming the file that caused
+        # it. A per-file failure is data about that file.
+        try:
+            # Batch embed all chunks for this file, in request-sized pieces.
+            chunk_embeddings = _embed_in_batches(embeddings, contents)
 
-        # `is_upload` was resolved by the ownership gate at the top of the loop.
-        # Reaching here means: either a curated file, or an upload this run is
-        # entitled to claim. Only visitor uploads carry a session and an expiry;
-        # curated docs stay global and permanent.
+            # `is_upload` was resolved by the ownership gate at the top of the
+            # loop. Reaching here means: either a curated file, or an upload
+            # this run is entitled to claim. Only visitor uploads carry a
+            # session and an expiry; curated docs stay global and permanent.
+            database.upsert_chunks(
+                source=path,
+                contents=contents,
+                embeddings=chunk_embeddings,
+                content_hashes=content_hashes,
+                metadatas=metadatas,
+                session_id=session_id if is_upload else None,
+                expires_at=expires_at if is_upload else None,
+            )
 
-        # Upsert into PostgreSQL
-        database.upsert_chunks(
-            source=path,
-            contents=contents,
-            embeddings=chunk_embeddings,
-            content_hashes=content_hashes,
-            metadatas=metadatas,
-            session_id=session_id if is_upload else None,
-            expires_at=expires_at if is_upload else None,
-        )
-
-        # Written immediately, not batched until the end of the run, so
-        # an interrupted run (killed mid-batch, crashed on a later file)
-        # doesn't lose progress already committed to the chunks table --
-        # a restart re-checks only files that never got a manifest entry.
-        database.upsert_manifest_entry(path, current_hash, len(chunks))
+            # Written immediately, not batched until the end of the run, so
+            # an interrupted run (killed mid-batch, crashed on a later file)
+            # doesn't lose progress already committed to the chunks table --
+            # a restart re-checks only files that never got a manifest entry.
+            database.upsert_manifest_entry(path, current_hash, len(chunks))
+        except Exception as exc:
+            logger.error("Ingestion failed for %s: %s", path, exc, exc_info=True)
+            summary["failed"].append({"file": path, "error": str(exc)})
+            continue
         (summary["updated"] if is_changed else summary["added"]).append(path)
 
     # Manifest entries for files that no longer exist on disk are left in

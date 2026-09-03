@@ -511,7 +511,14 @@ def ready() -> dict:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Not ready: {exc}")
+        # Probe tier is always open (Cloud Run calls it and cannot present a
+        # key), so this detail is world-readable. The connection error it used
+        # to carry named the database host. The reason belongs in the logs.
+        logger.error(
+            json.dumps({"event": "error", "endpoint": "ready", "error": str(exc)}),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=503, detail="Not ready: dependency check failed.")
 
 
 @app.get("/config")
@@ -900,7 +907,17 @@ async def upload_files(
         )
         raise HTTPException(
             status_code=503,
-            detail={"error": f"Files saved but job tracking is unavailable: {exc!s}", "request_id": request_id},
+            detail={
+                # The exception is already logged above with the request_id.
+                # It named the Firestore project and collection; the caller
+                # can act on none of that.
+                "error": (
+                    "Your files were received but the ingestion queue is "
+                    "unavailable, so they were not indexed. Please try again "
+                    "shortly."
+                ),
+                "request_id": request_id,
+            },
         )
 
     if config.GCP_PROJECT_ID:
@@ -1020,7 +1037,14 @@ async def get_job_status(job_id: str, request: Request) -> dict:
     try:
         job = await asyncio.to_thread(jobs.get_job, job_id)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail={"error": f"Job tracking is unavailable: {exc!s}"})
+        logger.error(
+            json.dumps({"event": "error", "endpoint": "jobs", "error": str(exc)}),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Job tracking is temporarily unavailable. Please try again shortly."},
+        )
     if job is None:
         raise HTTPException(status_code=404, detail={"error": f"Job {job_id} not found."})
 

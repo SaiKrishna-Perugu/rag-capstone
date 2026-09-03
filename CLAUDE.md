@@ -265,12 +265,31 @@ be called with the same question to compare behavior.
   (via `database.py`); content-hash based incremental re-ingestion tracked
   in the `ingest_manifest` table (unchanged files skipped, changed files'
   old chunks replaced, one bad file is recorded/skipped rather than
-  failing the whole batch). The manifest lives in Postgres, not a local
+  failing the whole batch — that guard covers embedding and persistence too,
+  which it did not until a file exceeding the embedding provider's
+  per-request ceiling raised out of `run()` and discarded the other files in
+  the same batch). Chunks are embedded in request-sized pieces
+  (`_embed_in_batches`, `EMBED_BATCH_MAX_CHARS`): one call per file hit
+  Vertex's 20000-token request cap, so any document past roughly 90KB failed
+  outright. A run that indexes nothing is reported `failed`, not `done` —
+  `run()` returns normally when every file failed individually, and calling
+  that success told visitors their upload worked and then answered without
+  it. The manifest lives in Postgres, not a local
   file — deliberately, so it can't desync from whichever database
   `DATABASE_URL` currently points at (see `database.py`'s module
   docstring). Manifest entries are written per-file, immediately after
   that file's chunks are upserted, so an interrupted run doesn't lose
   progress.
+- `ingestion/errors.py` — classifies an ingestion failure into a stable
+  `code` plus a visitor-facing `message`. Exists because `/jobs/{id}` returns
+  the job record verbatim and `ui.html` renders `job.error` directly, so
+  whatever `process_job()` records is read by an anonymous browser: a Vertex
+  client error arrived complete with request URL, project id and the upload
+  bucket's name, for a file whose only problem was length. The raw exception
+  stays in the logs keyed by job id. Matching is on message substrings, not
+  exception types, for the reason `llm/circuit.py` counts consecutive
+  failures: Groq and Vertex raise different classes for the same condition.
+  A miss costs a generic message, never a wrong one.
 - `ingestion/storage.py` — stages uploaded bytes in Cloud Storage
   (`UPLOAD_BUCKET`) instead of the serving instance's disk, and is why an
   ingestion job can run on an instance that never handled the upload. Cloud
