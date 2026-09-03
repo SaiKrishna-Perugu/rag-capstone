@@ -402,6 +402,49 @@ def hybrid_search(
             return [dict(row) for row in cur.fetchall()]
 
 
+def get_session_chunks(session_id: str, max_chars: int) -> list[dict] | None:
+    """Every chunk this visitor uploaded, in document order -- or None if
+    they total more than `max_chars`.
+
+    Backs rag.retrieve()'s whole-document path. Ordering is (source, id):
+    `id` is a BIGSERIAL assigned as ingest.py upserts a file's chunks in
+    order, so it reconstructs the original reading order. That matters here
+    in a way it never did for retrieval -- ranked chunks arrive scrambled by
+    relevance and the model tolerates it, but a document handed over whole
+    is expected to read as a document.
+
+    The size check runs as its own aggregate query first, so an oversized
+    session costs one cheap SUM rather than transferring every row across
+    the wire only to discard it. Returns None (not an empty list) when over
+    budget, so the caller can tell "too big, go and retrieve" apart from
+    "this visitor has uploaded nothing".
+
+    Expired rows are excluded, matching hybrid_search(), get_chunk_count()
+    and list_session_documents().
+    """
+    if not session_id or max_chars <= 0:
+        return None
+
+    where = "WHERE session_id = %s AND (expires_at IS NULL OR expires_at > now())"
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT COALESCE(SUM(length(content)), 0) AS total FROM chunks {where}",
+                (session_id,),
+            )
+            total = cur.fetchone()["total"]
+            if total == 0 or total > max_chars:
+                return None
+
+            cur.execute(
+                f"""SELECT source, content, metadata, session_id
+                    FROM chunks {where}
+                    ORDER BY source, id""",
+                (session_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
 def delete_expired_chunks() -> int:
     """Drop uploaded chunks past their TTL. Curated chunks (expires_at NULL)
     are never touched. Called by the internal cleanup endpoint that Cloud

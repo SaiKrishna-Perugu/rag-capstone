@@ -95,6 +95,54 @@ def hybrid_retrieve(question: str, k: int | None = None, session_id: str | None 
     return documents
 
 
+def session_documents(session_id: str | None) -> list | None:
+    """This visitor's uploads as Documents in reading order, or None if there
+    are none or they are too large to pass whole.
+
+    The escape hatch from chunk selection. `hybrid_retrieve()` above answers
+    "which passages look most relevant?", which is the right question for a
+    corpus and the wrong one for a single short document the visitor just
+    uploaded and is now asking about -- there, the honest answer is "all of
+    it". Measured on an uploaded resume, ranking dropped 2 of 3 projects on
+    one phrasing of a question and kept all 3 on another; see the note on
+    config.WHOLE_DOC_MAX_CHARS.
+
+    Returns None rather than falling back internally, so retrieve() owns the
+    decision and the fallback stays visible at the call site.
+
+    Fails open, matching cache.py: this is an optimisation over retrieval,
+    not a correctness requirement, so a database error here must degrade to
+    the normal hybrid path rather than costing the visitor an answer. It
+    adds a query that runs *before* hybrid_search(), so without this the
+    same outage would surface as a 500 from a new call site instead of the
+    error the retrieval path already reports.
+    """
+    if not session_id:
+        return None
+
+    try:
+        rows = database.get_session_chunks(session_id, config.WHOLE_DOC_MAX_CHARS)
+    except Exception:
+        logger.warning(
+            "Whole-document lookup failed; falling back to hybrid retrieval.",
+            exc_info=True,
+        )
+        return None
+    if not rows:
+        return None
+
+    documents = []
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        metadata["source"] = row["source"]
+        # Same underscore-prefixed marker hybrid_retrieve() sets: these are
+        # by definition private uploads, so rag.py must keep the resulting
+        # answer out of the shared semantic cache.
+        metadata["_session_id"] = row.get("session_id")
+        documents.append(Document(page_content=row["content"], metadata=metadata))
+    return documents
+
+
 def _parse_rank_order(response: str) -> list:
     """
     Extract the ranked array from a reranker reply.
@@ -147,7 +195,7 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
         return candidates  # nothing to narrow down
 
     numbered = "\n\n".join(
-        f"[{i+1}] {doc.page_content[:500]}" for i, doc in enumerate(candidates)
+        f"[{i+1}] {doc.page_content[:config.CHUNK_SIZE]}" for i, doc in enumerate(candidates)
     )
     llm = get_llm(temperature=0.0, stage="rerank")
     messages = [

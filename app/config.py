@@ -163,6 +163,25 @@ OTEL_GCP_EXPORT = os.getenv("OTEL_GCP_EXPORT", "false").lower() == "true"
 
 TOP_K = int(os.getenv("TOP_K", "4"))
 
+# When a visitor's own uploads are small enough to fit in the prompt whole,
+# retrieval is skipped for them and every chunk is passed to generation in
+# document order -- see hybrid.session_documents() and rag.retrieve().
+#
+# This exists because chunk selection was measured failing on exactly the
+# demo's most common request: "explain all the projects that I built" against
+# an uploaded resume returned 1 of 3 projects, because the full-text half of
+# hybrid retrieval matched the verb "built" in the resume's EXPERIENCE
+# bullets and displaced two project chunks. Rewording the same question to
+# "explain all the projects described in the document" returned 3 of 3. A
+# selection step that swings on a synonym is the wrong tool for a document
+# that fits in context entire.
+#
+# 12000 chars is roughly 3k tokens -- comfortably a resume, a cover letter or
+# a short report, and small next to any supported model's window. Above it,
+# the normal hybrid+rerank path is used unchanged; this is an optimisation
+# for small documents, not a replacement for retrieval. 0 disables it.
+WHOLE_DOC_MAX_CHARS = int(os.getenv("WHOLE_DOC_MAX_CHARS", "12000"))
+
 # --- API Security & Features ----------------------------------------------
 API_KEY = _get_secret("API_KEY", "")  # empty string = auth disabled
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
