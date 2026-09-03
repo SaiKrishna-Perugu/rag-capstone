@@ -177,6 +177,24 @@ sweep a storage optimisation rather than something correctness depends on.
    candidate pool 3x the final top-k, fused via Reciprocal Rank Fusion, then
    `rerank()` does a single listwise LLM call to narrow to top-k. Reranking
    falls back to pre-rerank order if the LLM response is malformed.
+
+   **`rag.retrieve()` has a second path around all of this.** When the
+   visitor's own uploads total under `WHOLE_DOC_MAX_CHARS` (12000, ~3k
+   tokens) they are passed to generation *whole*, in document order, and
+   hybrid retrieval runs over the curated corpus only
+   (`hybrid.session_documents()`). Ranking a 6-chunk resume down to 4 chunks
+   is a compression step solving a problem that does not exist, and it was
+   measured getting the compression wrong: "explain me about all the projects
+   that i build" against an uploaded resume returned 1 of 3 projects and then
+   refused outright, 5/5 runs, because the full-text half matched the verb
+   "built" in the EXPERIENCE bullets and displaced two project chunks. The
+   same question worded "explain all the projects described in the document"
+   returned 3/3. Above the ceiling the ranked path is used unchanged. Both
+   halves run because a visitor with an upload still asks about the shared
+   corpus. `session_documents()` **fails open** like `cache.py` -- it queries
+   before `hybrid_search()`, so a raising version turns any database blip
+   into a 500 from a new call site ahead of the error retrieval already
+   reports.
 4. `app/retrieval/rag.py` `generate_answer()` does strict context-only generation,
    then `check_groundedness()` runs an LLM-as-judge hallucination check.
 5. Result is cached (`app/retrieval/cache.py`) and appended to session history
