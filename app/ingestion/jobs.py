@@ -181,6 +181,22 @@ def process_job(job_id: str) -> None:
                 "instance serves the request."
             )
             msg = f"Uploaded files are not present on this instance: {missing}. {where}"
+            # A job that already failed keeps its original error. Cleanup runs
+            # on failure, so a Cloud Tasks retry of a job that failed during
+            # ingestion always lands here -- the files it is looking for were
+            # deleted by its own first attempt. Overwriting made every such
+            # failure read as a storage problem: a real
+            # "input token count is 33360 but the model supports up to 20000"
+            # was replaced, two seconds later, by this message, and that is
+            # the one the visitor saw. The retry has nothing to add over the
+            # attempt that actually ran.
+            prior = job.get("error")
+            if job.get("status") == "failed" and prior:
+                logger.warning(
+                    f"Job {job_id} retried after a terminal failure; keeping the "
+                    f"original error. Retry would have reported: {msg}"
+                )
+                raise RuntimeError(prior)
             logger.error(f"Job {job_id} failed: {msg}")
             update_job_status(job_id, "failed", error=msg)
             raise RuntimeError(msg)

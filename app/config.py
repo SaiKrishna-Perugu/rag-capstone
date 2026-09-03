@@ -20,6 +20,24 @@ _IS_CI = any(os.getenv(v) for v in ("CI", "GITHUB_ACTIONS", "PYTEST_CURRENT_TEST
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
 
+# Ceiling on ONE embed_documents() call, in characters and in items.
+#
+# ingest.py used to embed every chunk of a file in a single request. Vertex
+# AI's text-embedding-005 caps a request at 20000 tokens and 250 instances,
+# so a large document failed outright: a 151KB HTML upload produced 33360
+# tokens and came back "400 INVALID_ARGUMENT ... input token count is 33360
+# but the model supports up to 20000". Nothing about the file was wrong; the
+# batch was.
+#
+# The budget is in characters because that is what we have without a
+# tokenizer round trip. 40000 chars against a 20000-token cap assumes a
+# worst case of 2 chars per token -- roughly twice as pessimistic as the
+# 4.5 measured on that HTML, deliberately, because HTML, code and CJK are
+# all denser than prose and the failure mode is a hard 400 rather than a
+# degraded result.
+EMBED_BATCH_MAX_CHARS = int(os.getenv("EMBED_BATCH_MAX_CHARS", "40000"))
+EMBED_BATCH_MAX_ITEMS = int(os.getenv("EMBED_BATCH_MAX_ITEMS", "200"))
+
 # --- Model provider switch -------------------------------------------------
 # "vertexai", or "groq". See app/llm/providers.py -- this is the
 # single knob that controls which provider get_llm()/get_embeddings() build.

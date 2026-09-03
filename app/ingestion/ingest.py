@@ -56,6 +56,44 @@ LOADER_BY_EXTENSION = {
     ".docx": Docx2txtLoader,
 }
 
+def _embed_in_batches(embeddings, contents: list[str]) -> list:
+    """Embed `contents` in pieces small enough for one provider request.
+
+    A single embed_documents() call over a whole file's chunks is the obvious
+    way to write this, and it is what this module did until a 151KB HTML
+    upload hit Vertex AI's per-request ceiling: "input token count is 33360
+    but the model supports up to 20000". The document was fine and the chunks
+    were fine -- only the batch was too big, and the job failed with a
+    provider error that named nothing the visitor could act on.
+
+    Batching on characters rather than tokens is deliberate: counting tokens
+    means either a tokenizer dependency or a CountTokens round trip per file,
+    and the ceiling only has to be *safe*, not tight. See
+    config.EMBED_BATCH_MAX_CHARS for the margin and why it is that wide.
+
+    A single chunk over the budget is still sent alone rather than dropped --
+    CHUNK_SIZE is far below the limit, so that can only happen if someone
+    raises it past the model's ceiling, and failing loudly on the real cause
+    beats silently skipping content.
+    """
+    max_chars = config.EMBED_BATCH_MAX_CHARS
+    max_items = config.EMBED_BATCH_MAX_ITEMS
+    out: list = []
+    batch: list[str] = []
+    batch_chars = 0
+    for text in contents:
+        over_chars = batch and batch_chars + len(text) > max_chars
+        over_items = len(batch) >= max_items
+        if over_chars or over_items:
+            out.extend(embeddings.embed_documents(batch))
+            batch, batch_chars = [], 0
+        batch.append(text)
+        batch_chars += len(text)
+    if batch:
+        out.extend(embeddings.embed_documents(batch))
+    return out
+
+
 def _discover_files(docs_dir: str) -> list:
     """Find every file under docs_dir whose extension we have a loader for."""
     files = []
@@ -222,8 +260,8 @@ def run(
         metadatas = [chunk.metadata for chunk in chunks]
         content_hashes = [_content_hash(c) for c in contents]
 
-        # Batch embed all chunks for this file
-        chunk_embeddings = embeddings.embed_documents(contents)
+        # Batch embed all chunks for this file, in request-sized pieces.
+        chunk_embeddings = _embed_in_batches(embeddings, contents)
 
         # `is_upload` was resolved by the ownership gate at the top of the loop.
         # Reaching here means: either a curated file, or an upload this run is
