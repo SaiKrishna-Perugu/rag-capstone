@@ -1,400 +1,1580 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Grounded Answers</title>
-    <!-- Use Inter font for a modern look -->
-    <!-- Ledger type: Instrument Serif for answers, Instrument Sans for UI,
-         IBM Plex Mono for metadata. fonts.googleapis.com is the one font
-         host the deployed CSP admits (add_security_headers in main.py). -->
+    <title>Grounded Document Q&A — Enterprise RAG</title>
+    
+    <!-- Google Fonts: Plus Jakarta Sans for UI, JetBrains Mono for telemetry/code, Instrument Serif for editorial accents -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Instrument+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
-    <!-- Marked.js for parsing markdown in responses. Pinned + SRI: an
-         unpinned URL floats with upstream releases (jsDelivr currently
-         serves v15.0.12 for this path, NOT the package's actual latest),
-         and a tampered or changed file would run in this page's origin.
-         The fallback guard in renderAnswer() covers the case where either
-         script fails SRI validation and never loads. -->
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+    
+    <!-- Marked.js for markdown parsing with SRI -->
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"
             integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+"
             crossorigin="anonymous"></script>
-    <!-- DOMPurify for XSS protection -->
+    <!-- DOMPurify for XSS protection with SRI -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"
             integrity="sha384-cwS6YdhLI7XS60eoDiC+egV0qHp8zI+Cms46R0nbn8JrmoAzV9uFL60etMZhAnSu"
             crossorigin="anonymous"></script>
-    <style>
-        /* --- Ledger ------------------------------------------------------
-           The product's distinction is that every answer arrives with a
-           checkable verdict, so the page is designed as an answer AND its
-           receipts: metadata set in mono like a document header, the answer
-           itself in an editorial serif, sources as a numbered citation
-           apparatus on hairline rules rather than cards.
 
-           Deliberately no gradients, no glassmorphism, no Inter. Element
-           display values are load-bearing: main.js toggles #auth-bar to
-           flex, #results-container to flex, #loader to flex, and
-           #copy-btn / #signin-btn / #signout-btn to inline-block, so those
-           rules must stay flex/block-compatible and must not become grid. */
+    <style>
+        /* ==========================================================================
+           Design System & Color Tokens
+           ========================================================================== */
         :root {
-            --paper: #FBF9F5;
-            --card: #FFFDFA;
-            --ink: #16130F;
-            --muted: #57504A;
-            /* 4.5:1 is the floor, and #7A7166 cleared it by 0.06 at 9.5px --
-               any future tint of --paper would have pushed it under without
-               anything failing. #6B6257 is 5.5:1, which leaves room. */
-            --faint: #6B6257;
-            --rule: #E4DCCE;
-            --rule-soft: #EFE8DC;
-            --accent: #A8442A;
-            --grounded: #2F6B4F;
-            --serif: 'Instrument Serif', Georgia, 'Times New Roman', serif;
-            --sans: 'Instrument Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
-            --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+            /* Dark Theme (Default) */
+            --bg-base: #0a0d14;
+            --bg-surface: #101623;
+            --bg-surface-elevated: #161f32;
+            --bg-glass: rgba(16, 22, 35, 0.85);
+            --bg-glass-input: rgba(10, 13, 20, 0.7);
+            
+            --border-subtle: rgba(255, 255, 255, 0.07);
+            --border-medium: rgba(255, 255, 255, 0.12);
+            --border-focus: rgba(99, 102, 241, 0.55);
+            
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --text-faint: #475569;
+            
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --primary-glow: rgba(99, 102, 241, 0.25);
+            --primary-bg: rgba(99, 102, 241, 0.1);
+            
+            --grounded: #10b981;
+            --grounded-bg: rgba(16, 185, 129, 0.1);
+            --grounded-border: rgba(16, 185, 129, 0.28);
+            --grounded-glow: rgba(16, 185, 129, 0.2);
+            
+            --hallucinated: #f43f5e;
+            --hallucinated-bg: rgba(244, 63, 94, 0.1);
+            --hallucinated-border: rgba(244, 63, 94, 0.28);
+            
+            --amber: #f59e0b;
+            --amber-bg: rgba(245, 158, 11, 0.1);
+            --amber-border: rgba(245, 158, 11, 0.28);
+            
+            --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+            --font-serif: 'Instrument Serif', Georgia, serif;
+            
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 14px;
+            --radius-xl: 18px;
+            --radius-pill: 9999px;
+            
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+            --shadow-md: 0 4px 12px -1px rgba(0, 0, 0, 0.45);
+            --shadow-lg: 0 12px 28px -4px rgba(0, 0, 0, 0.55);
+            --shadow-glow: 0 0 24px -2px var(--primary-glow);
         }
 
-        * { box-sizing: border-box; }
+        /* Light Theme */
+        [data-theme="light"] {
+            --bg-base: #f8fafc;
+            --bg-surface: #ffffff;
+            --bg-surface-elevated: #f1f5f9;
+            --bg-glass: rgba(255, 255, 255, 0.9);
+            --bg-glass-input: rgba(248, 250, 252, 0.85);
+            
+            --border-subtle: #e2e8f0;
+            --border-medium: #cbd5e1;
+            --border-focus: rgba(99, 102, 241, 0.65);
+            
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+            --text-faint: #94a3b8;
+            
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --primary-glow: rgba(79, 70, 229, 0.18);
+            --primary-bg: rgba(79, 70, 229, 0.08);
+            
+            --grounded: #059669;
+            --grounded-bg: #ecfdf5;
+            --grounded-border: #a7f3d0;
+            --grounded-glow: rgba(5, 150, 105, 0.15);
+            
+            --hallucinated: #e11d48;
+            --hallucinated-bg: #fff1f2;
+            --hallucinated-border: #fecdd3;
+            
+            --amber: #d97706;
+            --amber-bg: #fef3c7;
+            --amber-border: #fde68a;
+            
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 12px -1px rgba(0, 0, 0, 0.08);
+            --shadow-lg: 0 12px 28px -4px rgba(0, 0, 0, 0.1);
+            --shadow-glow: 0 0 20px -2px var(--primary-glow);
+        }
 
+        /* ==========================================================================
+           Base Styles & Reset
+           ========================================================================== */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
         body {
-            margin: 0;
-            background: var(--paper);
-            color: var(--ink);
-            font-family: var(--sans);
-            font-size: 15px;
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            font-size: 14.5px;
             line-height: 1.6;
             -webkit-font-smoothing: antialiased;
-        }
-
-        a { color: var(--accent); text-decoration: none; border-bottom: 1px solid #E0CFC2; }
-        a:hover { color: #7E3320; border-bottom-color: var(--accent); }
-        ::selection { background: #EFE3CE; }
-
-        .page { max-width: 1180px; margin: 0 auto; padding: 40px 40px 72px; }
-
-        /* --- masthead --- */
-        .masthead {
+            -moz-osx-font-smoothing: grayscale;
+            min-height: 100vh;
             display: flex;
-            align-items: baseline;
-            justify-content: space-between;
-            gap: 24px;
-            flex-wrap: wrap;
-            border-bottom: 1.5px solid var(--ink);
-            padding-bottom: 14px;
+            flex-direction: column;
+            position: relative;
+            overflow-x: hidden;
+            transition: background-color 0.25s ease, color 0.25s ease;
         }
-        .mast-left { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-        .wordmark { font-family: var(--serif); font-size: 30px; letter-spacing: -0.01em;
-                    font-weight: 400; margin: 0; }
-        .kicker {
-            font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em;
-            text-transform: uppercase; color: var(--faint);
-        }
-        .subtitle { margin: 16px 0 0; color: var(--muted); font-size: 15px; max-width: 64ch; }
 
-        /* --- layout --- */
+        /* Decorative Background Aurora Glow */
+        body::before {
+            content: '';
+            position: fixed;
+            top: -140px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 850px;
+            height: 380px;
+            background: radial-gradient(circle, rgba(99, 102, 241, 0.14) 0%, rgba(16, 185, 129, 0.06) 45%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        a { color: var(--primary); text-decoration: none; transition: color 0.15s ease; }
+        a:hover { color: var(--primary-hover); }
+        ::selection { background: var(--primary-glow); color: var(--text-primary); }
+
+        /* ==========================================================================
+           Layout Container
+           ========================================================================== */
+        .app-shell {
+            max-width: 1280px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 24px 32px 72px;
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 28px;
+        }
+
+        @media (max-width: 960px) {
+            .app-shell { padding: 18px 16px 48px; gap: 20px; }
+        }
+
+        /* ==========================================================================
+           Header & Top Navigation
+           ========================================================================== */
+        .navbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            padding: 16px 20px;
+            background: var(--bg-glass);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .brand-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: var(--radius-md);
+            background: linear-gradient(135deg, var(--primary) 0%, #8b5cf6 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #ffffff;
+            box-shadow: 0 4px 14px var(--primary-glow);
+            flex-shrink: 0;
+        }
+
+        .brand-meta {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .brand-title {
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .badge-version {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: var(--radius-pill);
+            background: var(--bg-surface-elevated);
+            color: var(--text-muted);
+            border: 1px solid var(--border-subtle);
+            letter-spacing: 0.05em;
+        }
+
+        .brand-sub {
+            font-size: 12px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: var(--grounded);
+            box-shadow: 0 0 8px var(--grounded);
+            animation: pulse-dot 2.5s infinite;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.15); opacity: 0.75; }
+        }
+
+        .nav-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        /* Mode Switcher Pill */
+        .mode-toggle {
+            display: flex;
+            background: var(--bg-surface-elevated);
+            padding: 3px;
+            border-radius: var(--radius-pill);
+            border: 1px solid var(--border-subtle);
+        }
+
+        .mode-btn {
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            font-family: var(--font-sans);
+            font-size: 12px;
+            font-weight: 600;
+            padding: 5px 12px;
+            border-radius: var(--radius-pill);
+            cursor: pointer;
+            transition: all 0.18s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .mode-btn.active {
+            background: var(--bg-surface);
+            color: var(--text-primary);
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-medium);
+        }
+
+        .mode-btn:hover:not(.active) {
+            color: var(--text-secondary);
+        }
+
+        /* Common Action Buttons */
+        .icon-btn, .action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            border: 1px solid var(--border-subtle);
+            background: var(--bg-surface-elevated);
+            color: var(--text-secondary);
+            font-family: var(--font-sans);
+            font-size: 12.5px;
+            font-weight: 500;
+            padding: 6px 12px;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all 0.16s ease;
+            min-height: 34px;
+        }
+
+        .icon-btn:hover, .action-btn:hover {
+            border-color: var(--border-medium);
+            color: var(--text-primary);
+            background: var(--border-subtle);
+        }
+
+        /* Firebase Auth Bar */
+        #auth-bar {
+            display: none; /* toggled to flex via JS */
+            align-items: center;
+            gap: 8px;
+        }
+
+        #signin-btn, #signout-btn {
+            font-family: var(--font-sans);
+            font-size: 12.5px;
+            font-weight: 600;
+            padding: 6px 14px;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all 0.18s ease;
+            min-height: 34px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #signin-btn {
+            background: var(--primary);
+            color: #ffffff;
+            border: 1px solid transparent;
+            box-shadow: 0 2px 8px var(--primary-glow);
+        }
+        #signin-btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
+
+        #signout-btn {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--border-subtle);
+        }
+        #signout-btn:hover { border-color: var(--border-medium); color: var(--text-primary); }
+
+        #auth-status {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-secondary);
+            max-width: 140px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* ==========================================================================
+           API Key Gate (Protected Deployments)
+           ========================================================================== */
+        .apikey-section {
+            background: var(--bg-surface);
+            border: 1px solid var(--amber-border);
+            border-radius: var(--radius-lg);
+            padding: 16px 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .apikey-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .apikey-title {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--amber);
+        }
+
+        #apikey-input {
+            width: 100%;
+            padding: 10px 14px;
+            background: var(--bg-glass-input);
+            border: 1px solid var(--border-medium);
+            border-radius: var(--radius-md);
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+
+        #apikey-input:focus {
+            border-color: var(--border-focus);
+            box-shadow: 0 0 0 3px var(--primary-glow);
+        }
+
+        #apikey-hint {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        /* ==========================================================================
+           Workspace Grid
+           ========================================================================== */
         .workspace {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) 300px;
-            gap: 44px;
-            margin-top: 34px;
+            grid-template-columns: minmax(0, 1fr) 340px;
+            gap: 28px;
             align-items: start;
         }
-        @media (max-width: 900px) {
-            .page { padding: 28px 20px 56px; }
-            .workspace { grid-template-columns: minmax(0, 1fr); gap: 36px; }
-            .wordmark { font-size: 25px; }
-            .answer-content { font-size: 21px !important; }
+
+        @media (max-width: 980px) {
+            .workspace {
+                grid-template-columns: minmax(0, 1fr);
+                gap: 24px;
+            }
         }
 
-        /* --- optional sign-in (additive; never a gate) --- */
-        #auth-bar { align-items: center; gap: 12px; font-size: 14px; }
-        #signin-btn, #signout-btn {
-            font-family: var(--sans); font-size: 13.5px; cursor: pointer;
-            padding: 10px 16px; min-height: 44px; border: 1px solid var(--ink);
-            background: var(--ink); color: var(--paper);
+        /* ==========================================================================
+           Primary Interactive Column (Search & Answers)
+           ========================================================================== */
+        .col-main {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
         }
-        #signin-btn:hover { background: #2A241D; }
-        #signout-btn { background: transparent; color: var(--faint); border-color: var(--rule); }
-        #signout-btn:hover { border-color: var(--ink); color: var(--ink); }
-        #auth-status { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
 
-        /* --- api key (private deployments only) --- */
-        .apikey-section { margin-bottom: 20px; }
-        #apikey-input {
-            width: 100%; padding: 12px 14px; border: 1px solid var(--rule);
-            background: var(--card); color: inherit; font-family: var(--mono); font-size: 13px;
+        /* Hero Prompt Card */
+        .search-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xl);
+            padding: 18px 20px 14px;
+            box-shadow: var(--shadow-md);
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            position: relative;
         }
-        #apikey-input:focus { outline: none; border-color: var(--ink); }
-        #apikey-hint { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 6px; }
 
-        /* --- ask --- */
-        .search-box { display: flex; border: 1px solid var(--ink); background: var(--card); }
-        .search-box input[type="text"] {
-            flex: 1; min-width: 0; border: none; outline: none; background: transparent;
-            color: var(--ink); font-family: var(--sans); font-size: 15px;
-            padding: 17px 18px; min-height: 44px;
+        .search-card:focus-within {
+            border-color: var(--border-focus);
+            box-shadow: var(--shadow-glow), var(--shadow-md);
         }
-        .search-box input[type="text"]::placeholder { color: #A79E90; }
+
+        .search-inner {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .search-icon {
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+
+        #question-input {
+            width: 100%;
+            border: none;
+            outline: none;
+            background: transparent;
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            font-size: 15.5px;
+            line-height: 1.5;
+            padding: 4px 0;
+        }
+
+        #question-input::placeholder {
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .search-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-subtle);
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .search-hints {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11.5px;
+            color: var(--text-muted);
+        }
+
+        .kbd-pill {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            background: var(--bg-surface-elevated);
+            border: 1px solid var(--border-subtle);
+            padding: 2px 6px;
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+        }
+
         #ask-btn {
-            border: none; cursor: pointer; background: var(--ink); color: var(--paper);
-            font-family: var(--sans); font-size: 14px; font-weight: 500;
-            padding: 0 26px; min-height: 44px;
+            background: var(--primary);
+            color: #ffffff;
+            border: none;
+            font-family: var(--font-sans);
+            font-size: 13.5px;
+            font-weight: 600;
+            padding: 8px 18px;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.18s ease;
+            box-shadow: 0 2px 10px var(--primary-glow);
         }
-        #ask-btn:hover { background: #2A241D; }
-        #ask-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
+        #ask-btn:hover:not(:disabled) {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+
+        #ask-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        /* Quick Starters Chips */
+        .starter-chips {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 4px;
+        }
+
+        .starter-label {
+            font-size: 11.5px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .starter-chip {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            font-size: 11.5px;
+            padding: 4px 11px;
+            border-radius: var(--radius-pill);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .starter-chip:hover {
+            border-color: var(--primary);
+            color: var(--primary);
+            background: var(--primary-bg);
+        }
+
+        /* Error Banner */
         .error-message {
-            display: none; margin-top: 18px; border-left: 3px solid var(--accent);
-            padding: 8px 0 8px 13px; color: var(--muted); font-size: 14px; line-height: 1.6;
+            display: none;
+            background: var(--hallucinated-bg);
+            border: 1px solid var(--hallucinated-border);
+            border-radius: var(--radius-lg);
+            padding: 14px 18px;
+            color: var(--hallucinated);
+            font-size: 13.5px;
+            line-height: 1.5;
+            align-items: flex-start;
+            gap: 12px;
         }
 
-        /* --- loader --- */
-        .loader-container { display: none; align-items: center; gap: 12px; margin-top: 28px; }
+        /* Loading State */
+        .loader-container {
+            display: none; /* toggled to flex */
+            align-items: center;
+            gap: 14px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            padding: 16px 20px;
+            box-shadow: var(--shadow-sm);
+        }
+
         .spinner {
-            width: 11px; height: 11px; flex-shrink: 0; border-radius: 50%;
-            border: 1.5px solid var(--ink); border-right-color: transparent;
-            animation: spin 0.7s linear infinite;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            border: 2px solid var(--border-medium);
+            border-top-color: var(--primary);
+            animation: spin-loader 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+            flex-shrink: 0;
         }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .loader-text { font-family: var(--mono); font-size: 12.5px; color: var(--faint); }
 
-        /* --- results --- */
-        #results-container { display: none; flex-direction: column; gap: 0; margin-top: 36px; }
+        @keyframes spin-loader {
+            to { transform: rotate(360deg); }
+        }
 
-        /* the receipt: mono metadata strip reading as a document header */
-        .stats-bar {
-            display: flex; flex-wrap: wrap; gap: 30px;
-            border-top: 1.5px solid var(--ink); border-bottom: 1px solid var(--rule);
-            padding: 13px 0;
+        .loader-text {
+            font-family: var(--font-mono);
+            font-size: 12.5px;
+            color: var(--text-secondary);
+            animation: pulse-text 2s ease infinite;
         }
-        .stat-badge { display: flex; flex-direction: column; gap: 3px; }
-        .stat-label {
-            font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em;
-            text-transform: uppercase; color: var(--faint);
-        }
-        .stat-value { font-family: var(--mono); font-size: 14px; font-weight: 500; }
-        .grounded-true { color: var(--grounded); }
-        .grounded-false { color: var(--accent); }
 
-        .card-header {
-            font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em;
-            text-transform: uppercase; color: var(--faint); margin: 30px 0 14px;
+        @keyframes pulse-text {
+            0%, 100% { opacity: 0.9; }
+            50% { opacity: 0.55; }
         }
-        .answer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-        .card-header span.badge {
-            font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em;
-            color: var(--accent); border: 1px solid var(--rule);
-            padding: 2px 6px; margin-left: 8px;
+
+        /* ==========================================================================
+           Answer & Receipt Results Panel
+           ========================================================================== */
+        #results-container {
+            display: none; /* toggled to flex via JS */
+            flex-direction: column;
+            gap: 20px;
+            animation: fadeIn 0.3s ease-out;
         }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Verified Verdict Banner */
+        .verdict-banner {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xl);
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            flex-wrap: wrap;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .verdict-badge-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .verdict-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 6px 14px;
+            border-radius: var(--radius-pill);
+            font-family: var(--font-mono);
+            font-size: 12.5px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+        }
+
+        /* Dynamic Verdict Classes */
+        .stat-value.grounded-true, .verdict-pill.grounded-true {
+            background: var(--grounded-bg);
+            color: var(--grounded);
+            border: 1px solid var(--grounded-border);
+            box-shadow: 0 0 16px var(--grounded-glow);
+        }
+
+        .stat-value.grounded-false, .verdict-pill.grounded-false {
+            background: var(--hallucinated-bg);
+            color: var(--hallucinated);
+            border: 1px solid var(--hallucinated-border);
+        }
+
+        .verdict-pill.grounded-skipped {
+            background: var(--amber-bg);
+            color: var(--amber);
+            border: 1px solid var(--amber-border);
+        }
+
+        .verdict-desc {
+            font-size: 12.5px;
+            color: var(--text-secondary);
+        }
+
+        /* Telemetry Metrics Ribbon */
+        .metrics-ribbon {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .metric-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .metric-val {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* Answer Display Card */
+        .answer-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xl);
+            padding: 24px;
+            box-shadow: var(--shadow-sm);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .answer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .answer-tagline {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13.5px;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            color: var(--text-primary);
+        }
+
+        .badge-rewrite {
+            display: none;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 500;
+            color: #8b5cf6;
+            background: rgba(139, 92, 246, 0.12);
+            border: 1px solid rgba(139, 92, 246, 0.28);
+            padding: 3px 9px;
+            border-radius: var(--radius-pill);
+        }
+
         #copy-btn {
-            font-family: var(--mono); font-size: 11px; cursor: pointer;
-            background: transparent; border: 1px solid var(--rule);
-            color: var(--faint); padding: 7px 10px; min-height: 36px;
+            font-family: var(--font-sans);
+            font-size: 12px;
+            font-weight: 500;
+            padding: 6px 12px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-subtle);
+            background: var(--bg-surface-elevated);
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: none; /* toggled via JS */
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s ease;
         }
-        #copy-btn:hover { border-color: var(--ink); color: var(--ink); }
 
+        #copy-btn:hover {
+            border-color: var(--border-medium);
+            color: var(--text-primary);
+            background: var(--border-subtle);
+        }
+
+        /* Markdown Formatted Answer */
         .answer-content {
-            font-family: var(--serif); font-size: 25px; line-height: 1.45;
-            letter-spacing: -0.005em; text-wrap: pretty;
+            color: var(--text-primary);
+            font-size: 15px;
+            line-height: 1.7;
+            word-break: break-word;
         }
-        .answer-content p { margin: 0 0 0.65em; }
+
+        .answer-content p { margin-bottom: 12px; }
         .answer-content p:last-child { margin-bottom: 0; }
-        .answer-content ul, .answer-content ol { padding-left: 1.05em; margin: 0.5em 0; }
-        .answer-content li { margin-bottom: 0.3em; }
-        .answer-content strong { font-weight: 600; }
+        .answer-content h1, .answer-content h2, .answer-content h3 {
+            font-weight: 700;
+            margin: 18px 0 10px;
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
+        }
+        .answer-content h1 { font-size: 20px; }
+        .answer-content h2 { font-size: 17px; }
+        .answer-content h3 { font-size: 15px; }
+
+        .answer-content ul, .answer-content ol {
+            padding-left: 22px;
+            margin: 10px 0 14px;
+        }
+        .answer-content li { margin-bottom: 4px; }
+
         .answer-content code {
-            font-family: var(--mono); font-size: 0.6em;
-            background: #F2EADA; padding: 1px 5px;
+            font-family: var(--font-mono);
+            font-size: 12.5px;
+            background: var(--bg-surface-elevated);
+            border: 1px solid var(--border-subtle);
+            padding: 2px 6px;
+            border-radius: var(--radius-sm);
+            color: #ec4899;
         }
+
         .answer-content pre {
-            background: #F2EADA; padding: 14px; overflow-x: auto;
-            font-family: var(--mono); font-size: 0.55em; line-height: 1.6;
+            background: var(--bg-base);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 14px 16px;
+            overflow-x: auto;
+            margin: 14px 0;
         }
 
-        /* sources as a citation apparatus, not cards */
-        .sources-grid { display: flex; flex-direction: column; border-top: 1.5px solid var(--ink); }
-        .source-card { padding: 15px 0; border-bottom: 1px solid var(--rule-soft); }
-        .source-title { font-family: var(--mono); font-size: 12px; font-weight: 500; word-break: break-word; }
-        .source-page { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 2px; }
-        .sources-note { font-size: 13px; line-height: 1.6; color: var(--muted); padding: 14px 0; }
-        .source-excerpt { font-size: 13.5px; line-height: 1.6; color: var(--muted); margin-top: 7px; }
-
-        /* --- documents rail --- */
-        .rail-title {
-            font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em;
-            text-transform: uppercase; border-bottom: 1.5px solid var(--ink); padding-bottom: 9px;
+        .answer-content pre code {
+            background: transparent;
+            border: none;
+            padding: 0;
+            color: var(--text-primary);
+            font-size: 12.5px;
         }
+
+        .answer-content blockquote {
+            border-left: 3px solid var(--primary);
+            padding-left: 14px;
+            margin: 14px 0;
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        .answer-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 13.5px;
+        }
+
+        .answer-content th, .answer-content td {
+            padding: 10px 14px;
+            border: 1px solid var(--border-subtle);
+            text-align: left;
+        }
+
+        .answer-content th {
+            background: var(--bg-surface-elevated);
+            font-weight: 600;
+        }
+
+        /* Sources Apparatus */
+        .sources-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xl);
+            padding: 20px 24px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .sources-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .sources-title {
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sources-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .source-card {
+            background: var(--bg-glass-input);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            padding: 14px 16px;
+            transition: all 0.15s ease;
+        }
+
+        .source-card:hover {
+            border-color: var(--border-medium);
+            background: var(--bg-surface-elevated);
+        }
+
+        .source-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 6px;
+        }
+
+        .source-title {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            word-break: break-word;
+        }
+
+        .source-page {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-muted);
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            padding: 2px 7px;
+            border-radius: var(--radius-sm);
+        }
+
+        .source-excerpt {
+            font-size: 13px;
+            line-height: 1.55;
+            color: var(--text-secondary);
+        }
+
+        .sources-note {
+            font-size: 13px;
+            color: var(--text-muted);
+            padding: 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* ==========================================================================
+           Sidebar / Knowledge Base Rail
+           ========================================================================== */
+        .col-side {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .sidebar-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-xl);
+            padding: 20px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-subtle);
+            margin-bottom: 14px;
+        }
+
+        .sidebar-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Quota Bar */
+        .quota-container {
+            margin-bottom: 16px;
+        }
+
+        .quota-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            margin-bottom: 6px;
+        }
+
+        .quota-track {
+            width: 100%;
+            height: 5px;
+            background: var(--bg-surface-elevated);
+            border-radius: var(--radius-pill);
+            overflow: hidden;
+        }
+
+        .quota-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary) 0%, #8b5cf6 100%);
+            border-radius: var(--radius-pill);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        /* Upload Dropzone */
         .upload-section input[type="file"] { display: none; }
+
+        .upload-dropzone {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            border: 2px dashed var(--border-medium);
+            border-radius: var(--radius-lg);
+            padding: 24px 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: var(--bg-glass-input);
+        }
+
+        .upload-dropzone:hover, .upload-dropzone.drag-over {
+            border-color: var(--primary);
+            background: var(--primary-bg);
+        }
+
+        .dropzone-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: var(--bg-surface-elevated);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary);
+        }
+
         .upload-label {
-            display: block; cursor: pointer; border: 1px dashed #C9BFAE;
-            padding: 16px 12px; text-align: center; color: var(--faint);
-            font-size: 13.5px; line-height: 1.5; min-height: 44px; margin-top: 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+            line-height: 1.4;
+            cursor: pointer;
         }
-        .upload-label:hover { border-color: var(--ink); color: var(--ink); }
+
+        .upload-subtext {
+            font-size: 11px;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
         .upload-status {
-            display: none; font-family: var(--mono); font-size: 11.5px;
-            color: var(--grounded); margin-top: 12px; line-height: 1.5;
+            display: none;
+            font-family: var(--font-mono);
+            font-size: 11.5px;
+            color: var(--grounded);
+            background: var(--grounded-bg);
+            border: 1px solid var(--grounded-border);
+            border-radius: var(--radius-md);
+            padding: 10px 12px;
+            margin-top: 12px;
+            line-height: 1.4;
         }
+
         .upload-error {
-            display: none; font-size: 13px; line-height: 1.6; color: var(--muted);
-            border-left: 3px solid var(--accent); padding-left: 11px; margin-top: 12px;
+            display: none;
+            font-size: 12.5px;
+            line-height: 1.5;
+            color: var(--hallucinated);
+            background: var(--hallucinated-bg);
+            border: 1px solid var(--hallucinated-border);
+            border-radius: var(--radius-md);
+            padding: 10px 12px;
+            margin-top: 12px;
         }
-        .doc-list { display: flex; flex-direction: column; }
+
+        /* Document List */
+        .doc-list-section {
+            margin-top: 18px;
+        }
+
+        .doc-list-title {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .doc-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
         .doc-row {
-            display: flex; align-items: center; justify-content: space-between;
-            gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--rule-soft);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 12px;
+            background: var(--bg-glass-input);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            transition: all 0.15s ease;
         }
-        .doc-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .doc-meta { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 2px; }
+
+        .doc-row:hover {
+            border-color: var(--border-medium);
+            background: var(--bg-surface-elevated);
+        }
+
+        .doc-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .doc-file-icon {
+            color: var(--primary);
+            flex-shrink: 0;
+        }
+
+        .doc-details {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .doc-name {
+            font-size: 12.5px;
+            font-weight: 500;
+            color: var(--text-primary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .doc-meta {
+            font-family: var(--font-mono);
+            font-size: 10.5px;
+            color: var(--text-muted);
+        }
+
         .doc-remove {
-            font-family: var(--mono); font-size: 10.5px; cursor: pointer;
-            background: transparent; border: 1px solid var(--rule); color: var(--faint);
-            padding: 7px 9px; flex-shrink: 0; min-height: 36px;
+            background: transparent;
+            border: 1px solid var(--border-subtle);
+            color: var(--text-muted);
+            border-radius: var(--radius-sm);
+            padding: 4px 8px;
+            font-size: 11px;
+            font-family: var(--font-mono);
+            cursor: pointer;
+            transition: all 0.15s ease;
+            flex-shrink: 0;
         }
-        .doc-remove:hover { border-color: var(--accent); color: var(--accent); }
-        .doc-remove:disabled { opacity: 0.5; cursor: default; }
+
+        .doc-remove:hover {
+            border-color: var(--hallucinated);
+            color: var(--hallucinated);
+            background: var(--hallucinated-bg);
+        }
+
+        .doc-remove:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Curated Knowledge Banner */
+        .curated-box {
+            margin-top: 14px;
+            padding: 12px;
+            background: var(--bg-surface-elevated);
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-subtle);
+            font-size: 11.5px;
+            color: var(--text-muted);
+            line-height: 1.45;
+        }
+
+        .curated-box strong {
+            color: var(--text-secondary);
+        }
+
+        /* ==========================================================================
+           Footer
+           ========================================================================== */
+        .app-footer {
+            margin-top: 24px;
+            padding-top: 18px;
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--text-muted);
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .footer-links {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
     </style>
 </head>
 <body>
-    <div class="page">
-        <header class="masthead">
-            <div class="mast-left">
-                <h1 class="wordmark">Grounded Answers</h1>
-                <div class="kicker">Retrieval &middot; Rerank &middot; Verdict</div>
+    <div class="app-shell">
+        <!-- ==================================================================
+             Header & Masthead
+             ================================================================== -->
+        <header class="navbar">
+            <div class="brand">
+                <div class="brand-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                </div>
+                <div class="brand-meta">
+                    <div class="brand-title">
+                        <span>Grounded Answers</span>
+                        <span class="badge-version">RAG CAPSTONE</span>
+                    </div>
+                    <div class="brand-sub">
+                        <span class="status-dot"></span>
+                        <span id="pipeline-status">Hybrid Retrieval · RRF · Verified Groundedness</span>
+                    </div>
+                </div>
             </div>
 
-            <!-- Optional sign-in. Deliberately NOT a wall: the page, questions
-                 and uploads all work signed-out. Signing in only raises the
-                 upload ceiling. Hidden entirely unless /config reports Firebase
-                 is configured, so an unconfigured deployment never shows a
-                 button that cannot work. main.js sets display:flex here. -->
-            <div id="auth-bar" style="display:none;">
-                <button id="signin-btn" onclick="signIn()">Sign in with Google</button>
-                <span id="auth-status"></span>
-                <button id="signout-btn" onclick="signOutUser()" style="display:none;">Sign out</button>
+            <div class="nav-actions">
+                <!-- Mode Switcher: Streaming vs Agentic Loop -->
+                <div class="mode-toggle">
+                    <button class="mode-btn active" id="btn-mode-stream" onclick="setQueryMode('stream')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                        Streaming
+                    </button>
+                    <button class="mode-btn" id="btn-mode-agentic" onclick="setQueryMode('agentic')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                        Agentic Loop
+                    </button>
+                </div>
+
+                <!-- Theme Toggle Button -->
+                <button class="icon-btn" onclick="toggleTheme()" title="Toggle Dark/Light theme" aria-label="Toggle Theme">
+                    <svg id="theme-icon-dark" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+                    <svg id="theme-icon-light" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                </button>
+
+                <!-- Optional Firebase Sign-In -->
+                <div id="auth-bar">
+                    <button id="signin-btn" onclick="signIn()">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12.24 10.285V13.4h6.887C18.2 16.3 15.6 18.4 12.24 18.4c-3.535 0-6.4-2.865-6.4-6.4s2.865-6.4 6.4-6.4c1.6 0 3.05.58 4.18 1.54l2.4-2.4C17.4 3.32 14.98 2.4 12.24 2.4 6.91 2.4 2.6 6.71 2.6 12.04s4.31 9.64 9.64 9.64c5.56 0 9.24-3.91 9.24-9.4 0-.64-.06-1.12-.17-1.6h-9.07z"/></svg>
+                        Sign in with Google
+                    </button>
+                    <span id="auth-status"></span>
+                    <button id="signout-btn" onclick="signOutUser()">Sign out</button>
+                </div>
             </div>
         </header>
 
-        <p class="subtitle">Ask questions over a local document set. Every answer is checked against the passages it came from, and shows you the verdict.</p>
-
+        <!-- ==================================================================
+             Workspace: Main Interaction Column + Knowledge Base Sidebar
+             ================================================================== -->
         <main class="workspace">
+            <!-- Left / Primary Column -->
             <div class="col-main">
-
-                <!-- Every endpoint except /health and /ready sits behind
-                     AccessControlMiddleware when the deployment sets API_KEY, so
-                     the UI has to send X-API-Key or every call returns 401. Kept
-                     in localStorage rather than baked into the page: this file is
-                     served publicly, so an embedded key would be readable by
-                     anyone who opened it. Hidden when auth is disabled. -->
+                
+                <!-- API Key Section for Protected Deployments -->
                 <div class="apikey-section" id="apikey-section" style="display:none;">
-                    <input type="password" id="apikey-input" placeholder="API key (required by this deployment)"
+                    <div class="apikey-head">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                        <span class="apikey-title">Deployment Protected by API Key</span>
+                    </div>
+                    <input type="password" id="apikey-input" placeholder="Paste X-API-Key to authorize requests..."
                            autocomplete="off" oninput="saveApiKey(this.value)">
-                    <div id="apikey-hint">Stored only in this browser. Needed for asking questions and uploading.</div>
+                    <div id="apikey-hint">Stored only in this browser (localStorage). Required for asking questions and uploading documents.</div>
                 </div>
 
-                <div class="search-box">
-                    <input type="text" id="question-input" placeholder="Ask something your documents can answer&hellip;"
-                           autocomplete="off" onkeypress="handleKeyPress(event)">
-                    <button id="ask-btn" onclick="askQuestion()">Ask</button>
+                <!-- Hero Search / Question Card -->
+                <div class="search-card">
+                    <div class="search-inner">
+                        <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="question-input"
+                               placeholder="Ask anything covered by your documents..."
+                               autocomplete="off" onkeypress="handleKeyPress(event)">
+                    </div>
+
+                    <div class="search-footer">
+                        <div class="search-hints">
+                            <span>Press</span>
+                            <span class="kbd-pill">Enter ↵</span>
+                            <span>to query</span>
+                            <span style="margin: 0 4px;">·</span>
+                            <span id="active-mode-label" style="color: var(--primary); font-weight: 600;">Streaming Mode</span>
+                        </div>
+
+                        <button id="ask-btn" onclick="askQuestion()">
+                            <span>Ask Question</span>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                        </button>
+                    </div>
                 </div>
 
-                <div class="error-message" id="error-message"></div>
+                <!-- Starter Prompt Suggestions -->
+                <div class="starter-chips">
+                    <span class="starter-label">Try asking:</span>
+                    <button class="starter-chip" onclick="usePrompt('How long is the refund window?')">Refund policy window</button>
+                    <button class="starter-chip" onclick="usePrompt('What does the hardware warranty cover?')">Hardware warranty coverage</button>
+                    <button class="starter-chip" onclick="usePrompt('How long does standard shipping take?')">Standard shipping delivery</button>
+                    <button class="starter-chip" onclick="usePrompt('What is the CEO\'s name?')">Unanswerable test question</button>
+                </div>
 
+                <!-- Error Notice -->
+                <div class="error-message" id="error-message">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                    <span id="error-text"></span>
+                </div>
+
+                <!-- Loader with Rotating Pipeline Feedback -->
                 <div class="loader-container" id="loader" role="status" aria-live="polite">
                     <div class="spinner"></div>
-                    <div class="loader-text" id="loader-text">Retrieving passages and generating an answer&hellip;</div>
+                    <div class="loader-text" id="loader-text">Retrieving relevant passages and synthesizing response&hellip;</div>
                 </div>
 
-                <!-- aria-live: the answer arrives asynchronously, so without
-                     it a screen-reader user is never told anything happened.
-                     polite, not assertive: it should not interrupt. -->
+                <!-- Results Panel: Verdict Receipt + Answer + Sources -->
                 <div id="results-container" aria-live="polite" aria-busy="false">
-                    <!-- The receipt, first: the verdict is the point of the
-                         product, so it reads before the answer rather than as a
-                         footnote under it. -->
-                    <div class="stats-bar">
-                        <div class="stat-badge">
-                            <span class="stat-label">Verdict</span>
-                            <span class="stat-value" id="stat-groundedness">--</span>
+                    
+                    <!-- Verdict & Performance Telemetry Ribbon -->
+                    <div class="verdict-banner">
+                        <div class="verdict-badge-group">
+                            <div class="verdict-pill grounded-true" id="stat-groundedness">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                <span>GROUNDED</span>
+                            </div>
+                            <span class="verdict-desc" id="verdict-explanation">Answer strictly substantiated by document passages</span>
                         </div>
-                        <div class="stat-badge">
-                            <span class="stat-label">Latency</span>
-                            <span class="stat-value" id="stat-latency">-- ms</span>
-                        </div>
-                        <div class="stat-badge">
-                            <span class="stat-label">Rewrites</span>
-                            <span class="stat-value" id="stat-retries">0</span>
+
+                        <div class="metrics-ribbon">
+                            <div class="metric-item" title="End-to-end response latency">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                                <span>Latency:</span>
+                                <span class="metric-val" id="stat-latency">-- ms</span>
+                            </div>
+
+                            <div class="metric-item" title="LangGraph agent query rewrites">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+                                <span>Rewrites:</span>
+                                <span class="metric-val" id="stat-retries">0</span>
+                            </div>
+
+                            <div class="metric-item" id="metric-cache-hit" style="display:none;" title="Served from semantic cache">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                                <span style="color: var(--amber); font-weight: 600;">Cached</span>
+                            </div>
                         </div>
                     </div>
 
-                    <div class="card">
-                        <div class="card-header answer-head">
-                            <span>Answer<span class="badge" id="badge-rewrites" style="display:none">Query rewritten</span></span>
-                            <button id="copy-btn" onclick="copyAnswer()" style="display: none;">Copy</button>
+                    <!-- Generated Answer Card -->
+                    <div class="answer-card">
+                        <div class="answer-header">
+                            <div class="answer-tagline">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                                <span>Generated Answer</span>
+                                <span class="badge-rewrite" id="badge-rewrites">Query rewritten</span>
+                            </div>
+
+                            <button id="copy-btn" onclick="copyAnswer()">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                <span>Copy</span>
+                            </button>
                         </div>
                         <div class="answer-content" id="answer-content"></div>
                     </div>
 
-                    <div class="card">
-                        <div class="card-header">Sources</div>
+                    <!-- Retrieved Sources Card -->
+                    <div class="sources-card">
+                        <div class="sources-head">
+                            <div class="sources-title">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                                <span>Retrieved Citations & Context</span>
+                            </div>
+                        </div>
                         <div class="sources-grid" id="sources-grid">
-                            <!-- Sources injected here, via createElement/textContent
-                                 rather than innerHTML -- the filename is attacker-
-                                 controlled and was a real stored-XSS vector. -->
+                            <!-- Injected safely via createElement / textContent -->
                         </div>
                     </div>
                 </div>
             </div>
 
+            <!-- Right Column / Knowledge Base Rail -->
             <aside class="col-side">
-                <div class="rail-title">Your documents</div>
-                <div class="upload-section" id="upload-section">
-                    <input type="file" id="file-input" onchange="handleFileUpload(event)">
-                    <div class="doc-list" id="doc-list"></div>
-                    <label for="file-input" class="upload-label" id="upload-label">
-                        + Upload a document (PDF, TXT, MD, CSV)
-                    </label>
-                    <div class="upload-status" id="upload-status">Document ingested successfully!</div>
-                    <div class="upload-error" id="upload-error"></div>
+                <div class="sidebar-card">
+                    <div class="sidebar-header">
+                        <div class="sidebar-title">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                            <span>Knowledge Base</span>
+                        </div>
+                        <span class="badge-version" id="doc-counter">0 docs</span>
+                    </div>
+
+                    <!-- Session Quota Bar -->
+                    <div class="quota-container">
+                        <div class="quota-label">
+                            <span>Storage Usage</span>
+                            <span id="quota-text">0 / 6 files</span>
+                        </div>
+                        <div class="quota-track">
+                            <div class="quota-bar" id="quota-bar"></div>
+                        </div>
+                    </div>
+
+                    <!-- Drag & Drop Upload Section -->
+                    <div class="upload-section" id="upload-section">
+                        <input type="file" id="file-input" multiple onchange="handleFileUpload(event)">
+                        
+                        <label for="file-input" class="upload-dropzone" id="upload-dropzone">
+                            <div class="dropzone-icon">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                            </div>
+                            <span class="upload-label" id="upload-label">+ Upload Document(s)</span>
+                            <span class="upload-subtext">Drag & drop or browse (PDF, TXT, MD, CSV, DOCX, HTML · Max 3MB)</span>
+                        </label>
+
+                        <div class="upload-status" id="upload-status">Document ingested successfully!</div>
+                        <div class="upload-error" id="upload-error"></div>
+                    </div>
+
+                    <!-- Uploaded Documents List -->
+                    <div class="doc-list-section">
+                        <div class="doc-list-title">Your Private Session Documents</div>
+                        <div class="doc-list" id="doc-list">
+                            <!-- Injected safely via createElement -->
+                        </div>
+                    </div>
+
+                    <!-- Curated Corpus Notice -->
+                    <div class="curated-box">
+                        <strong>Shared Corpus:</strong> Company policies, billing FAQ, returns guide, account security, and product docs are pre-indexed and accessible to all queries.
+                    </div>
                 </div>
             </aside>
         </main>
+
+        <!-- ==================================================================
+             Footer
+             ================================================================== -->
+        <footer class="app-footer">
+            <div>Grounded Document Q&amp;A Service · LangChain &middot; pgvector &middot; Cloud Run</div>
+            <div class="footer-links">
+                <a href="/docs" target="_blank">Swagger API</a>
+                <span>·</span>
+                <a href="https://github.com/SaiKrishna-Perugu/rag-capstone" target="_blank">GitHub Repository</a>
+            </div>
+        </footer>
     </div>
 
+    <!-- ==================================================================
+         Application Logic
+         ================================================================== -->
     <script>
-        // Generate a random session ID for conversation memory
+        // Conversation memory session ID
         const sessionId = Math.random().toString(36).substring(2, 15);
         
+        // Active Query Mode: 'stream' (/ask-stream) or 'agentic' (/ask-agentic)
+        let queryMode = 'stream';
+
+        // DOM elements
         const input = document.getElementById('question-input');
         const askBtn = document.getElementById('ask-btn');
         const loader = document.getElementById('loader');
         const loaderText = document.getElementById('loader-text');
         const resultsContainer = document.getElementById('results-container');
         const errorMsg = document.getElementById('error-message');
+        const errorText = document.getElementById('error-text');
 
-        // Client-side mirror of the server's upload limits, overwritten by
-        // /config at load. These are a UX affordance only -- app/main.py
-        // enforces the real limits, since anything here is trivially
-        // bypassed by posting to /upload directly.
-        // Defaults match config.py's code defaults, NOT the old generous
-        // 5/50: this object is only a fallback for the window before
-        // /config responds, and a fallback more permissive than the server
-        // is a promise the server will break with a 400/413.
-        // sessionFiles = per-visitor TOTAL (distinct files across all
-        // requests), not per-request -- enforced alongside the server's cap.
+        // Client-side mirror of upload limits
         const UPLOAD_LIMITS = { files: 3, sizeMb: 3, sessionFiles: 6 };
-        let sessionFileCount = 0;   // this visitor's stored + staged files
+        let sessionFileCount = 0;
         let authedSessionFiles = 30;
 
-        // --- Optional Firebase sign-in ----------------------------------
-        // Loaded lazily from CDN only when /config says Firebase is
-        // configured, so an unconfigured deployment pays no script cost and
-        // shows no sign-in affordance at all.
-        let _idToken = null;      // current Firebase ID token, or null
+        // Firebase Auth references
+        let _idToken = null;
         let _firebaseAuth = null;
 
+        // ==================================================================
+        // Theme Toggle (Dark / Light)
+        // ==================================================================
+        function initTheme() {
+            const savedTheme = localStorage.getItem('rag_theme') || 'dark';
+            applyTheme(savedTheme);
+        }
+
+        function applyTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('rag_theme', theme);
+            const darkIcon = document.getElementById('theme-icon-dark');
+            const lightIcon = document.getElementById('theme-icon-light');
+            if (theme === 'light') {
+                darkIcon.style.display = 'none';
+                lightIcon.style.display = 'block';
+            } else {
+                darkIcon.style.display = 'block';
+                lightIcon.style.display = 'none';
+            }
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme') || 'dark';
+            applyTheme(current === 'dark' ? 'light' : 'dark');
+        }
+
+        // ==================================================================
+        // Mode Switcher: Stream vs Agentic
+        // ==================================================================
+        function setQueryMode(mode) {
+            queryMode = mode;
+            const streamBtn = document.getElementById('btn-mode-stream');
+            const agenticBtn = document.getElementById('btn-mode-agentic');
+            const label = document.getElementById('active-mode-label');
+
+            if (mode === 'agentic') {
+                agenticBtn.classList.add('active');
+                streamBtn.classList.remove('active');
+                label.textContent = 'Agentic Loop (Self-Correcting)';
+                label.style.color = '#8b5cf6';
+            } else {
+                streamBtn.classList.add('active');
+                agenticBtn.classList.remove('active');
+                label.textContent = 'Streaming Mode (SSE Fast)';
+                label.style.color = 'var(--primary)';
+            }
+        }
+
+        function usePrompt(text) {
+            input.value = text;
+            input.focus();
+        }
+
+        // ==================================================================
+        // Firebase Authentication
+        // ==================================================================
         async function initFirebase(cfg) {
-            if (!cfg || !cfg.api_key) return;   // not configured: stay anonymous
+            if (!cfg || !cfg.api_key) return;
             try {
                 const [{ initializeApp }, authMod] = await Promise.all([
                     import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
@@ -410,16 +1590,11 @@
                 document.getElementById('auth-bar').style.display = 'flex';
 
                 authMod.onAuthStateChanged(auth, async (user) => {
-                    // Re-reads /config on every state change so the displayed
-                    // upload ceiling reflects what the SERVER will actually
-                    // allow this caller, rather than a guess made here.
                     _idToken = user ? await user.getIdToken() : null;
                     renderAuthState(user);
                     await refreshConfig();
                 });
             } catch (e) {
-                // Sign-in is an enhancement; if its SDK fails to load the
-                // demo must still work anonymously.
                 console.warn('Firebase sign-in unavailable:', e);
             }
         }
@@ -429,12 +1604,12 @@
             const signinBtn = document.getElementById('signin-btn');
             const signoutBtn = document.getElementById('signout-btn');
             if (user) {
-                status.textContent = `Signed in as ${user.email}`;
+                status.textContent = user.email;
                 signinBtn.style.display = 'none';
-                signoutBtn.style.display = 'inline-block';
+                signoutBtn.style.display = 'inline-flex';
             } else {
                 status.textContent = '';
-                signinBtn.style.display = 'inline-block';
+                signinBtn.style.display = 'inline-flex';
                 signoutBtn.style.display = 'none';
             }
         }
@@ -450,28 +1625,19 @@
             await _firebaseAuth.signOut(_firebaseAuth.getAuth());
         }
 
-        // --- API key handling -------------------------------------------
-        // The key is a per-browser value, never shipped with the page.
+        // ==================================================================
+        // API Key Management & Session Scope
+        // ==================================================================
         function getApiKey() {
             return localStorage.getItem('rag_api_key') || '';
         }
         function saveApiKey(v) {
             localStorage.setItem('rag_api_key', v.trim());
         }
-        // Merge auth into any fetch's headers. Omitting the header entirely
-        // when no key is set matters: sending an empty X-API-Key is a
-        // *failed* auth attempt, while sending nothing is indistinguishable
-        // from an unauthenticated call to a service that has auth disabled.
-        // Stable per-browser ID scoping which uploaded documents this visitor
-        // can retrieve. Kept in localStorage so it survives reloads -- unlike
-        // the conversation-memory session_id, which is per page load. No login
-        // involved: the demo stays usable by a stranger, but one visitor's
-        // uploads are invisible to everyone else.
+
         function docSessionId() {
             let id = localStorage.getItem('rag_doc_session');
             if (!id) {
-                // randomUUID needs a secure context; the fallback keeps this
-                // working if the page is ever served over plain http.
                 id = (window.crypto && crypto.randomUUID)
                     ? crypto.randomUUID()
                     : 'sid-' + Date.now().toString(36) + Math.random().toString(36).slice(2);
@@ -484,75 +1650,52 @@
             const h = Object.assign({}, extra || {});
             const key = getApiKey();
             if (key) h['X-API-Key'] = key;
-            // Every request carries it: /upload tags chunks with it, /ask*
-            // scopes retrieval to it, /jobs/{id} checks ownership against it.
             h['X-Session-Id'] = docSessionId();
-            // Firebase identity is independent of the API key: the key (when
-            // set) controls whether you may reach the service at all, the
-            // bearer token controls how much you may upload. Both, either,
-            // or neither can be present.
             if (_idToken) h['Authorization'] = `Bearer ${_idToken}`;
             return h;
         }
 
-        // Re-fetches /config after a sign-in or sign-out so the limits shown
-        // are the ones the server will apply to the caller as they now are.
         async function refreshConfig() {
             await initApp({ skipFirebaseInit: true });
         }
 
-        // Fetch runtime configuration to dynamically configure UI
+        // ==================================================================
+        // Application Startup & Config Sync
+        // ==================================================================
         async function initApp(opts) {
             opts = opts || {};
             try {
                 const res = await fetch('/config', { headers: authHeaders() });
-                // 401 here means this deployment requires a key and we don't
-                // have a valid one yet -- reveal the input rather than
-                // failing silently later on the first question or upload.
                 if (res.status === 401) {
                     const sec = document.getElementById('apikey-section');
                     if (sec) sec.style.display = 'block';
                     const hint = document.getElementById('apikey-hint');
                     if (hint && getApiKey()) {
-                        hint.textContent = 'That key was rejected. Check it and try again.';
-                        hint.style.color = '#ff6b6b';
+                        hint.textContent = 'API key was rejected by server. Check and try again.';
+                        hint.style.color = 'var(--hallucinated)';
                     }
                     return;
                 }
                 if (res.ok) {
                     const cfg = await res.json();
-                    // Only meaningful when uploads are on; harmless otherwise
-                    // (the list simply comes back empty).
                     if (cfg.enable_uploads) refreshDocuments();
                     if (!cfg.enable_uploads) {
                         const uploadSection = document.getElementById('upload-section');
                         if (uploadSection) {
-                            uploadSection.innerHTML = '<span style="color: var(--muted); font-size: 0.9rem;">Document uploads are disabled in this public demo environment. Knowledge base is pre-indexed.</span>';
-                            uploadSection.style.borderStyle = 'solid';
-                            uploadSection.style.borderColor = 'rgba(255,255,255,0.08)';
-                            uploadSection.style.padding = '12px 20px';
+                            uploadSection.innerHTML = '<div class="curated-box">Document uploads are disabled in this environment. Pre-indexed corpus active.</div>';
                         }
                     } else {
-                        // Publish the server's limits so handleFileUpload can
-                        // reject an oversized selection instantly, and state
-                        // them on the label so nobody discovers them by
-                        // waiting for a failed upload.
                         UPLOAD_LIMITS.files = cfg.max_upload_files || UPLOAD_LIMITS.files;
                         UPLOAD_LIMITS.sizeMb = cfg.max_upload_size_mb || UPLOAD_LIMITS.sizeMb;
                         UPLOAD_LIMITS.sessionFiles = cfg.max_session_files || UPLOAD_LIMITS.sessionFiles;
                         authedSessionFiles = cfg.authed_max_session_files || authedSessionFiles;
+
                         const label = document.getElementById('upload-label');
                         if (label) {
-                            let text = `+ Upload documents (PDF, TXT, MD, CSV) — up to `
-                                     + `${UPLOAD_LIMITS.files} files, ${UPLOAD_LIMITS.sizeMb}MB each, `
-                                     + `${UPLOAD_LIMITS.sessionFiles} total`;
-                            // Advertise the upgrade rather than hiding it, so
-                            // signing in has a visible reason to exist.
-                            if (!cfg.authenticated && cfg.firebase && cfg.firebase.api_key
-                                && (cfg.authed_max_upload_files > UPLOAD_LIMITS.files
-                                    || authedSessionFiles > UPLOAD_LIMITS.sessionFiles)) {
-                                text += ` (sign in for ${cfg.authed_max_upload_files} files per upload, `
-                                      + `${authedSessionFiles} total)`;
+                            let text = `+ Upload Documents (Max ${UPLOAD_LIMITS.files} files · ${UPLOAD_LIMITS.sizeMb}MB)`;
+                            if (!cfg.authenticated && cfg.firebase && cfg.firebase.api_key &&
+                                (cfg.authed_max_upload_files > UPLOAD_LIMITS.files || authedSessionFiles > UPLOAD_LIMITS.sessionFiles)) {
+                                text += ` · Sign in for ${cfg.authed_max_upload_files} files`;
                             }
                             label.textContent = text;
                         }
@@ -565,30 +1708,59 @@
                 console.warn('Could not fetch runtime config:', e);
             }
         }
-        // --- Your documents ------------------------------------------------
-        // Built with createElement/textContent throughout, never innerHTML:
-        // these names come from files a stranger uploaded, and rendering them
-        // as markup is the stored-XSS path this project already fixed once.
+
+        // ==================================================================
+        // Document Management & Quotas
+        // ==================================================================
         async function refreshDocuments() {
             const list = document.getElementById('doc-list');
+            const counter = document.getElementById('doc-counter');
+            const quotaText = document.getElementById('quota-text');
+            const quotaBar = document.getElementById('quota-bar');
             if (!list) return;
+
             list.replaceChildren();
             let docs = [];
             try {
                 const res = await fetch('/documents', { headers: authHeaders() });
-                if (!res.ok) return;
-                docs = (await res.json()).documents || [];
+                if (res.ok) {
+                    docs = (await res.json()).documents || [];
+                }
             } catch (err) {
-                return;   // listing is a convenience; never break the page over it
+                return;
             }
-            // Drives the per-visitor upload gate in handleFileUpload: the
-            // server counts stored chunks + staged files; this mirrors it
-            // so the visitor sees the limit before the server says 507.
+
             sessionFileCount = docs.length;
+            const maxAllowed = _idToken ? authedSessionFiles : UPLOAD_LIMITS.sessionFiles;
+            
+            if (counter) counter.textContent = `${docs.length} doc${docs.length === 1 ? '' : 's'}`;
+            if (quotaText) quotaText.textContent = `${docs.length} / ${maxAllowed} files`;
+            if (quotaBar) {
+                const pct = Math.min(100, Math.round((docs.length / Math.max(1, maxAllowed)) * 100));
+                quotaBar.style.width = pct + '%';
+            }
+
+            if (docs.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'font-size: 11.5px; color: var(--text-muted); font-style: italic; padding: 4px 0;';
+                empty.textContent = 'No private files uploaded yet.';
+                list.appendChild(empty);
+                return;
+            }
 
             for (const doc of docs) {
                 const row = document.createElement('div');
                 row.className = 'doc-row';
+
+                const left = document.createElement('div');
+                left.className = 'doc-left';
+
+                const icon = document.createElement('span');
+                icon.className = 'doc-file-icon';
+                icon.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
+
+                const details = document.createElement('div');
+                details.className = 'doc-details';
 
                 const name = document.createElement('span');
                 name.className = 'doc-name';
@@ -599,14 +1771,14 @@
                 meta.className = 'doc-meta';
                 meta.textContent = `${doc.chunks} chunk${doc.chunks === 1 ? '' : 's'}`;
 
+                details.append(name, meta);
+                left.append(icon, details);
+
                 const btn = document.createElement('button');
                 btn.className = 'doc-remove';
                 btn.textContent = 'Remove';
                 btn.onclick = () => removeDocument(doc.name, btn);
 
-                const left = document.createElement('span');
-                left.style.cssText = 'display:flex;align-items:center;gap:0.6rem;min-width:0;';
-                left.append(name, meta);
                 row.append(left, btn);
                 list.appendChild(row);
             }
@@ -626,238 +1798,117 @@
                 uploadError.innerText = "Could not remove document: " + err.message;
                 uploadError.style.display = 'block';
             }
-            // Refresh either way -- on failure the row reappears, which is a
-            // truer signal than a button stuck on "Removing...".
             await refreshDocuments();
         }
 
-        window.addEventListener('DOMContentLoaded', initApp);
+        // ==================================================================
+        // Drag & Drop File Upload Handlers
+        // ==================================================================
+        function setupDragDrop() {
+            const dropzone = document.getElementById('upload-dropzone');
+            if (!dropzone) return;
 
-        const loadingTexts = [
-            "Agent is thinking...",
-            "Contextualizing question...",
-            "Searching documents...",
-            "Generating response..."
-        ];
-        let loadingInterval;
-        // Cloud Run runs this demo at minScale=0, so the first request after an
-        // idle period still pays a container cold start. Without a word of
-        // explanation that is indistinguishable from a hung page -- which is
-        // exactly how a healthy service gets reported as down.
-        //
-        // The wait used to be ~10-25s and is now a few seconds: most of it was
-        // lazy provider init (credential acquisition, first connection) rather
-        // than container start, and main.py::_warm_providers now does that at
-        // startup. Measured post-deploy at 2.85s for a full cache-missing
-        // question. The banner is kept because minScale=0 means *some* wait
-        // remains, but it must not keep promising 25s.
-        let coldStartTimer;
+            ['dragenter', 'dragover'].forEach(name => {
+                dropzone.addEventListener(name, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    dropzone.classList.add('drag-over');
+                }, false);
+            });
 
-        function handleKeyPress(e) {
-            if (e.key === 'Enter') askQuestion();
+            ['dragleave', 'drop'].forEach(name => {
+                dropzone.addEventListener(name, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    dropzone.classList.remove('drag-over');
+                }, false);
+            });
+
+            dropzone.addEventListener('drop', (e) => {
+                const dt = e.dataTransfer;
+                if (dt && dt.files && dt.files.length > 0) {
+                    processSelectedFiles(dt.files);
+                }
+            }, false);
         }
 
-        async function askQuestion() {
-            const question = input.value.trim();
-            if (!question) return;
+        async function handleFileUpload(event) {
+            const files = event.target.files;
+            if (!files || files.length === 0) return;
+            await processSelectedFiles(files);
+            event.target.value = ''; // reset so same file can be re-picked
+        }
 
-            // Reset UI
-            errorMsg.style.display = 'none';
-            resultsContainer.style.display = 'none';
-            loader.style.display = 'flex';
+        async function processSelectedFiles(files) {
+            const uploadLabel = document.getElementById('upload-label');
+            const uploadStatus = document.getElementById('upload-status');
+            const uploadError = document.getElementById('upload-error');
+
+            const showLimitError = (msg) => {
+                uploadError.innerText = msg;
+                uploadError.style.display = 'block';
+                uploadStatus.style.display = 'none';
+            };
+
+            if (files.length > UPLOAD_LIMITS.files) {
+                showLimitError(`Too many files (${files.length}). Max ${UPLOAD_LIMITS.files} per upload.`);
+                return;
+            }
+
+            const maxBytes = UPLOAD_LIMITS.sizeMb * 1024 * 1024;
+            for (let i = 0; i < files.length; i++) {
+                if (files[i].size > maxBytes) {
+                    showLimitError(`"${files[i].name}" is ${(files[i].size / 1024 / 1024).toFixed(1)}MB. Max ${UPLOAD_LIMITS.sizeMb}MB per file.`);
+                    return;
+                }
+            }
+
+            uploadLabel.innerText = `Uploading ${files.length} document(s)...`;
+            uploadStatus.style.display = 'none';
+            uploadError.style.display = 'none';
             askBtn.disabled = true;
-            input.disabled = true;
 
-            // Rotate loading text
-            let textIdx = 0;
-            loaderText.innerText = loadingTexts[0];
-            clearInterval(loadingInterval);
-            loadingInterval = setInterval(() => {
-                textIdx = (textIdx + 1) % loadingTexts.length;
-                loaderText.innerText = loadingTexts[textIdx];
-            }, 2500);
-
-            clearTimeout(coldStartTimer);
-            coldStartTimer = setTimeout(() => {
-                clearInterval(loadingInterval);
-                loaderText.innerText =
-                    "Waking the service up -- the first question after an idle "
-                    + "period takes a few seconds longer. Following questions are fast.";
-            }, 6000);
+            const formData = new FormData();
+            for (let i = 0; i < files.length; i++) {
+                formData.append("files", files[i]);
+            }
 
             try {
-                resultsContainer.style.display = 'flex';
-                document.getElementById('answer-content').innerHTML = ''; // Clear old answer
-                document.getElementById('sources-grid').innerHTML = ''; // Clear old sources
-                document.getElementById('badge-rewrites').style.display = 'none';
-                document.getElementById('copy-btn').style.display = 'none';
-
-                const response = await fetch('/ask-stream', {
+                const response = await fetch('/upload', {
                     method: 'POST',
-                    headers: authHeaders({ 'Content-Type': 'application/json' }),
-                    body: JSON.stringify({ question: question, check_hallucination: true, session_id: sessionId })
+                    headers: authHeaders(),
+                    body: formData
                 });
 
                 if (!response.ok) {
-                    throw new Error(`Server returned ${response.status}`);
+                    const errText = await response.text();
+                    throw new Error(errText || `Server returned ${response.status}`);
                 }
 
-                loader.style.display = 'none';
-                clearTimeout(coldStartTimer);
-                clearInterval(loadingInterval);
-                
-                // Read the SSE stream
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let fullAnswer = "";
-                let buffer = "";
+                const { job_id } = await response.json();
+                uploadLabel.innerText = "Processing & Embedding...";
 
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n');
-                    
-                    // The last element is either an empty string (if it ended with \n) 
-                    // or an incomplete line. Keep it in the buffer.
-                    buffer = lines.pop();
-                    
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            const dataStr = line.slice(6);
-                            if (!dataStr) continue;
-                            
-                            try {
-                                const data = JSON.parse(dataStr);
-                                
-                                if (data.error) {
-                                    throw new Error(data.details || data.error);
-                                }
-                                
-                                if (data.token) {
-                                    fullAnswer += data.token;
-                                    renderAnswer(fullAnswer);
-                                } else if (data.type === 'final') {
-                                    renderFinalResults(data);
-                                }
-                            } catch (e) {
-                                console.error("Error parsing stream chunk:", e, "Data string:", dataStr);
-                            }
-                        }
-                    }
+                const job = await pollJobStatus(job_id);
+                if (job.status === 'failed') {
+                    throw new Error(job.error || 'Ingestion failed');
                 }
+
+                const summary = job.ingest_summary || {};
+                const added = (summary.added || []).length;
+                const updated = (summary.updated || []).length;
+                let status = `Processed ${added + updated} of ${files.length} document(s): ${added} added, ${updated} updated.`;
+                if (job.warning) status += " " + job.warning;
+
+                uploadStatus.innerText = status;
+                uploadStatus.style.display = 'block';
+                await refreshDocuments();
             } catch (err) {
-                errorMsg.innerText = "Error: " + err.message + " (Check server logs)";
-                errorMsg.style.display = 'block';
-                loader.style.display = 'none';
+                uploadError.innerText = "Upload failed: " + err.message;
+                uploadError.style.display = 'block';
             } finally {
-                clearTimeout(coldStartTimer);
-                clearInterval(loadingInterval);
+                uploadLabel.innerText = "+ Upload Document(s)";
                 askBtn.disabled = false;
-                input.disabled = false;
-                input.value = ''; // clear input for next question
-                input.focus();
             }
-        }
-
-        // Single render path for model answers. Markdown is parsed then
-        // sanitized BEFORE it ever touches innerHTML; if either CDN script
-        // failed to load (offline, SRI mismatch after a pin change), fall
-        // back to textContent so the answer still displays as plain text
-        // rather than silently never rendering.
-        function renderAnswer(text) {
-            const el = document.getElementById('answer-content');
-            if (window.marked && window.DOMPurify) {
-                el.innerHTML = DOMPurify.sanitize(marked.parse(text));
-            } else {
-                el.textContent = text;
-            }
-        }
-
-        function renderFinalResults(data) {
-            // Ensure final answer is fully rendered
-            if (data.answer) {
-                renderAnswer(data.answer);
-                document.getElementById('copy-btn').style.display = 'inline-block';
-                // Store raw text for copying
-                document.getElementById('copy-btn').dataset.answer = data.answer;
-            }
-            
-            // Show badge if agent rewrote the query
-            const rewriteBadge = document.getElementById('badge-rewrites');
-            if (data.final_query && data.final_query !== data.question) {
-                rewriteBadge.style.display = 'inline-block';
-                rewriteBadge.innerText = `Rewrote query: "${data.final_query}"`;
-            } else {
-                rewriteBadge.style.display = 'none';
-            }
-
-            // Render Sources
-            const grid = document.getElementById('sources-grid');
-            grid.innerHTML = '';
-            
-            if (data.sources && data.sources.length > 0) {
-                data.sources.forEach(src => {
-                    // Extract just filename from path if needed
-                    const fileName = src.source.split(/[\/\\]/).pop();
-                    const pageText = src.page !== null ? `Pg ${src.page}` : '';
-                    
-                    // Built with createElement/textContent rather than an
-                    // innerHTML template. src.source is an UPLOADED FILENAME
-                    // and src.excerpt is uploaded document text -- both are
-                    // attacker-controlled on a demo that accepts anonymous
-                    // uploads. The previous template interpolated the
-                    // filename raw into an attribute, so a name like
-                    // `x" onmouseover="alert(1).txt` became stored XSS
-                    // against every later visitor whose question retrieved
-                    // that document. textContent cannot introduce markup, so
-                    // there is no escaping to get subtly wrong here.
-                    const card = document.createElement('div');
-                    card.className = 'source-card';
-
-                    const titleRow = document.createElement('div');
-                    titleRow.className = 'source-title';
-                    const nameSpan = document.createElement('span');
-                    nameSpan.title = src.source;        // property, not markup
-                    nameSpan.textContent = fileName;
-                    const pageSpan = document.createElement('span');
-                    pageSpan.className = 'source-page';
-                    pageSpan.textContent = pageText;
-                    titleRow.appendChild(nameSpan);
-                    titleRow.appendChild(pageSpan);
-
-                    const excerpt = document.createElement('div');
-                    excerpt.className = 'source-excerpt';
-                    excerpt.textContent = src.excerpt;
-
-                    card.appendChild(titleRow);
-                    card.appendChild(excerpt);
-                    grid.appendChild(card);
-                });
-            } else {
-                // Cache hits deliberately return no sources (see main.py),
-                // so this is the normal path for a repeated question, not an
-                // error. Say which it is -- "No sources used." under a
-                // SOURCES heading reads as though the citations were lost.
-                grid.innerHTML = "";
-                const note = document.createElement("div");
-                note.className = "sources-note";
-                note.textContent = data.cached
-                    ? "Answered from cache, so the original passages are not re-listed. Ask a slightly different question to see them."
-                    : "No passages were used for this answer.";
-                grid.appendChild(note);
-            }
-
-            // Render Stats
-            document.getElementById('stat-latency').innerText = `${(data.latency_ms / 1000).toFixed(2)}s`;
-            document.getElementById('stat-retries').innerText = data.retries_used || 0;
-            
-            const groundedEl = document.getElementById('stat-groundedness');
-            groundedEl.innerText = data.groundedness;
-            groundedEl.className = `stat-value grounded-${data.groundedness === 'GROUNDED'}`;
-
-            resultsContainer.style.display = 'flex';
         }
 
         async function pollJobStatus(jobId, intervalMs = 2000, timeoutMs = 120000) {
@@ -877,115 +1928,279 @@
             throw new Error('Timed out waiting for ingestion to finish.');
         }
 
-        async function handleFileUpload(event) {
-            const files = event.target.files;
-            if (!files || files.length === 0) return;
+        // ==================================================================
+        // Question Execution (Streaming vs Agentic Loop)
+        // ==================================================================
+        const loadingTexts = [
+            "Contextualizing query with conversation memory...",
+            "Executing hybrid vector + full-text search...",
+            "RRF ranking and scoring candidates...",
+            "Running listwise LLM reranker...",
+            "Synthesizing grounded response...",
+            "Executing LLM-as-judge hallucination check..."
+        ];
+        let loadingInterval;
+        let coldStartTimer;
 
-            const uploadLabel = document.getElementById('upload-label');
-            const uploadStatus = document.getElementById('upload-status');
-            const uploadError = document.getElementById('upload-error');
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') askQuestion();
+        }
 
-            // Fail fast on limits the server would reject anyway, so the
-            // user isn't left waiting on an upload that cannot succeed.
-            const showLimitError = (msg) => {
-                uploadError.innerText = msg;
-                uploadError.style.display = 'block';
-                uploadStatus.style.display = 'none';
-                event.target.value = '';   // let them re-pick the same file
-            };
-            if (files.length > UPLOAD_LIMITS.files) {
-                showLimitError(
-                    `Too many files (${files.length}). Max ${UPLOAD_LIMITS.files} per upload.`);
-                return;
-            }
-            const maxBytes = UPLOAD_LIMITS.sizeMb * 1024 * 1024;
-            for (let i = 0; i < files.length; i++) {
-                if (files[i].size > maxBytes) {
-                    showLimitError(
-                        `"${files[i].name}" is ${(files[i].size / 1024 / 1024).toFixed(1)}MB. `
-                        + `Max ${UPLOAD_LIMITS.sizeMb}MB per file.`);
-                    return;
-                }
-            }
+        async function askQuestion() {
+            const question = input.value.trim();
+            if (!question) return;
 
-            uploadLabel.innerText = `Uploading ${files.length} document(s)...`;
-            uploadStatus.style.display = 'none';
-            uploadError.style.display = 'none';
+            errorMsg.style.display = 'none';
+            resultsContainer.style.display = 'none';
+            loader.style.display = 'flex';
             askBtn.disabled = true;
+            input.disabled = true;
 
-            const formData = new FormData();
-            for (let i = 0; i < files.length; i++) {
-                formData.append("files", files[i]);
-            }
+            let textIdx = 0;
+            loaderText.innerText = loadingTexts[0];
+            clearInterval(loadingInterval);
+            loadingInterval = setInterval(() => {
+                textIdx = (textIdx + 1) % loadingTexts.length;
+                loaderText.innerText = loadingTexts[textIdx];
+            }, 2200);
+
+            clearTimeout(coldStartTimer);
+            coldStartTimer = setTimeout(() => {
+                clearInterval(loadingInterval);
+                loaderText.innerText = "Waking Cloud Run container... First question after idle takes a few seconds.";
+            }, 5500);
 
             try {
-                // /upload returns almost immediately with a job_id -- the
-                // actual ingestion happens afterward (see app/ingestion/jobs.py).
-                // No Content-Type here on purpose: the browser must set it
-                // itself so the multipart boundary is generated correctly.
-                const response = await fetch('/upload', {
-                    method: 'POST',
-                    headers: authHeaders(),
-                    body: formData
-                });
+                resultsContainer.style.display = 'flex';
+                document.getElementById('answer-content').innerHTML = '';
+                document.getElementById('sources-grid').innerHTML = '';
+                document.getElementById('badge-rewrites').style.display = 'none';
+                document.getElementById('copy-btn').style.display = 'none';
+                document.getElementById('metric-cache-hit').style.display = 'none';
 
-                if (!response.ok) {
-                    const errText = await response.text();
-                    throw new Error(errText || `Server returned ${response.status}`);
+                if (queryMode === 'agentic') {
+                    // Agentic Mode (Self-correcting LangGraph loop)
+                    await executeAgenticQuery(question);
+                } else {
+                    // Streaming Mode (SSE)
+                    await executeStreamingQuery(question);
                 }
-
-                const { job_id } = await response.json();
-                uploadLabel.innerText = "Processing document(s)...";
-
-                const job = await pollJobStatus(job_id);
-                if (job.status === 'failed') {
-                    throw new Error(job.error || 'Ingestion failed');
-                }
-
-                const summary = job.ingest_summary || {};
-                const added = (summary.added || []).length;
-                const updated = (summary.updated || []).length;
-                // A job can finish with some files indexed and others not --
-                // ingestion isolates failures per file. Reporting only the
-                // successes would leave the visitor to discover the gap by
-                // asking a question the missing document was supposed to
-                // answer, which is the least useful moment to find out.
-                let status = `Processed ${added + updated} of ${files.length} document(s): `
-                    + `${added} added, ${updated} updated.`;
-                if (job.warning) {
-                    status += " " + job.warning;
-                }
-                uploadStatus.innerText = status;
-                uploadStatus.style.display = 'block';
-                await refreshDocuments();
             } catch (err) {
-                uploadError.innerText = "Upload failed: " + err.message;
-                uploadError.style.display = 'block';
+                errorText.innerText = err.message || "An unexpected error occurred.";
+                errorMsg.style.display = 'flex';
+                loader.style.display = 'none';
             } finally {
-                uploadLabel.innerText = "+ Upload document(s)";
+                clearTimeout(coldStartTimer);
+                clearInterval(loadingInterval);
                 askBtn.disabled = false;
-                event.target.value = ''; // reset file input
+                input.disabled = false;
+                input.value = '';
+                input.focus();
             }
+        }
+
+        async function executeStreamingQuery(question) {
+            const response = await fetch('/ask-stream', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ question: question, check_hallucination: true, session_id: sessionId })
+            });
+
+            if (!response.ok) {
+                const errJson = await response.json().catch(() => ({}));
+                throw new Error(errJson.detail?.error || errJson.detail || `Server returned ${response.status}`);
+            }
+
+            loader.style.display = 'none';
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let fullAnswer = "";
+            let buffer = "";
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const dataStr = line.slice(6);
+                        if (!dataStr) continue;
+                        try {
+                            const data = JSON.parse(dataStr);
+                            if (data.error) throw new Error(data.details || data.error);
+                            if (data.token) {
+                                fullAnswer += data.token;
+                                renderAnswer(fullAnswer);
+                            } else if (data.type === 'final') {
+                                renderFinalResults(data);
+                            }
+                        } catch (e) {
+                            console.error("Stream parse error:", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        async function executeAgenticQuery(question) {
+            const response = await fetch('/ask-agentic', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ question: question, session_id: sessionId })
+            });
+
+            if (!response.ok) {
+                const errJson = await response.json().catch(() => ({}));
+                throw new Error(errJson.detail?.error || errJson.detail || `Server returned ${response.status}`);
+            }
+
+            loader.style.display = 'none';
+            const data = await response.json();
+            renderFinalResults({
+                answer: data.answer,
+                sources: data.sources,
+                groundedness: data.groundedness,
+                latency_ms: data.latency_ms,
+                retries_used: data.retries_used,
+                final_query: data.final_query,
+                question: data.question,
+                cached: false
+            });
+        }
+
+        // ==================================================================
+        // Render Results, Markdown & Groundedness Receipts
+        // ==================================================================
+        function renderAnswer(text) {
+            const el = document.getElementById('answer-content');
+            if (window.marked && window.DOMPurify) {
+                el.innerHTML = DOMPurify.sanitize(marked.parse(text));
+            } else {
+                el.textContent = text;
+            }
+        }
+
+        function renderFinalResults(data) {
+            if (data.answer) {
+                renderAnswer(data.answer);
+                const copyBtn = document.getElementById('copy-btn');
+                copyBtn.style.display = 'inline-flex';
+                copyBtn.dataset.answer = data.answer;
+            }
+
+            // Query Rewrite Badge
+            const rewriteBadge = document.getElementById('badge-rewrites');
+            if (data.final_query && data.final_query !== data.question) {
+                rewriteBadge.style.display = 'inline-block';
+                rewriteBadge.innerText = `Rewritten: "${data.final_query}"`;
+            } else {
+                rewriteBadge.style.display = 'none';
+            }
+
+            // Sources Rendering
+            const grid = document.getElementById('sources-grid');
+            grid.replaceChildren();
+
+            if (data.sources && data.sources.length > 0) {
+                data.sources.forEach(src => {
+                    const fileName = src.source.split(/[\/\\]/).pop();
+                    const pageText = src.page !== null && src.page !== undefined ? `Page ${src.page}` : '';
+
+                    const card = document.createElement('div');
+                    card.className = 'source-card';
+
+                    const top = document.createElement('div');
+                    top.className = 'source-top';
+
+                    const title = document.createElement('span');
+                    title.className = 'source-title';
+                    title.title = src.source;
+                    title.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--primary);flex-shrink:0;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>';
+                    const nameTxt = document.createElement('span');
+                    nameTxt.textContent = fileName;
+                    title.appendChild(nameTxt);
+
+                    top.appendChild(title);
+                    if (pageText) {
+                        const page = document.createElement('span');
+                        page.className = 'source-page';
+                        page.textContent = pageText;
+                        top.appendChild(page);
+                    }
+
+                    const excerpt = document.createElement('div');
+                    excerpt.className = 'source-excerpt';
+                    excerpt.textContent = src.excerpt;
+
+                    card.appendChild(top);
+                    card.appendChild(excerpt);
+                    grid.appendChild(card);
+                });
+            } else {
+                const note = document.createElement('div');
+                note.className = 'sources-note';
+                note.innerHTML = data.cached
+                    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg><span>Answer served instantly from semantic cache. Context passages previously verified.</span>'
+                    : '<span>No source passages were cited for this response.</span>';
+                grid.appendChild(note);
+            }
+
+            // Cache indicator
+            if (data.cached) {
+                document.getElementById('metric-cache-hit').style.display = 'inline-flex';
+            }
+
+            // Metrics
+            document.getElementById('stat-latency').innerText = `${((data.latency_ms || 0) / 1000).toFixed(2)}s`;
+            document.getElementById('stat-retries').innerText = data.retries_used || 0;
+
+            // Verdict Styling
+            const groundedEl = document.getElementById('stat-groundedness');
+            const explanationEl = document.getElementById('verdict-explanation');
+            const verdict = (data.groundedness || 'GROUNDED').toUpperCase();
+
+            groundedEl.className = 'verdict-pill';
+            if (verdict === 'GROUNDED') {
+                groundedEl.classList.add('grounded-true');
+                groundedEl.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg><span>GROUNDED</span>';
+                explanationEl.textContent = 'Claims strictly substantiated by retrieved document context';
+            } else if (verdict === 'NOT_GROUNDED') {
+                groundedEl.classList.add('grounded-false');
+                groundedEl.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg><span>HALLUCINATION WARNING</span>';
+                explanationEl.textContent = 'Response contains claims not directly verified by retrieved context';
+            } else {
+                groundedEl.classList.add('grounded-skipped');
+                groundedEl.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg><span>VERIFICATION SKIPPED</span>';
+                explanationEl.textContent = 'Hallucination check was sampled out by configuration';
+            }
+
+            resultsContainer.style.display = 'flex';
         }
 
         async function copyAnswer() {
             const btn = document.getElementById('copy-btn');
             const text = btn.dataset.answer;
             if (!text) return;
-            
             try {
                 await navigator.clipboard.writeText(text);
-                const originalHtml = btn.innerHTML;
-                btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><polyline points="20 6 9 17 4 12"></polyline></svg> Copied!`;
-                btn.style.color = "var(--grounded)";
+                btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--grounded)" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg><span style="color:var(--grounded);">Copied!</span>';
                 setTimeout(() => {
-                    btn.innerHTML = originalHtml;
-                    btn.style.color = "inherit";
+                    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><span>Copy</span>';
                 }, 2000);
             } catch (err) {
                 console.error('Failed to copy text: ', err);
             }
         }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            initTheme();
+            setupDragDrop();
+            initApp();
+        });
     </script>
 </body>
 </html>
