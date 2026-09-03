@@ -197,6 +197,30 @@ def run(
     manifest = database.get_manifest()
     embeddings = get_embeddings()
 
+    # The per-visitor chunk budget, tracked across this run.
+    #
+    # main.py checks this cap BEFORE a request, which refuses a visitor who is
+    # already over it but does nothing about the file that puts them there --
+    # the chunk count of an incoming document is not knowable until it has
+    # been loaded and split, which happens here. The gap was not small: at
+    # CHUNK_SIZE 800 the 300-chunk cap is about 200KB of text, while /upload
+    # advertises 3MB per file, so one accepted upload could land 15x the
+    # intended budget and only then lock the visitor out.
+    #
+    # Checked after chunking and before embedding, which is the cheapest
+    # point that knows the answer -- refusing here costs no embedding calls.
+    session_budget_left = None
+    if session_id and config.MAX_SESSION_CHUNKS > 0:
+        try:
+            used = database.get_chunk_count(session_id=session_id)
+            session_budget_left = max(0, config.MAX_SESSION_CHUNKS - used)
+        except Exception as exc:
+            # Fails open, matching main.py's own check: the cap is abuse
+            # mitigation, not a correctness invariant, and a transient
+            # database error should not reject a legitimate upload.
+            logger.warning("Session budget lookup failed, not enforcing: %s", exc)
+            session_budget_left = None
+
     summary = {"added": [], "updated": [], "skipped_unchanged": [], "failed": []}
 
     for path in files:
@@ -249,10 +273,35 @@ def run(
             summary["failed"].append({"file": path, "error": str(exc)})
             continue
 
+        over_budget = (
+            is_upload
+            and session_budget_left is not None
+            and len(chunks) > session_budget_left
+        )
+        if over_budget:
+            summary["failed"].append({
+                "file": path,
+                "error": (
+                    f"per-visitor limit: this file needs {len(chunks)} chunks "
+                    f"but only {session_budget_left} of the "
+                    f"{config.MAX_SESSION_CHUNKS}-chunk budget remain"
+                ),
+            })
+            logger.warning(
+                "Skipping %s: %d chunks exceeds the %d remaining in the "
+                "per-visitor budget.", path, len(chunks), session_budget_left,
+            )
+            continue
+
         if is_changed:
             # Remove this file's old chunks before adding the new ones,
             # so re-ingesting a changed file doesn't leave stale
-            # duplicates alongside the fresh content.
+            # duplicates alongside the fresh content. Those chunks return to
+            # the budget -- a re-upload of the same document must not be
+            # charged twice.
+            freed = (previous or {}).get("num_chunks") or 0
+            if session_budget_left is not None:
+                session_budget_left += freed
             database.delete_chunks_by_source(path)
 
         # Extract text content and metadata, then embed in batch
@@ -294,6 +343,8 @@ def run(
             logger.error("Ingestion failed for %s: %s", path, exc, exc_info=True)
             summary["failed"].append({"file": path, "error": str(exc)})
             continue
+        if is_upload and session_budget_left is not None:
+            session_budget_left = max(0, session_budget_left - len(chunks))
         (summary["updated"] if is_changed else summary["added"]).append(path)
 
     # Manifest entries for files that no longer exist on disk are left in

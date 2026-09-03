@@ -39,6 +39,15 @@ _RULES: list[tuple[str, tuple[str, ...], str]] = [
         ),
     ),
     (
+        "session_quota_exceeded",
+        ("per-visitor limit", "session chunk budget"),
+        (
+            "This document is too large for one visitor's share of the demo "
+            "knowledge base. Try a shorter document, or upload only the "
+            "section you want to ask about."
+        ),
+    ),
+    (
         "provider_busy",
         ("429", "resource_exhausted", "rate limit", "quota exceeded",
          "too many requests"),
