@@ -19,14 +19,16 @@ def _candidates(n: int) -> list:
         pytest.param("not json at all", id="unparseable"),
     ],
 )
-def test_rerank_falls_back_to_rrf_order_on_bad_llm_response(llm_behavior):
+def test_rerank_falls_back_to_rrf_order_on_bad_llm_response(llm_behavior, monkeypatch):
     """rerank() is a quality optimization, never a correctness requirement:
     every failure mode must degrade to the pre-rerank RRF order rather than
     propagate. Regression test -- llm.invoke() used to sit outside the try,
     so a provider timeout took down the whole retrieval call, and a non-list
     JSON response raised TypeError past the except-tuple."""
+    from app import config
     from app.retrieval.hybrid import rerank
 
+    monkeypatch.setattr(config, "RERANKER_PROVIDER", "llm")
     candidates = _candidates(12)
 
     with patch("app.retrieval.hybrid.get_llm") as mock_get_llm:
@@ -44,11 +46,13 @@ def test_rerank_falls_back_to_rrf_order_on_bad_llm_response(llm_behavior):
     assert out == candidates[:4]
 
 
-def test_rerank_applies_valid_ordering_and_backfills_omissions():
+def test_rerank_applies_valid_ordering_and_backfills_omissions(monkeypatch):
     """A well-formed response reorders; candidates the LLM omitted are
     appended in original order rather than silently dropped."""
+    from app import config
     from app.retrieval.hybrid import rerank
 
+    monkeypatch.setattr(config, "RERANKER_PROVIDER", "llm")
     candidates = _candidates(12)
 
     with patch("app.retrieval.hybrid.get_llm") as mock_get_llm:
@@ -146,10 +150,12 @@ def test_parse_rank_order_raises_so_rerank_falls_back(raw, expected_exc):
         _parse_rank_order(raw)
 
 
-def test_rerank_now_honours_a_fenced_response():
+def test_rerank_now_honours_a_fenced_response(monkeypatch):
     """End-to-end: the shape that used to be discarded now reorders."""
+    from app import config
     from app.retrieval import hybrid
 
+    monkeypatch.setattr(config, "RERANKER_PROVIDER", "llm")
     candidates = _candidates(6)
     mock_llm = MagicMock()
     mock_llm.invoke.return_value = MagicMock(content="```json\n[6, 5, 4, 3, 2, 1]\n```")
@@ -160,3 +166,58 @@ def test_rerank_now_honours_a_fenced_response():
     # Reversed order means the LLM ranking was actually applied, not the
     # RRF passthrough it previously fell back to.
     assert [d.page_content for d in result] == ["chunk 5", "chunk 4", "chunk 3"]
+
+
+def test_rerank_flashrank_success(monkeypatch):
+    """Verify FlashRank reorders candidates according to model score."""
+    from app import config
+    from app.retrieval import hybrid
+
+    monkeypatch.setattr(config, "RERANKER_PROVIDER", "flashrank")
+    candidates = [
+        Document(page_content="Hardware warranty details"),
+        Document(page_content="Returns and refund policy is 30 days"),
+        Document(page_content="Standard shipping takes 5 days"),
+    ]
+
+    mock_ranker = MagicMock()
+    mock_ranker.rerank.return_value = [
+        {"id": 1, "score": 0.99},
+        {"id": 0, "score": 0.10},
+        {"id": 2, "score": 0.05},
+    ]
+
+    with patch("app.retrieval.hybrid._get_flashrank", return_value=mock_ranker):
+        result = hybrid.rerank("refund policy", candidates, top_k=2)
+
+    assert len(result) == 2
+    assert result[0].page_content == "Returns and refund policy is 30 days"
+    assert result[1].page_content == "Hardware warranty details"
+
+
+def test_rerank_flashrank_fails_open_to_rrf(monkeypatch):
+    """On FlashRank exception, rerank falls back to RRF candidate order."""
+    from app import config
+    from app.retrieval import hybrid
+
+    monkeypatch.setattr(config, "RERANKER_PROVIDER", "flashrank")
+    candidates = _candidates(6)
+
+    mock_ranker = MagicMock()
+    mock_ranker.rerank.side_effect = RuntimeError("FlashRank model corrupted")
+
+    with patch("app.retrieval.hybrid._get_flashrank", return_value=mock_ranker):
+        result = hybrid.rerank("q", candidates, top_k=3)
+
+    assert result == candidates[:3]
+
+
+def test_rerank_provider_none(monkeypatch):
+    """When RERANKER_PROVIDER is none, rerank returns top_k in RRF order directly."""
+    from app import config
+    from app.retrieval import hybrid
+
+    monkeypatch.setattr(config, "RERANKER_PROVIDER", "none")
+    candidates = _candidates(6)
+    result = hybrid.rerank("q", candidates, top_k=3)
+    assert result == candidates[:3]

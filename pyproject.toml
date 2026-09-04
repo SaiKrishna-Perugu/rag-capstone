@@ -44,6 +44,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "slowapi>=0.1.9",
     "uvicorn[standard]==0.52.0",
+    "flashrank>=0.2.10",
 ]
 
 [tool.uv]

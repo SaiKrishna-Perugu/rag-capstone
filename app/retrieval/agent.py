@@ -120,14 +120,20 @@ def node_rewrite_query(state: AgentState) -> AgentState:
 def node_generate(state: AgentState) -> AgentState:
     answer = generate_answer(state["original_question"], state["chunks"])
     groundedness = check_groundedness(answer, state["chunks"])
-    sources = [
-        {
-            "source": c.metadata.get("source", "unknown"),
-            "page": c.metadata.get("page"),
-            "excerpt": c.page_content[:200],
-        }
-        for c in state["chunks"]
-    ]
+    sources = []
+    seen_sources = set()
+    for chunk in state["chunks"]:
+        key = (chunk.metadata.get("source", "unknown"), chunk.metadata.get("page"))
+        if key in seen_sources:
+            continue
+        seen_sources.add(key)
+        sources.append(
+            {
+                "source": key[0],
+                "page": key[1],
+                "excerpt": chunk.page_content[:200],
+            }
+        )
     return {**state, "answer": answer, "groundedness": groundedness, "sources": sources}
 
 

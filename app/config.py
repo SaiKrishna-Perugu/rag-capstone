@@ -43,6 +43,13 @@ EMBED_BATCH_MAX_ITEMS = int(os.getenv("EMBED_BATCH_MAX_ITEMS", "200"))
 # single knob that controls which provider get_llm()/get_embeddings() build.
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "groq").lower()
 
+# --- Reranker switch --------------------------------------------------------
+# "flashrank" (default: ultra-fast local CPU cross-encoder, ~15ms, zero token cost),
+# "llm" (listwise LLM prompt via get_llm()), or "none" (RRF candidate order directly).
+RERANKER_PROVIDER = os.getenv("RERANKER_PROVIDER", "flashrank").lower()
+FLASHRANK_MODEL = os.getenv("FLASHRANK_MODEL", "ms-marco-MiniLM-L-12-v2")
+FLASHRANK_CACHE_DIR = os.getenv("FLASHRANK_CACHE_DIR", ".flashrank_cache")
+
 def _get_secret(secret_name: str, default: str = "") -> str:
     """Fetch secret from env (local) or GCP Secret Manager (prod)."""
     val = os.getenv(secret_name)
@@ -113,7 +120,8 @@ DOCS_DIR = os.getenv("DOCS_DIR", "docs")
 # --- Database (Cloud SQL + pgvector) ----------------------------------------
 DATABASE_URL = _get_secret("DATABASE_URL", "")
 DATABASE_POOL_MIN = int(os.getenv("DATABASE_POOL_MIN", "2"))
-DATABASE_POOL_MAX = int(os.getenv("DATABASE_POOL_MAX", "10"))
+DATABASE_POOL_MAX = int(os.getenv("DATABASE_POOL_MAX", "20"))
+DATABASE_POOL_TIMEOUT_SECONDS = float(os.getenv("DATABASE_POOL_TIMEOUT_SECONDS", "3.0"))
 # Defaults to whatever the selected provider actually produces: Vertex AI's
 # text-embedding-005 is 768-dim, FastEmbed's bge-small-en-v1.5 is 384. This
 # sets the VECTOR(N) column width at first schema creation (database.py

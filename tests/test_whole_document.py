@@ -171,12 +171,13 @@ def test_database_error_falls_back_instead_of_failing_the_request():
     assert [c.page_content for c in chunks] == ["curated passage"]
 
 
-def test_reranker_sees_the_whole_chunk():
+def test_reranker_sees_the_whole_chunk(monkeypatch):
     """The candidate digest was truncated at 500 chars while CHUNK_SIZE is
     800, so the reranker judged every candidate with its tail invisible."""
     from app import config
     from app.retrieval import hybrid
 
+    monkeypatch.setattr(config, "RERANKER_PROVIDER", "llm")
     long_chunk = "A" * (config.CHUNK_SIZE - 1) + "Z"
     doc = Document(page_content=long_chunk, metadata={"source": "s.txt"})
     captured = {}

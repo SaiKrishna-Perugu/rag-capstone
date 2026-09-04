@@ -182,18 +182,43 @@ def _parse_rank_order(response: str) -> list:
     return order
 
 
-def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
-    """
-    LLM-based listwise reranking: one call scores the whole candidate
-    pool at once (cheaper and usually more consistent than N pointwise
-    calls), returning the candidates reordered by actual relevance to
-    the question -- catches cases where RRF's rank fusion still lets a
-    tangentially-related chunk outrank a more relevant one.
-    """
-    top_k = top_k or config.TOP_K
-    if len(candidates) <= top_k:
-        return candidates  # nothing to narrow down
+_flashrank_client = None
 
+
+def _get_flashrank():
+    global _flashrank_client
+    if _flashrank_client is None:
+        from flashrank import Ranker
+        _flashrank_client = Ranker(
+            model_name=getattr(config, "FLASHRANK_MODEL", "ms-marco-MiniLM-L-12-v2"),
+            cache_dir=getattr(config, "FLASHRANK_CACHE_DIR", ".flashrank_cache"),
+        )
+    return _flashrank_client
+
+
+def _rerank_flashrank(question: str, candidates: list, top_k: int) -> list:
+    """Ultra-fast local CPU cross-encoder reranker via FlashRank (<20ms, zero tokens)."""
+    try:
+        from flashrank import RerankRequest
+        ranker = _get_flashrank()
+        passages = [
+            {"id": i, "text": doc.page_content[:config.CHUNK_SIZE]}
+            for i, doc in enumerate(candidates)
+        ]
+        request = RerankRequest(query=question, passages=passages)
+        results = ranker.rerank(request)
+        ranks = [item["id"] for item in results if isinstance(item.get("id"), int) and 0 <= item["id"] < len(candidates)]
+        reranked = [candidates[i] for i in ranks]
+        seen = set(ranks)
+        reranked += [c for i, c in enumerate(candidates) if i not in seen]
+        return reranked[:top_k]
+    except Exception as e:
+        logger.warning(f"FlashRank rerank failed ({type(e).__name__}: {e}); falling back to RRF order")
+        return candidates[:top_k]
+
+
+def _rerank_llm(question: str, candidates: list, top_k: int) -> list:
+    """Listwise LLM reranking."""
     numbered = "\n\n".join(
         f"[{i+1}] {doc.page_content[:config.CHUNK_SIZE]}" for i, doc in enumerate(candidates)
     )
@@ -204,30 +229,37 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
     ]
 
     try:
-        # llm.invoke() must be INSIDE the try: it was previously outside,
-        # so a transient provider failure (timeout, rate limit, connection
-        # reset) propagated out of rerank() and took down the whole
-        # retrieval call instead of degrading to RRF order. That defeats
-        # the point of having a fallback at all, and it is not theoretical
-        # -- a CI eval run logged ~11 TimeoutErrors against Groq in a
-        # single pass.
         response = llm.invoke(messages).content
         order = _parse_rank_order(response)
         ranks = [i for i in order if isinstance(i, int) and 1 <= i <= len(candidates)]
         reranked = [candidates[i - 1] for i in ranks]
-        # Guard against a malformed/partial response silently dropping
-        # candidates -- fall back to the pre-rerank order for anything
-        # the LLM didn't include.
         seen = set(ranks)
         reranked += [c for i, c in enumerate(candidates, start=1) if i not in seen]
         return reranked[:top_k]
     except Exception as e:
-        # Reranking is a quality optimization, not a correctness
-        # requirement -- on any failure fall back to the pre-rerank
-        # (RRF-fused) order rather than failing the whole request. Same
-        # fail-open posture as check_groundedness() in app/retrieval/rag.py.
         logger.warning(f"rerank failed ({type(e).__name__}: {e}); using RRF order")
         return candidates[:top_k]
+
+
+def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
+    """
+    Rerank candidate passages to narrow down to top_k.
+    Controlled by config.RERANKER_PROVIDER:
+      - "flashrank" (default): Local ONNX cross-encoder (~15ms, zero API cost)
+      - "llm": Single listwise LLM call via get_llm(stage="rerank")
+      - "none": Bypass reranking, keep pre-rerank (RRF-fused) order
+    """
+    top_k = top_k or config.TOP_K
+    if len(candidates) <= top_k:
+        return candidates  # nothing to narrow down
+
+    provider = getattr(config, "RERANKER_PROVIDER", "flashrank")
+    if provider == "flashrank":
+        return _rerank_flashrank(question, candidates, top_k)
+    elif provider == "none":
+        return candidates[:top_k]
+    else:
+        return _rerank_llm(question, candidates, top_k)
 
 
 def retrieve_with_hybrid_and_rerank(

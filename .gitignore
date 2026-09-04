@@ -38,6 +38,7 @@ AUTOPLAN-REVIEW-*.md
 # FastEmbed model cache (baked into the Docker image at build time instead --
 # see Dockerfile; this is just the local dev equivalent)
 .fastembed_cache/
+.flashrank_cache/
 
 # Logs & eval outputs
 logs/

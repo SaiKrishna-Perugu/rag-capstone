@@ -20,6 +20,7 @@ in non-critical paths (cache) degrade gracefully rather than crashing
 the request.
 """
 import logging
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,7 +62,18 @@ def get_conn(register_types: bool = True):
     bind numpy arrays as query parameters) and uses the default.
     """
     p = _get_pool()
-    conn = p.getconn()
+    timeout = getattr(config, "DATABASE_POOL_TIMEOUT_SECONDS", 3.0)
+    deadline = time.time() + timeout
+    conn = None
+    while True:
+        try:
+            conn = p.getconn()
+            break
+        except pool.PoolError:
+            if time.time() >= deadline:
+                logger.error("Connection pool exhausted after waiting %ss", timeout)
+                raise
+            time.sleep(0.05)
     try:
         if register_types:
             register_vector(conn)

@@ -95,3 +95,25 @@ def test_fallback_makes_no_claims():
     assert out["answer"] == agent.FALLBACK_MESSAGE
     assert out["sources"] == []
     assert out["groundedness"] == "GROUNDED"
+
+
+def test_node_generate_deduplicates_sources():
+    """Verify that multiple chunks from the same document and page are deduplicated."""
+    chunk1 = MagicMock(page_content="excerpt 1", metadata={"source": "doc.pdf", "page": 1})
+    chunk2 = MagicMock(page_content="excerpt 2", metadata={"source": "doc.pdf", "page": 1})
+    chunk3 = MagicMock(page_content="excerpt 3", metadata={"source": "other.pdf", "page": 2})
+
+    state = {
+        "original_question": "q",
+        "chunks": [chunk1, chunk2, chunk3],
+    }
+
+    with patch("app.retrieval.agent.generate_answer", return_value="answer"):
+        with patch("app.retrieval.agent.check_groundedness", return_value="GROUNDED"):
+            out = agent.node_generate(state)
+
+    assert len(out["sources"]) == 2
+    assert out["sources"][0]["source"] == "doc.pdf"
+    assert out["sources"][0]["page"] == 1
+    assert out["sources"][1]["source"] == "other.pdf"
+    assert out["sources"][1]["page"] == 2

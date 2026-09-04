@@ -49,15 +49,20 @@ COPY . .
 ENV FASTEMBED_CACHE_PATH=/app/.fastembed_cache
 RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
 
+# Pre-download the FlashRank reranker model into the image at build time
+# so containers never hit Hugging Face / external network at runtime.
+ENV FLASHRANK_CACHE_DIR=/app/.flashrank_cache
+RUN uv run python -c "from flashrank import Ranker; Ranker(model_name='ms-marco-MiniLM-L-12-v2', cache_dir='/app/.flashrank_cache')"
+
 # Cloud Run injects $PORT (default 8080) and requires the container to
 # listen on it. Shell form (not exec-form array) so the env var actually
 # expands at container start instead of being read as a literal string.
 # Run as non-root for defense-in-depth (Cloud Run best practice).
-# Provide a writable home directory for FastEmbed model caching,
+# Provide a writable home directory for FastEmbed and FlashRank model caching,
 # and ensure runtime directories are owned by the non-root user.
 RUN adduser --disabled-password appuser \
     && mkdir -p logs docs chroma_db \
-    && chown -R appuser:appuser logs docs chroma_db .fastembed_cache
+    && chown -R appuser:appuser logs docs chroma_db .fastembed_cache .flashrank_cache
 USER appuser
 
 EXPOSE 8080
