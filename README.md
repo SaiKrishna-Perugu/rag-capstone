@@ -3,8 +3,8 @@
 A FastAPI service that answers questions from a document set and refuses to
 answer beyond it. Retrieval is hybrid — Postgres full-text search and
 pgvector similarity fused with Reciprocal Rank Fusion **inside a single SQL
-query** — followed by LLM reranking, strict context-only generation, and an
-LLM-as-judge groundedness check on every answer.
+query** — followed by cross-encoder reranking, strict context-only
+generation, and an LLM-as-judge groundedness check on every answer.
 
 Beyond the core pipeline: a self-correcting agentic variant that grades its
 own retrieved context and rewrites the query when it is insufficient,
@@ -43,12 +43,20 @@ scores that honest refusal **0.0** relevancy and 0.0 faithfulness. The
 aggregate therefore understates the behaviour that matters most in
 production. `context_recall: 1.00` is the more trustworthy signal here.
 
-**Cost per request.** Reranking is the single most expensive stage at **~47%
-of per-request spend -- more than generation** -- because it feeds 12
-candidate passages to the LLM where generation only ever sees the final 4.
-That is the measurement that would justify swapping the LLM reranker for a
-local cross-encoder; it has not been done here, deliberately, and the
-tradeoff is written up in `app/retrieval/hybrid.py`'s module docstring.
+**Cost per request, and what the measurement changed.** With LLM reranking,
+reranking was the single most expensive stage at **~47% of per-request spend
+-- more than generation** -- because it feeds 12 candidate passages to the
+model where generation only ever sees the final 4.
+
+That measurement is what justified swapping it for a local cross-encoder, and
+that swap has now been made: `RERANKER_PROVIDER` defaults to `flashrank`
+(`ms-marco-MiniLM-L-12-v2` via FlashRank, ~15ms on CPU, **zero tokens**), with
+`llm` and `none` retained behind the same switch. The original objection to a
+cross-encoder was that it wants model weights from HuggingFace Hub at runtime,
+which Cloud Run's shared egress IPs get rate-limited on; pre-downloading them
+into the image at build time removed it. Warm uncached `/ask` measured
+**2.67s** end to end afterwards. The tradeoffs for all three strategies are
+written up in `app/retrieval/hybrid.py`'s module docstring.
 
 Two levers exist for that cost without changing the pipeline:
 `GROUNDEDNESS_SAMPLE_RATE` (the check is a whole extra LLM call over the same
@@ -75,7 +83,7 @@ graph TD
         I -->|Hit| J[Return Cached Answer]
         I -->|Miss| K[Hybrid Retrieval: one SQL query, tsvector + pgvector]
         K --> L[RRF Fusion]
-        L --> M[LLM Reranking]
+        L --> M[Rerank: local cross-encoder by default]
         M --> N[Grounded Generation SSE Stream]
         N --> O[Check Groundedness]
         O --> P[Return Final Answer & Sources]
@@ -97,13 +105,22 @@ used by both `/ask` and `/ask-agentic` (via `app/retrieval/rag.py`'s `retrieve()
    exact-term queries (product codes, IDs -- vector search alone is often
    weak here) and paraphrase/synonym queries (full-text search alone is
    weak here).
-2. **LLM reranking** — the fused candidate pool is re-scored by an LLM in
-   a single listwise call, narrowing down to the final top-k actually
-   passed to generation. Falls back safely to the pre-rerank order if the
-   LLM's response is malformed, rather than failing the request.
+2. **Reranking** — the fused candidate pool is re-scored down to the final
+   top-k actually passed to generation. Which reranker runs is
+   `RERANKER_PROVIDER`:
+
+   | Value | Mechanism | Latency | Token cost |
+   |---|---|---|---|
+   | `flashrank` *(default)* | Local ONNX cross-encoder, baked into the image | ~15ms | none |
+   | `llm` | One listwise call through the configured chat model | ~1s | ~47% of request |
+   | `none` | Keep RRF order | 0 | none |
+
+   All three fall back to the pre-rerank RRF order on failure -- a malformed
+   LLM response, a missing ONNX model -- rather than failing the request, so a
+   broken reranker costs ranking quality and never an answer.
 
 See the module docstring in `app/retrieval/hybrid.py` for the full reasoning,
-including why an LLM reranker was chosen over a cross-encoder here.
+including the cost measurement that moved the default off the LLM reranker.
 
 ### Agentic RAG (`POST /ask-agentic`)
 
@@ -447,8 +464,9 @@ gcloud artifacts repositories create rag-repo \
     --location=us-central1
 
 # 4. Build and push the container image via Cloud Build (a few minutes --
-#    this also pre-downloads the FastEmbed embedding model into the image,
-#    see Dockerfile comments). Ingestion does NOT need to happen before
+#    this also pre-downloads the FastEmbed embedding model and the FlashRank
+#    reranker model into the image, so containers never reach Hugging Face at
+#    runtime -- see Dockerfile comments). Ingestion does NOT need to happen before
 #    this step anymore -- documents are embedded straight into Cloud SQL,
 #    not baked into the image.
 gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/rag-repo/rag-capstone:latest
@@ -794,7 +812,7 @@ app/
     cost.py       # per-request token/cost attribution, broken down by pipeline stage
     budget.py     # daily spend ceiling (DAILY_BUDGET_USD), fed by cost.add_usage()
   retrieval/
-    hybrid.py     # hybrid retrieval (tsvector + pgvector, RRF) + LLM reranking
+    hybrid.py     # hybrid retrieval (tsvector + pgvector, RRF) + reranking
     rag.py        # single-pass retrieve -> generate -> groundedness check
     agent.py      # self-correcting LangGraph loop (grade / rewrite / fallback)
     cache.py      # semantic cache, and the gate that keeps private answers out of it
@@ -803,6 +821,7 @@ app/
     ingest.py     # load -> chunk -> embed -> persist; incremental via content hash
     jobs.py       # async job tracking (Firestore) + Cloud Tasks enqueueing
     storage.py    # stages uploads in Cloud Storage so a job isn't tied to one instance
+    errors.py     # classifies an ingest failure into a stable code + a safe visitor message
   api/
     middleware.py # tiered access (probe/public/admin/internal) + optional Firebase identity
     auth.py       # optional Firebase identity -- additive, raises upload limits, never gates

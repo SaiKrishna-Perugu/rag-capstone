@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 A FastAPI service that answers questions grounded in a local document set via
 a Retrieval-Augmented Generation (RAG) pipeline: hybrid retrieval (BM25 +
-vector, RRF-fused), LLM reranking, grounded generation, groundedness/
+vector, RRF-fused), cross-encoder reranking, grounded generation, groundedness/
 hallucination checking, a self-correcting agentic loop, semantic caching,
 conversation memory, and two eval harnesses. Model/embeddings provider
 (Groq or GCP Vertex AI) is switchable via a single config value.
@@ -136,6 +136,17 @@ time so containers never hit Hugging Face's API at runtime (its default
 cache is `/tmp`, which doesn't persist across instances anyway, and Cloud
 Run's shared outbound IPs routinely hit HF's anonymous rate limit).
 
+The FlashRank reranker's weights are baked in the same way and for the same
+reason (`FLASHRANK_CACHE_DIR`, `/app/.flashrank_cache` in the image) — that
+pre-download is what makes a cross-encoder viable here at all. Note the
+Dockerfile syncs with **`--no-dev`**: uv treats `dev` as a default group, so a
+bare `uv sync --frozen` shipped pytest and ruff into the runtime image. Both
+model pre-downloads sit **above** `COPY . .`, since they depend only on
+installed packages — below it they re-ran on every commit. `.dockerignore`
+must keep the local `.fastembed_cache`/`.flashrank_cache` out of the build
+context: they resolve to the same paths those steps write, so copying them in
+silently replaces a clean download with whatever was on one developer's disk.
+
 **Documents are session-scoped.** Every uploaded chunk carries the
 `session_id` of the browser that uploaded it (an `X-Session-Id` UUID kept in
 `localStorage` — no login, so the demo stays usable by a stranger) plus an
@@ -175,8 +186,36 @@ sweep a storage optimisation rather than something correctness depends on.
    without touching retrieval/generation.
 3. `app/retrieval/hybrid.py` `hybrid_retrieve()`: BM25 + vector search each over a
    candidate pool 3x the final top-k, fused via Reciprocal Rank Fusion, then
-   `rerank()` does a single listwise LLM call to narrow to top-k. Reranking
-   falls back to pre-rerank order if the LLM response is malformed.
+   `rerank()` narrows that pool to top-k. **Which reranker runs is
+   `RERANKER_PROVIDER`**: `flashrank` (default — a local ONNX cross-encoder,
+   ~15ms, zero tokens), `llm` (one listwise call), or `none` (RRF order).
+   Every path falls back to pre-rerank RRF order on failure, so a broken
+   reranker costs ranking quality and never an answer.
+
+   The default was `llm` until cost attribution measured reranking at ~47% of
+   per-request spend — more than generation — because it feeds 12 candidate
+   passages to the model where generation sees only the final 4. The
+   cross-encoder's weights are baked into the image (see the Dockerfile), which
+   is what removed the original objection to one: needing a HuggingFace Hub
+   download at runtime.
+
+   **`rag.retrieve()` has a second path around all of this.** When the
+   visitor's own uploads total under `WHOLE_DOC_MAX_CHARS` (12000, ~3k
+   tokens) they are passed to generation *whole*, in document order, and
+   hybrid retrieval runs over the curated corpus only
+   (`hybrid.session_documents()`). Ranking a 6-chunk resume down to 4 chunks
+   is a compression step solving a problem that does not exist, and it was
+   measured getting the compression wrong: "explain me about all the projects
+   that i build" against an uploaded resume returned 1 of 3 projects and then
+   refused outright, 5/5 runs, because the full-text half matched the verb
+   "built" in the EXPERIENCE bullets and displaced two project chunks. The
+   same question worded "explain all the projects described in the document"
+   returned 3/3. Above the ceiling the ranked path is used unchanged. Both
+   halves run because a visitor with an upload still asks about the shared
+   corpus. `session_documents()` **fails open** like `cache.py` -- it queries
+   before `hybrid_search()`, so a raising version turns any database blip
+   into a 500 from a new call site ahead of the error retrieval already
+   reports.
 4. `app/retrieval/rag.py` `generate_answer()` does strict context-only generation,
    then `check_groundedness()` runs an LLM-as-judge hallucination check.
 5. Result is cached (`app/retrieval/cache.py`) and appended to session history
@@ -247,12 +286,31 @@ be called with the same question to compare behavior.
   (via `database.py`); content-hash based incremental re-ingestion tracked
   in the `ingest_manifest` table (unchanged files skipped, changed files'
   old chunks replaced, one bad file is recorded/skipped rather than
-  failing the whole batch). The manifest lives in Postgres, not a local
+  failing the whole batch — that guard covers embedding and persistence too,
+  which it did not until a file exceeding the embedding provider's
+  per-request ceiling raised out of `run()` and discarded the other files in
+  the same batch). Chunks are embedded in request-sized pieces
+  (`_embed_in_batches`, `EMBED_BATCH_MAX_CHARS`): one call per file hit
+  Vertex's 20000-token request cap, so any document past roughly 90KB failed
+  outright. A run that indexes nothing is reported `failed`, not `done` —
+  `run()` returns normally when every file failed individually, and calling
+  that success told visitors their upload worked and then answered without
+  it. The manifest lives in Postgres, not a local
   file — deliberately, so it can't desync from whichever database
   `DATABASE_URL` currently points at (see `database.py`'s module
   docstring). Manifest entries are written per-file, immediately after
   that file's chunks are upserted, so an interrupted run doesn't lose
   progress.
+- `ingestion/errors.py` — classifies an ingestion failure into a stable
+  `code` plus a visitor-facing `message`. Exists because `/jobs/{id}` returns
+  the job record verbatim and `ui.html` renders `job.error` directly, so
+  whatever `process_job()` records is read by an anonymous browser: a Vertex
+  client error arrived complete with request URL, project id and the upload
+  bucket's name, for a file whose only problem was length. The raw exception
+  stays in the logs keyed by job id. Matching is on message substrings, not
+  exception types, for the reason `llm/circuit.py` counts consecutive
+  failures: Groq and Vertex raise different classes for the same condition.
+  A miss costs a generic message, never a wrong one.
 - `ingestion/storage.py` — stages uploaded bytes in Cloud Storage
   (`UPLOAD_BUCKET`) instead of the serving instance's disk, and is why an
   ingestion job can run on an instance that never handled the upload. Cloud
@@ -278,8 +336,9 @@ be called with the same question to compare behavior.
   official Cloud Tasks emulator exists) calls it directly via FastAPI's
   `BackgroundTasks` from the `/upload` handler itself — same job record,
   same polling contract either way, just without a real queue locally.
-- `retrieval/hybrid.py` — hybrid retrieval + LLM reranking (see module docstring
-  for why an LLM reranker was chosen over a cross-encoder here).
+- `retrieval/hybrid.py` — hybrid retrieval + pluggable reranking (see module
+  docstring for the three `RERANKER_PROVIDER` strategies and the measurement
+  that moved the default off the LLM one).
 - `retrieval/rag.py` — single-pass retrieve/generate/groundedness-check, used by both
   `/ask` and as the retrieval base for `/ask-agentic`.
   The groundedness check is sampled by `GROUNDEDNESS_SAMPLE_RATE` (default
@@ -309,9 +368,12 @@ be called with the same question to compare behavior.
   new invocation path would go unmeasured *and* unprotected by the circuit
   breaker, so add an override to both proxies if one appears. Unknown models
   price at zero rather than guessing. Measured on a real `/ask`:
-  **rerank is the most expensive stage (~47%), more than generation**,
+  **rerank was the most expensive stage (~47%), more than generation**,
   because it feeds 12 candidate passages to the LLM where generation gets
-  only the final 4.
+  only the final 4. That measurement is what justified the move to a local
+  cross-encoder (`RERANKER_PROVIDER=flashrank`), which takes the stage to
+  zero tokens — so on the current default the figure is historical, and it
+  returns the moment anyone sets `RERANKER_PROVIDER=llm`.
 - `api/streaming.py` — SSE streaming for `/ask-stream`.
 - `api/middleware.py` — two deliberately opposite postures, plus CORS and rate
   limiting (slowapi). `AccessControlMiddleware` **gates**;
@@ -387,7 +449,9 @@ be called with the same question to compare behavior.
   and does client construction, credential acquisition and its first
   connection on first *use*, so the first visitor to ask anything paid for
   all of it. Post-deploy the same shape of request returns in **2.85s**,
-  which is the pipeline's own three-call cost. The warmup narrows that
+  which was the pipeline's own three-call cost at the time; with the
+  flashrank default the same request measures ~2.85s -> 2.67s, since the
+  rerank LLM call is gone. The warmup narrows that
   window rather than closing it: a request landing within a few seconds of
   container start still races the warmup and waits on the same `lru_cache`
   construction (observed once at 19.9s immediately after a revision

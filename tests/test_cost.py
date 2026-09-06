@@ -24,8 +24,11 @@ def test_pricing_overridable_by_env(monkeypatch):
 
 
 def test_accumulates_across_calls_with_stage_breakdown():
-    """The breakdown is the point: /ask makes three LLM calls, and the
-    per-stage split is what shows whether reranking earns its cost."""
+    """The breakdown is the point, not the total: the per-stage split is what
+    showed reranking eating ~47% of spend. Three stages are recorded here
+    because that is the RERANKER_PROVIDER=llm shape -- the flashrank default
+    makes no LLM rerank call, and this asserts the accounting, not the
+    pipeline's current call count."""
     cost.start_request()
     cost.add_usage("gemini-2.5-flash-lite", 1_000_000, 0, stage="rerank")
     cost.add_usage("gemini-2.5-flash-lite", 1_000_000, 0, stage="generate")

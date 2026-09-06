@@ -21,24 +21,44 @@ htmlcov/
 !.env.example
 
 # Working notes, design docs, scratch writing. Deliberately OUTSIDE docs/:
-# app/ingest.py globs docs/ recursively, so anything left there becomes
-# retrievable RAG content. docs/ is the sample corpus the demo answers
+# app/ingestion/ingest.py globs docs/ recursively, so anything left there
+# becomes retrievable RAG content. docs/ is the sample corpus the demo answers
 # from, not a place for project documentation.
 notes/
 
-# Same rule, different filenames. Both of these declare themselves
-# deliberately untracked, but "untracked" is not a property a file keeps on
-# its own -- a single `git add -A` commits them. The repository-voice rule in
-# CLAUDE.md says demo scripts and session narratives must not reach the
-# tracked repo, so it is enforced here rather than left to whoever types the
-# next add.
+# Same rule, different filenames. These declare themselves deliberately
+# untracked, but "untracked" is not a property a file keeps on its own -- a
+# single `git add -A` commits them. The repository-voice rule in CLAUDE.md
+# says demo scripts, interview material and session narratives must not reach
+# the tracked repo, so it is enforced here rather than left to whoever types
+# the next add.
 DEMO.md
 AUTOPLAN-REVIEW-*.md
+# Interview handbook: JD mappings, talking points, CV phrasing. Exactly the
+# category the repository-voice rule names, and 56KB of it -- the single most
+# important file in this list to keep out of a public repo.
+PROJECT_HANDBOOK.md
+# Working plan, and the design-canvas exports behind the UI redesign. Neither
+# describes the system as it is; both would read as stale the day after they
+# were written.
+FIX_PLAN.md
+design/
+# Claude Code session transcripts dropped in the repo root by --continue.
+2???-??-??-*.txt
 
 # FastEmbed model cache (baked into the Docker image at build time instead --
 # see Dockerfile; this is just the local dev equivalent)
 .fastembed_cache/
 .flashrank_cache/
+
+# Files real visitors uploaded, left behind by local runs and by fetching a
+# staged upload down from GCS. Untracked already, but that was doing no work
+# here: .gcloudignore is `#!include:.gitignore`, so anything absent from this
+# file goes into the tarball `gcloud builds submit` uploads to the CD source
+# bucket -- meaning other people's documents were being shipped to GCS on
+# every build. .dockerignore's `docs/` kept them out of the image; nothing
+# kept them out of the build context.
+docs/uploads/
 
 # Logs & eval outputs
 logs/

@@ -62,7 +62,7 @@ def get_conn(register_types: bool = True):
     bind numpy arrays as query parameters) and uses the default.
     """
     p = _get_pool()
-    timeout = getattr(config, "DATABASE_POOL_TIMEOUT_SECONDS", 3.0)
+    timeout = config.DATABASE_POOL_TIMEOUT_SECONDS
     deadline = time.time() + timeout
     conn = None
     while True:

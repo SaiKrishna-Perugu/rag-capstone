@@ -26,16 +26,27 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Text files a stale path can hide in. Deliberately includes .py: module
 # docstrings and comments cross-reference sibling modules constantly, and
 # those references rot exactly like the ones in Markdown do.
-SCANNED_SUFFIXES = {".md", ".py", ".yaml", ".yml", ".html"}
-# Extensionless files that still carry instructions a reader follows.
-# Dockerfile earns its place the hard way: it told operators to run
-# `python -m app.ingest` long after that module moved, and no sweep saw it
-# because every scan keyed on a suffix this file does not have.
-SCANNED_NAMES = {".env.example", "Dockerfile"}
+SCANNED_SUFFIXES = {".md", ".py", ".yaml", ".yml", ".html", ".toml"}
+# Extensionless and dotfile-named files that still carry instructions a
+# reader follows. Dockerfile earns its place the hard way: it told operators
+# to run `python -m app.ingest` long after that module moved, and no sweep
+# saw it because every scan keyed on a suffix this file does not have.
+#
+# The ignore files and pyproject.toml earn theirs the same way, one round
+# later: `.gitignore` explained itself with "app/ingest.py globs docs/" and
+# pyproject.toml's ruff config pointed at "app/streaming.py", both dead since
+# ebf0b35, and both invisible to a scan that keyed on the suffixes above.
+# Comments that explain *why* a rule exists cite modules, so any file that
+# carries reasoning belongs in scope -- not just the ones that carry prose.
+SCANNED_NAMES = {
+    ".env.example", "Dockerfile",
+    ".gitignore", ".dockerignore", ".gcloudignore",
+}
 
 SKIP_DIRS = {
     ".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_cache",
-    ".mypy_cache", "node_modules", ".fastembed_cache", "htmlcov",
+    ".mypy_cache", "node_modules", ".fastembed_cache", ".flashrank_cache",
+    "htmlcov", ".gstack", "design",
     # notes/ is gitignored working material, and most of it is dated
     # changelogs -- "phase 6 moved app/circuit.py" is an accurate record of
     # what the tree looked like then. Rewriting those paths would falsify

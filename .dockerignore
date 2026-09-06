@@ -1,22 +1,79 @@
+# Build context exclusions.
+#
+# This file and .gcloudignore must stay in agreement. .gcloudignore is
+# `#!include:.gitignore`, so `gcloud builds submit` already drops notes/,
+# the model caches, DEMO.md and friends -- while this file did not, which
+# meant a local `docker build` and a CD build produced DIFFERENT images
+# from the same commit. Two build paths that disagree is worse than either
+# being wrong, because only one of them is ever the one you inspected.
+#
+# The image needs exactly three things: app/, pyproject.toml and uv.lock.
+# Everything else here is excluded, and anything new added to the repo root
+# should be assumed to belong on this list until shown otherwise.
+
+# --- Environments and caches ---
 venv/
 .venv/
 testenv/
 testenv2/
 __pycache__/
 *.pyc
-.env
-.env.example
-.python-version
-logs/
-eval_results.json
-ragas_results.json
-eval.py
-eval_ragas.py
-docs/
-.git/
-.gitignore
-README.md
 .ruff_cache/
 .pytest_cache/
-.github/
+.mypy_cache/
+
+# Model caches. Critical: these resolve to the SAME paths the Dockerfile's
+# pre-download steps write to (/app/.fastembed_cache, /app/.flashrank_cache).
+# Copying a developer's local cache in would shadow those steps -- shipping
+# whatever was on one laptop (including the __MACOSX/AppleDouble junk a
+# zip-extracted model leaves behind) instead of a clean, reproducible pull.
+.fastembed_cache/
+.flashrank_cache/
+
+# --- Secrets and local config ---
+# .env.* covers .env.example too, deliberately -- a template of every
+# secret name the app reads is documentation, not a runtime dependency.
+.env
+.env.*
+.python-version
+
+# --- Not needed at runtime ---
+docs/
 tests/
+scripts/
+eval.py
+eval_ragas.py
+eval_results.json
+ragas_results.json
+.coverage
+htmlcov/
+
+# --- Repo/tooling metadata ---
+.git/
+.gitignore
+.dockerignore
+.gcloudignore
+.github/
+.gstack/
+Dockerfile
+cloudrun-*.yaml
+
+# --- Documentation and working notes ---
+# notes/ and DEMO.md carry job-search material that CLAUDE.md's
+# repository-voice rule keeps out of the tracked repo. Untracked is not the
+# same as un-shipped: without these lines a local build baked them into a
+# container served on the public internet.
+README.md
+CLAUDE.md
+AGENTS.md
+TODOS.md
+DEMO.md
+FIX_PLAN.md
+AUTOPLAN-REVIEW-*.md
+notes/
+design/
+
+# --- Logs and scratch ---
+logs/
+*.log
+*.txt

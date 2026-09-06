@@ -16,18 +16,36 @@ Pipeline: hybrid_retrieve() -> rerank() -> top-k chunks handed to generation.
      index rebuild that the Chroma-based version required, and giving us
      a shared, durable index across all Cloud Run instances.
 
-  2. rerank(): takes the fused candidate pool and re-scores it with an
-     LLM-based listwise reranker, narrowing down to the final top-k that
-     actually gets passed to generation. A cross-encoder (e.g.
-     sentence-transformers) is the more common production choice, but
-     requires downloading model weights from HuggingFace Hub at runtime,
-     which isn't guaranteed to be available in every deployment
-     environment. An LLM-based reranker needs nothing beyond the same
-     LLM already configured via app/llm/providers.py -- a real, legitimate
-     alternative (this is close to what Cohere's Rerank API and several
-     production RAG systems do), not a placeholder. Swapping in a
-     cross-encoder later is a drop-in replacement for rerank()'s body,
-     not a redesign.
+  2. rerank(): takes the fused candidate pool and re-scores it, narrowing
+     down to the final top-k that actually gets passed to generation.
+     Which reranker runs is config.RERANKER_PROVIDER:
+
+       "flashrank" (default) -- a local ONNX cross-encoder
+           (ms-marco-MiniLM-L-12-v2) via FlashRank. ~15ms on CPU, zero
+           tokens, no network.
+       "llm"  -- one listwise call through get_llm(stage="rerank").
+       "none" -- keep RRF order, i.e. no reranking at all.
+
+     This started as LLM-only, and the switch is worth understanding
+     because it was driven by a measurement rather than a preference.
+     Per-stage cost attribution (app/llm/cost.py) showed reranking was the
+     single most expensive stage of an /ask -- ~47% of per-request spend,
+     MORE than generation -- for the structural reason that it feeds 12
+     candidate passages to the model where generation only ever sees the
+     final 4. A cross-encoder is the more common production choice anyway;
+     the original objection to it was that it wants model weights from
+     HuggingFace Hub at runtime, which is not guaranteed in every
+     deployment environment and which Cloud Run's shared egress IPs get
+     rate-limited on (see the Dockerfile). Pre-downloading the weights into
+     the image at build time removes that objection entirely, so the
+     measurement and the fix landed together.
+
+     The LLM path is kept rather than deleted: it needs nothing beyond the
+     already-configured provider, which makes it the right fallback for a
+     deployment that cannot ship the ONNX weights, and it is a genuine
+     alternative (close to what Cohere's Rerank API does), not a
+     placeholder. All three paths fall back to RRF order on failure, so a
+     broken reranker degrades ranking quality and never costs an answer.
 """
 import json
 import logging
@@ -190,8 +208,8 @@ def _get_flashrank():
     if _flashrank_client is None:
         from flashrank import Ranker
         _flashrank_client = Ranker(
-            model_name=getattr(config, "FLASHRANK_MODEL", "ms-marco-MiniLM-L-12-v2"),
-            cache_dir=getattr(config, "FLASHRANK_CACHE_DIR", ".flashrank_cache"),
+            model_name=config.FLASHRANK_MODEL,
+            cache_dir=config.FLASHRANK_CACHE_DIR,
         )
     return _flashrank_client
 
@@ -253,7 +271,7 @@ def rerank(question: str, candidates: list, top_k: int | None = None) -> list:
     if len(candidates) <= top_k:
         return candidates  # nothing to narrow down
 
-    provider = getattr(config, "RERANKER_PROVIDER", "flashrank")
+    provider = config.RERANKER_PROVIDER
     if provider == "flashrank":
         return _rerank_flashrank(question, candidates, top_k)
     elif provider == "none":

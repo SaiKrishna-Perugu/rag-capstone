@@ -354,7 +354,7 @@ jobs:
           gcloud run services describe rag-capstone --region=us-central1 \
             --format='value(spec.template.metadata.annotations)' \
             | tr ';' '\n' | grep -E 'maxScale|cpu-boost' | sed 's/^/  /'
-          for k in MAX_UPLOAD_FILES MAX_UPLOAD_SIZE_MB MAX_SESSION_FILES RATE_LIMIT DAILY_BUDGET_USD ENABLE_UPLOADS; do
+          for k in MAX_UPLOAD_FILES MAX_UPLOAD_SIZE_MB MAX_SESSION_FILES RATE_LIMIT DAILY_BUDGET_USD ENABLE_UPLOADS RERANKER_PROVIDER; do
             v=$(gcloud run services describe rag-capstone --region=us-central1 \
                   --format="value(spec.template.spec.containers[0].env.filter(\"name:$k\").extract(\"value\"))" | tr -d '[]')
             printf '  %s=%s\n' "$k" "${v:-<unset, falls back to config.py>}"

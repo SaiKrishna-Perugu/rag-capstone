@@ -26,7 +26,7 @@ as eval.py.
 
 --------------------------------------------------------------------------
 COMPATIBILITY NOTE (read this if imports fail on your machine):
-As of the versions pinned in requirements.txt, RAGAS unconditionally
+As of the versions pinned in pyproject.toml/uv.lock, RAGAS unconditionally
 imports a legacy `langchain_community.chat_models.vertexai` shim at
 import time, even if you never touch Vertex AI. Recent `langchain-community`
 releases removed that shim as part of their ongoing deprecation ("community
@@ -36,7 +36,7 @@ This is a real, currently-open upstream compatibility gap between two
 fast-moving libraries -- not a mistake in this codebase. The shim below
 works around it without touching your installed packages: if the real
 module is missing, we register a stand-in in sys.modules pointing at
-`langchain-google-vertexai`'s ChatVertexAI (already in requirements.txt)
+`langchain-google-vertexai`'s ChatVertexAI (already a runtime dependency)
 before ragas is imported anywhere. If you upgrade ragas later and this
 starts failing differently, that means upstream finally fixed it and this
 whole shim block can be deleted.

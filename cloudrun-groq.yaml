@@ -91,6 +91,18 @@ spec:
           value: "10/minute"
         - name: MAX_CORPUS_CHUNKS
           value: "3000"
+        # Which reranker narrows the 3x candidate pool to TOP_K. Pinned
+        # explicitly, for the same reason the chat model is: the component
+        # actually serving traffic should be visible in review, and this one
+        # changed. `flashrank` is a local ONNX cross-encoder
+        # (ms-marco-MiniLM-L-12-v2, pre-downloaded into the image by the
+        # Dockerfile) at ~15ms and zero tokens. It replaced `llm` after cost
+        # attribution measured LLM reranking at ~47% of per-request spend --
+        # more than generation -- because it feeds 12 candidate passages to
+        # the model where generation sees only the final 4. `llm` and `none`
+        # remain available; all three fall back to RRF order on failure.
+        - name: RERANKER_PROVIDER
+          value: "flashrank"
         - name: MAX_SESSION_CHUNKS
           value: "300"
         # Per-visitor cap on DISTINCT files across ALL requests (guests);

@@ -58,8 +58,9 @@ class RagResult:
 def retrieve(question: str, k: int | None = None, session_id: str | None = None) -> list:
     """
     Retrieve the top-k most relevant chunks for a question, via hybrid
-    (BM25 + vector, RRF-fused) retrieval followed by LLM reranking --
-    see app/retrieval/hybrid.py for why each stage exists and its tradeoffs.
+    (BM25 + vector, RRF-fused) retrieval followed by reranking -- which
+    reranker is config.RERANKER_PROVIDER; see app/retrieval/hybrid.py for why
+    each stage exists and its tradeoffs.
 
     One path around that: when the visitor's own uploads are small enough to
     pass whole (config.WHOLE_DOC_MAX_CHARS), they are, and hybrid retrieval

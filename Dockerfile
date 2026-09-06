@@ -26,15 +26,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends libpq5 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./
-# Install project dependencies
-RUN uv sync --frozen
+# --no-dev, not a bare sync: uv treats `dev` as a DEFAULT dependency group, so
+# a plain `uv sync --frozen` installed the test toolchain into the runtime
+# image. Measured by diffing `uv export` with and without the flag: 140 -> 134
+# packages, dropping pytest, pytest-asyncio, ruff and their transitive
+# iniconfig/pluggy/pygments. (httpx is NOT in that set -- it stays either way
+# as a runtime dependency of the google/langchain clients.)
+#
+# Six packages is small, and size is not the argument: a test runner and a
+# linter have no job inside a container on the public internet, and every CVE
+# in either is otherwise a CVE in production. The `eval` group is already
+# excluded for exactly this reason (see pyproject.toml), which is why this one
+# was easy to miss -- that comment says the image "doesn't ship eval-only deps"
+# and is silent on dev, which uv installs unless told not to.
+RUN uv sync --frozen --no-dev
 
-COPY . .
-
-# NOTE: documents are now ingested into PostgreSQL (Cloud SQL + pgvector),
-# not a local chroma_db/ directory. Run `uv run python -m app.ingestion.ingest`
-# after deploying with DATABASE_URL configured, or as part of a CI/CD
-# step that has access to the database.
+# --- Model weights, baked in BEFORE the source copy -------------------------
+# Ordering is deliberate and load-bearing for build time. These two downloads
+# depend only on what `uv sync` installed, never on application source, so
+# placing them above `COPY . .` keeps them in a layer that survives every
+# ordinary commit. Below it they re-ran on every single push -- ~98MB of model
+# weights re-downloaded per CD build for a one-line change.
 
 # Pre-download the FastEmbed embedding model (used for MODEL_PROVIDER=groq
 # -- Groq has no embeddings API) into the image at build time. Without
@@ -47,23 +59,37 @@ COPY . .
 # GROQ_EMBEDDING_MODEL's default in app/config.py -- if you override that
 # env var, rebuild with a matching model name here too.
 ENV FASTEMBED_CACHE_PATH=/app/.fastembed_cache
-RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
+RUN uv run --frozen --no-dev python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
 
 # Pre-download the FlashRank reranker model into the image at build time
 # so containers never hit Hugging Face / external network at runtime.
+# Must match RERANKER_PROVIDER=flashrank's default model in app/config.py.
 ENV FLASHRANK_CACHE_DIR=/app/.flashrank_cache
-RUN uv run python -c "from flashrank import Ranker; Ranker(model_name='ms-marco-MiniLM-L-12-v2', cache_dir='/app/.flashrank_cache')"
+RUN uv run --frozen --no-dev python -c "from flashrank import Ranker; Ranker(model_name='ms-marco-MiniLM-L-12-v2', cache_dir='/app/.flashrank_cache')"
+
+# Application source last, so a code change invalidates only this layer and
+# everything expensive above it is reused.
+#
+# NOTE: documents are ingested into PostgreSQL (Cloud SQL + pgvector), not
+# into anything baked in here. Run `uv run python -m app.ingestion.ingest`
+# against a configured DATABASE_URL after deploying -- ingestion is
+# deliberately decoupled from the image and from the deploy pipeline.
+COPY . .
 
 # Cloud Run injects $PORT (default 8080) and requires the container to
 # listen on it. Shell form (not exec-form array) so the env var actually
 # expands at container start instead of being read as a literal string.
 # Run as non-root for defense-in-depth (Cloud Run best practice).
-# Provide a writable home directory for FastEmbed and FlashRank model caching,
-# and ensure runtime directories are owned by the non-root user.
+# `docs` and `logs` are created rather than copied: .dockerignore excludes
+# both, and ingest.py globs DOCS_DIR while the request logger writes to logs/.
 RUN adduser --disabled-password appuser \
-    && mkdir -p logs docs chroma_db \
-    && chown -R appuser:appuser logs docs chroma_db .fastembed_cache .flashrank_cache
+    && mkdir -p logs docs \
+    && chown -R appuser:appuser logs docs .fastembed_cache .flashrank_cache
 USER appuser
 
 EXPOSE 8080
-CMD exec uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}
+# --frozen --no-dev on the runtime invocation too, not just at build time:
+# `uv run` re-syncs the environment before executing, so a bare `uv run` here
+# would reinstall the dev group the build just excluded AND could attempt lock
+# resolution -- i.e. a network round trip -- during a cold start.
+CMD exec uv run --frozen --no-dev uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}

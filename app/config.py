@@ -95,9 +95,10 @@ if MODEL_PROVIDER == "groq" and not GROQ_API_KEY:
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 # flash-lite over flash: roughly 3x cheaper on input and 6x on output,
-# which matters because /ask makes three LLM calls per request (rerank,
-# generate, groundedness check) and the RAGAS eval gate re-reads the
-# retrieved context once per judged metric. Also measurably faster --
+# which matters because /ask makes two LLM calls per request on the default
+# reranker (generate, groundedness check) -- three with RERANKER_PROVIDER=llm,
+# which adds the listwise rerank call back -- and the RAGAS eval gate re-reads
+# the retrieved context once per judged metric. Also measurably faster --
 # ~3.5s vs ~8s on the same warm request -- since it does less internal
 # reasoning. Grounded generation over retrieved context is an extraction
 # task rather than a reasoning one, so the cheaper model is the right
@@ -342,7 +343,9 @@ DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "0"))
 # above cannot be walked past by requests that were all admitted before any
 # of them recorded spend (see llm/budget.py::try_admit). Deliberately close
 # to a real request rather than worst-case: a measured /ask on
-# gemini-2.5-flash-lite runs roughly $0.0015 across its three calls, and
+# gemini-2.5-flash-lite ran roughly $0.0015 across its three calls when
+# reranking went through the LLM. The flashrank default removes that call, so
+# the estimate is now deliberately conservative rather than tight, and
 # over-reserving would refuse traffic the budget could afford. Only the
 # admission decision uses it -- actual spend is still what cost.py records.
 BUDGET_REQUEST_ESTIMATE_USD = float(os.getenv("BUDGET_REQUEST_ESTIMATE_USD", "0.002"))

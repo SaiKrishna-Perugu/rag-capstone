@@ -59,9 +59,16 @@ dev = [
 ]
 # Only eval_ragas.py needs these (RAGAS pulls in HuggingFace `datasets`
 # transitively). Kept out of the default/`dev` groups so the Dockerfile's
-# plain `uv sync --frozen` -- which installs the runtime image -- doesn't
+# `uv sync --frozen --no-dev` -- which builds the runtime image -- doesn't
 # ship ~249MB of eval-only deps into every Cloud Run instance. CI's
 # eval.yml installs this group explicitly: `uv sync --frozen --group eval`.
+#
+# Note what `--no-dev` is doing there and why it is not optional: uv treats
+# `dev` below as a DEFAULT group and installs it unless told not to. Keeping
+# `eval` out of the image was never enough on its own -- a bare
+# `uv sync --frozen` still shipped pytest, pytest-asyncio and ruff (measured:
+# 140 -> 134 packages). Adding a group here does NOT keep it out of the
+# image; only the Dockerfile's flags do.
 eval = [
     "ragas==0.4.3",
     "datasets==5.0.1",
@@ -74,5 +81,5 @@ pythonpath = ["."]
 # G201: the project's structured-logging convention is logger.error(json_payload,
 # exc_info=True) rather than logger.exception(...), so the traceback is attached
 # to a JSON-formatted message consistent with every other log line -- see
-# app/streaming.py and app/main.py's error handlers.
+# app/api/streaming.py and app/main.py's error handlers.
 ignore = ["BLE001", "B008", "SIM117", "G201"]

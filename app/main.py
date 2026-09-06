@@ -70,7 +70,8 @@ def _warm_providers() -> None:
 
     Measured on the live service: `/health` answered in 0.35s while the very
     next `/ask` took 20.6s, and every request after it was under 0.7s --
-    including a cache-missing question through the full three-call pipeline.
+    including a cache-missing question through the full generate-and-judge
+    pipeline.
     So the latency that looked like a container cold start was mostly lazy
     initialisation: `get_embeddings()` is `lru_cache`d and builds its client,
     acquires application-default credentials and opens a connection on first
@@ -145,8 +146,8 @@ app = FastAPI(
     title="Grounded Document Q&A API",
     description=(
         "Retrieval-Augmented Generation over a document set: hybrid retrieval "
-        "(full-text + vector, RRF-fused), LLM reranking, grounded generation, "
-        "and a groundedness check on every answer."
+        "(full-text + vector, RRF-fused), cross-encoder reranking, grounded "
+        "generation, and a groundedness check on every answer."
     ),
     version="0.1.0",
     lifespan=lifespan,
@@ -607,8 +608,8 @@ async def upload_files(
 
     # Declared-size gate, checked BEFORE any file bytes are read. Without it
     # the per-file size cap below only fires after `await file.read()` has
-    # already pulled the entire part into memory -- so the 2MB limit was
-    # enforced with an unbounded read first. Multipart framing (boundaries,
+    # already pulled the entire part into memory -- so the per-file size cap
+    # was enforced only after an unbounded read. Multipart framing (boundaries,
     # headers) adds some overhead, so the cap carries 1MB of slack; the true
     # request bound remains Cloud Run's own 32MB body limit.
     declared = request.headers.get("content-length", "")
@@ -1238,8 +1239,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
         "num_sources": len(result.sources),
         "latency_ms": latency_ms,
         # Phase 8: what this request actually cost, broken down by pipeline
-        # stage. /ask makes three LLM calls, so the breakdown is the useful
-        # part -- it shows whether reranking earns its share.
+        # stage. The breakdown is the useful part rather than the total: it is
+        # what showed reranking eating ~47% of spend and justified moving the
+        # default to a local cross-encoder, and it is how anyone who sets
+        # RERANKER_PROVIDER=llm sees that call reappear.
         **cost.current().as_log_fields(),
     }))
 

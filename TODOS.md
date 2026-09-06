@@ -27,15 +27,19 @@ Keep entries short; link to the commit or review doc that has the detail.
   *(Reconfirmed by the 08-29 four-lens review, independently, from both the
   developer and DevOps lenses. Still open: the fix is a load test plus a
   sizing decision, not an edit.)*
-  `DATABASE_POOL_MAX` defaults to 10 and no Cloud Run config overrides it,
-  and `psycopg2`'s `ThreadedConnectionPool` raises `PoolError` immediately
-  on exhaustion rather than queueing — `database.get_conn()` doesn't catch
-  it. Blocking work also funnels through `asyncio.to_thread`, whose default
-  executor is `min(32, cpu+4)` ≈ 6 threads at `cpu: '2'`. So effective safe
-  concurrency for anything touching Postgres is nearer 10 than 80. Raising
-  `DATABASE_POOL_MAX` multiplies by `maxScale` against Cloud SQL's own
-  connection limit — size it against the instance tier and load-test, don't
-  guess. Low urgency: demo traffic is nowhere near it.
+  *Partly addressed in `1207d69`, which changed two of the facts this item
+  originally rested on: `DATABASE_POOL_MAX` now defaults to **20**, not 10,
+  and `database.get_conn()` no longer fails instantly on exhaustion — it
+  retries for `DATABASE_POOL_TIMEOUT_SECONDS` (3.0) in 50ms steps before
+  raising. So a brief burst now queues instead of erroring.*
+  What is still open is the sizing itself. Blocking work funnels through
+  `asyncio.to_thread`, whose default executor is `min(32, cpu+4)` ≈ 6 threads
+  at 2 vCPU, so effective safe concurrency for anything touching Postgres is
+  still far nearer 20 than 80, and a 3s wait converts exhaustion from an
+  error into latency rather than removing it. `DATABASE_POOL_MAX` also
+  multiplies by `maxScale` against Cloud SQL's own connection limit — size it
+  against the instance tier and load-test, don't guess. Low urgency: demo
+  traffic is nowhere near it.
 - **The `livenessProbe` can restart a busy container.** `timeoutSeconds: 1`
   on `/health` with `failureThreshold: 3` / `periodSeconds: 15`, against
   concurrency 80 on 2 vCPU: three slow replies inside 45s restart the
@@ -100,10 +104,13 @@ Keep entries short; link to the commit or review doc that has the detail.
   the alternative was one shared bucket for every visitor.
 - **`check_hallucination` opt-out is honored only under `API_KEY`.** On the
   public tier the verdict is always computed.
-- **The groundedness judge and reranker share the generator's model family**,
-  so they inherit its blind spots. A different provider via the existing
-  `stage`-labelled `get_llm()`, or a local NLI cross-encoder, is the known
-  follow-up.
+- **The groundedness judge shares the generator's model family**, so it
+  inherits its blind spots. A different provider via the existing
+  `stage`-labelled `get_llm()`, or a local NLI model, is the known follow-up.
+  *(The reranker was the other half of this item and is no longer affected:
+  `RERANKER_PROVIDER` defaults to `flashrank`, a separate local cross-encoder
+  that shares nothing with the generator. Setting it back to `llm` reinstates
+  the coupling.)*
 - **Indirect prompt injection via uploaded documents is mitigated, not
   solved** — context delimiting, output screening and prompt fingerprinting.
   Screening document content at ingest was considered and rejected: a
@@ -119,6 +126,45 @@ Keep entries short; link to the commit or review doc that has the detail.
   extension.
 
 ## Resolved
+
+### Retrieval cost and the container image (2026-09-04 / 2026-09-06)
+
+- **Reranking was ~47% of per-request spend, more than generation.** Measured
+  by `cost.py`'s per-stage attribution, and structural: rerank feeds 12
+  candidate passages to the LLM where generation sees only the final 4.
+  Resolved by `RERANKER_PROVIDER`, defaulting to `flashrank` — a local ONNX
+  cross-encoder (`ms-marco-MiniLM-L-12-v2`) at ~15ms and zero tokens. The
+  `llm` and `none` strategies are retained behind the same switch, and all
+  three still fall back to RRF order on failure. The original objection to a
+  cross-encoder — needing HuggingFace weights at runtime, which Cloud Run's
+  shared egress IPs get 429'd on — was removed by pre-downloading into the
+  image, so the measurement and its fix landed together.
+- **The runtime image shipped the test toolchain.** uv treats `dev` as a
+  *default* dependency group, so the Dockerfile's bare `uv sync --frozen`
+  installed pytest, pytest-asyncio and ruff. Measured by diffing `uv export`
+  with and without the flag: 140 → 134 packages. Fixed with `--no-dev` on the
+  sync, on both model pre-downloads, and on the `CMD` — `uv run` re-syncs
+  before exec, so a bare `CMD` would reinstall at container start what the
+  build had just excluded.
+- **`.dockerignore` and `.gcloudignore` disagreed**, so `docker build` and
+  `gcloud builds submit` produced different images from one commit.
+  `.gcloudignore` is `#!include:.gitignore` and was already clean;
+  `.dockerignore` excluded neither the 98MB of local model caches, nor
+  `notes/`, nor `design/`. The sharp edge was that those caches resolve to the
+  exact paths the pre-download steps write to, so a local build silently
+  shipped one developer's disk contents instead of a clean pull. Rewritten to
+  agree, with the invariant stated at the top of the file.
+- **Model pre-downloads sat below `COPY . .`**, so ~98MB re-downloaded on
+  every commit despite depending only on installed packages. Moved above it.
+- **`chroma_db` outlived ChromaDB by three weeks** — still created and chowned
+  by the Dockerfile after the 08-13 Postgres migration. Removed; a repo-wide
+  grep confirms the only remaining `chroma` hit is inside an uploaded test
+  document's body text.
+- **`docs/uploads/` reached the CD source bucket.** Untracked but absent from
+  `.gitignore`, and `.gcloudignore` inherits `.gitignore` — so real
+  visitor-uploaded documents went into the tarball `gcloud builds submit`
+  uploads, on every build. `.dockerignore`'s `docs/` kept them out of the
+  image; nothing kept them out of the build context. Now gitignored.
 
 ### Four-lens review (2026-08-29)
 
@@ -210,8 +256,9 @@ ported hunk-by-hunk in `07519e0`. See `SECURITY_AUDIT.md` / `FIX_PLAN.md`.
   `tests/test_session_file_cap.py`.
 - **Signing in lowered the upload ceiling.** `upload_limits()` swapped
   between anon and authed config values with no floor, and the shipped
-  defaults were 50MB anon vs 10MB authed. Defaults are now 2MB/3 files
-  (matching production), and the authed values are floored at the anonymous
+  defaults were 50MB anon vs 10MB authed. Defaults are now 3MB/3 files
+  anonymous and 10MB/5 files signed in (matching production), and the authed
+  values are floored at the anonymous
   ones in code so the inversion can't return via a single env var. See
   `7dcb54d`.
 - **Upload/rate abuse bounds were imperative-only in every Cloud Run YAML.**
