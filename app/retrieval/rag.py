@@ -164,6 +164,39 @@ def _should_check_groundedness() -> bool:
     return random.random() < rate
 
 
+def build_sources(chunks: list) -> list[dict]:
+    """The citation cards for an answer: one per (source, page), not per chunk.
+
+    Shared by all three answer paths -- answer_question() here, agent.py's
+    node_generate(), and api/streaming.py -- because it has already drifted
+    once. Dedup was added to the first two and missed on the streaming path,
+    so /ask and /ask-agentic showed one card per document while /ask-stream
+    still showed six identical cards for a six-chunk resume. One implementation
+    is the only thing that keeps three call sites honest.
+
+    Duplicates were always possible -- two ranked chunks routinely come from the
+    same file -- but the whole-document path in retrieve() makes them the norm
+    rather than the exception. First chunk of each key wins, so the excerpt is
+    the highest-ranked one on the retrieval path and the opening of the document
+    on the whole-document path.
+    """
+    sources: list[dict] = []
+    seen: set = set()
+    for chunk in chunks:
+        key = (chunk.metadata.get("source", "unknown"), chunk.metadata.get("page"))
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(
+            {
+                "source": key[0],
+                "page": key[1],
+                "excerpt": chunk.page_content[:200],
+            }
+        )
+    return sources
+
+
 def answer_question(
     question: str,
     k: int | None = None,
@@ -198,27 +231,7 @@ def answer_question(
     # session isolation the scoping exists to provide.
     used_private_docs = any(c.metadata.get("_session_id") for c in chunks)
 
-    # One card per (source, page), not per chunk. Duplicates were always
-    # possible -- two ranked chunks routinely come from the same file -- but
-    # the whole-document path in retrieve() makes them the norm rather than
-    # the exception: a six-chunk resume would otherwise render as six
-    # identical-looking citations of one document. First chunk of each wins,
-    # so the excerpt stays the highest-ranked one on the retrieval path and
-    # the opening of the document on the whole-document path.
-    sources = []
-    seen_sources = set()
-    for chunk in chunks:
-        key = (chunk.metadata.get("source", "unknown"), chunk.metadata.get("page"))
-        if key in seen_sources:
-            continue
-        seen_sources.add(key)
-        sources.append(
-            {
-                "source": key[0],
-                "page": key[1],
-                "excerpt": chunk.page_content[:200],
-            }
-        )
+    sources = build_sources(chunks)
 
     return RagResult(
         answer=answer,

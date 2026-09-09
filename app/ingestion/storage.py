@@ -55,6 +55,11 @@ def object_key(session_id: str | None, filename: str) -> str:
     mentally interchangeable, and so a session's objects can be listed or purged
     with a single prefix.
     """
+    # `or '_nosession'` is a defensive remnant: /upload refuses a request with
+    # no owning session (400) before anything is staged, so a None session_id
+    # cannot reach here from the request path. Kept rather than removed because
+    # list_names()/delete() accept an optional session and a bare f-string would
+    # silently produce "uploads/None/..." -- a real prefix, quietly wrong.
     return f"uploads/{session_id or '_nosession'}/{filename}"
 
 

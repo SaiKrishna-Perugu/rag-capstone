@@ -19,11 +19,21 @@ def _doc_rows(session: str, names: list[str]) -> list[dict]:
     ]
 
 
-def _upload(client, names_and_bodies, session="sess-cap"):
+def _upload(client, names_and_bodies, session="sess-cap", authorization=None):
+    """`authorization` matters even when the token itself is patched away.
+
+    IdentityMiddleware short-circuits to ANONYMOUS when no Authorization header
+    is present, so it never calls identity_from_header -- patching that
+    resolver while sending no header simulates nothing. A real signed-in caller
+    always sends the header; a test for signed-in behaviour must too.
+    """
     files = [
         ("files", (name, body, "text/markdown")) for name, body in names_and_bodies
     ]
-    return client.post("/upload", headers={"X-Session-Id": session}, files=files)
+    headers = {"X-Session-Id": session}
+    if authorization:
+        headers["Authorization"] = authorization
+    return client.post("/upload", headers=headers, files=files)
 
 
 # --- unit: the floored limits ------------------------------------------------
@@ -156,7 +166,10 @@ def test_signed_in_caller_gets_raised_cap(client, tmp_path, monkeypatch):
          patch("app.main.jobs.create_job", return_value="job-1"), \
          patch("app.main.jobs.enqueue_cloud_task"), \
          patch("app.main.jobs.process_job"):
-        resp = _upload(client, [("one-more.md", b"content")])
+        resp = _upload(
+            client, [("one-more.md", b"content")],
+            authorization="Bearer signed-in-token",
+        )
 
     # The same request a guest gets 507 on succeeds once signed in.
     assert resp.status_code == 202

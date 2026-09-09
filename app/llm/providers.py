@@ -36,6 +36,7 @@ path is not. So get_embeddings() stays pinned to MODEL_PROVIDER, and a
 failover run keeps retrieving with the primary's embeddings while
 generating with the fallback's chat model.
 """
+import contextvars
 import logging
 from functools import lru_cache
 
@@ -45,6 +46,41 @@ from app.llm import circuit, cost
 logger = logging.getLogger(__name__)
 
 _VALID_PROVIDERS = ("groq", "vertexai")
+
+
+# Per-request memo for embed_query, so one question is embedded once.
+#
+# A cache-miss /ask embedded the SAME string three times: once for the semantic
+# cache lookup (retrieval/cache.py), once for retrieval (retrieval/hybrid.py),
+# once for the cache write. Three network round trips and 3x the embedding
+# spend for one question. It hid because all three are tagged stage="embedding",
+# so the per-stage cost breakdown -- the instrument that caught reranking at
+# ~47% -- aggregated them into one bucket where 3x looks like 1x.
+#
+# The subtlety that dictates the design: those three calls run inside separate
+# asyncio.to_thread hops, and each thread gets a COPY of the context. A
+# ContextVar.set() inside one thread is invisible to the next. So the var is set
+# once in the request coroutine (start_request below) and holds a MUTABLE dict
+# that every context copy shares by reference -- mutation propagates, rebinding
+# would not. Same contextvars posture as llm/cost.py, for the same reason:
+# concurrent requests must not see each other's state.
+_QUERY_EMBEDDING_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "rag_query_embedding_memo", default=None
+)
+
+# Bounded so the agentic loop's query rewrites (a fresh string per retry) cannot
+# grow it without limit within one request.
+_MEMO_MAX_ENTRIES = 8
+
+
+def start_request() -> None:
+    """Begin a request's embedding memo. Call beside cost.start_request().
+
+    Without this the memo is simply absent and every embed_query goes to the
+    provider -- the pre-existing behaviour -- so a caller that forgets it loses
+    an optimisation rather than gaining a bug.
+    """
+    _QUERY_EMBEDDING_MEMO.set({})
 
 
 class _CostTrackingLLM:
@@ -140,9 +176,74 @@ class _CostTrackingEmbeddings:
         return result
 
     def embed_query(self, text, *args, **kwargs):
+        # embed_documents is deliberately NOT memoised: its inputs are large,
+        # caller-controlled and not repeated within a request.
+        memo = _QUERY_EMBEDDING_MEMO.get()
+        if memo is not None and text in memo:
+            return memo[text]
         result = self._wrapped.embed_query(text, *args, **kwargs)
+        # Recorded only on a real provider call, which is also the honest
+        # accounting: a memo hit costs nothing, so it bills nothing.
         self._record([text])
+        if memo is not None and len(memo) < _MEMO_MAX_ENTRIES:
+            memo[text] = result
         return result
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+class _ResilientEmbeddings:
+    """Circuit breaker for embeddings. Fail fast, and NEVER fail over.
+
+    The failover half is deliberately absent and must stay absent: the
+    pgvector store is built in one provider's embedding space, so answering a
+    query with the other provider is either rejected on the dimension mismatch
+    or -- where dimensions happen to agree -- returns confident nonsense
+    neighbours. See get_embeddings() below.
+
+    Failing *fast* is a separate question from failing *over*, and circuit.py's
+    own docstring answers it: "failing fast is worth having with or without
+    somewhere to fail over to." embed_query runs ahead of retrieval on every
+    /ask, so without this each request rediscovers an outage through the full
+    retry sequence.
+
+    Keyed as "<provider>-embeddings", NOT the bare provider name. Sharing chat's
+    breaker would let an embeddings outage open chat's circuit -- and chat's
+    circuit opening is what triggers chat failover, so a dead embeddings
+    endpoint would silently reroute generation to a second vendor. They are
+    different services with different failure modes and must be tracked apart.
+
+    Wraps the raw client INSIDE _CostTrackingEmbeddings, so a refused call
+    records no spend (there was none) and a memoised query never consults the
+    breaker at all (it makes no request).
+    """
+
+    def __init__(self, wrapped, provider: str):
+        self._wrapped = wrapped
+        self._breaker_name = f"{provider}-embeddings"
+
+    def _guarded(self, method: str, *args, **kwargs):
+        breaker = circuit.get_breaker(self._breaker_name)
+        if not breaker.allow_request():
+            raise circuit.CircuitOpenError(
+                f"Embeddings provider '{self._breaker_name}' is unavailable "
+                "(circuit open); failing fast instead of retrying."
+            )
+        try:
+            result = getattr(self._wrapped, method)(*args, **kwargs)
+        except Exception:
+            if breaker.record_failure():
+                metrics.record_circuit_opened(self._breaker_name)
+            raise
+        breaker.record_success()
+        return result
+
+    def embed_query(self, text, *args, **kwargs):
+        return self._guarded("embed_query", text, *args, **kwargs)
+
+    def embed_documents(self, texts, *args, **kwargs):
+        return self._guarded("embed_documents", texts, *args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
@@ -384,7 +485,9 @@ def get_embeddings():
             model_name=config.GROQ_EMBEDDING_MODEL,
             cache_dir=config.FASTEMBED_CACHE_PATH,
         )
-        return _CostTrackingEmbeddings(raw, config.GROQ_EMBEDDING_MODEL)
+        return _CostTrackingEmbeddings(
+            _ResilientEmbeddings(raw, "groq"), config.GROQ_EMBEDDING_MODEL
+        )
 
     if config.MODEL_PROVIDER == "vertexai":
         from langchain_google_vertexai import VertexAIEmbeddings
@@ -392,7 +495,15 @@ def get_embeddings():
             model_name=config.VERTEX_EMBEDDING_MODEL,
             project=config.GCP_PROJECT_ID,
             location=config.GCP_LOCATION,
+            # Without this the SDK default of 6 applies, so embeddings retried
+            # twice as hard as chat during a provider incident -- on the
+            # critical path of every /ask, since embed_query runs before
+            # retrieval. LLM_MAX_RETRIES is documented as the retry budget;
+            # it should mean that for both call types.
+            max_retries=config.LLM_MAX_RETRIES,
         )
-        return _CostTrackingEmbeddings(raw, config.VERTEX_EMBEDDING_MODEL)
+        return _CostTrackingEmbeddings(
+            _ResilientEmbeddings(raw, "vertexai"), config.VERTEX_EMBEDDING_MODEL
+        )
 
     raise ValueError(f"Unknown MODEL_PROVIDER: {config.MODEL_PROVIDER}")

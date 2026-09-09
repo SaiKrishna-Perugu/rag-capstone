@@ -39,7 +39,7 @@ from app.api import auth, security, streaming
 from app.api.middleware import AccessControlMiddleware, IdentityMiddleware
 from app.db import database
 from app.ingestion import jobs, storage
-from app.llm import budget, cost
+from app.llm import budget, cost, providers
 from app.retrieval import cache, memory
 from app.retrieval.agent import run_agentic_rag
 from app.retrieval.rag import answer_question
@@ -197,8 +197,11 @@ app.add_middleware(
 app.add_middleware(AccessControlMiddleware)
 # Registered after AccessControlMiddleware so it runs FIRST (Starlette applies
 # middleware in reverse registration order). Identity is therefore resolved
-# before the access gate, which matters only for ordering clarity -- the two
-# are independent, and IdentityMiddleware never rejects anything.
+# ahead of the access gate and ahead of rate limiting, which is not merely an
+# ordering detail: it means an unauthenticated caller can reach token
+# verification before any gate. IdentityMiddleware short-circuits to ANONYMOUS
+# for probe paths and for requests with no Authorization header precisely so
+# that reach costs nothing -- see its dispatch().
 app.add_middleware(IdentityMiddleware)
 
 
@@ -866,9 +869,10 @@ async def upload_files(
             try:
                 await asyncio.to_thread(storage.put, doc_session, safe_name, content)
             except Exception as exc:
+                redacted = await security.redact_log_fields({"file": safe_name})
                 logger.error(json.dumps({
                     "request_id": request_id, "event": "upload_staging_failed",
-                    "file": safe_name, "error": str(exc),
+                    **redacted, "error": str(exc),
                 }), exc_info=True)
                 raise HTTPException(
                     status_code=503,
@@ -1026,8 +1030,14 @@ async def delete_document(filename: str, request: Request) -> dict:
         )
         raise HTTPException(status_code=503, detail={"error": "Could not remove the document."})
 
+    # Filenames routinely carry personal names ("Jane_Doe_CV.pdf"), and these
+    # lines are retained for 14 days. redact_log_fields is the same control
+    # /ask already applies to questions and answers; there is no reason the
+    # upload surface should be the exception. Fails closed like every other
+    # use of it -- a redaction outage writes a placeholder, not the raw name.
+    redacted = await security.redact_log_fields({"filename": filename})
     logger.info(json.dumps({
-        "event": "document_deleted", "filename": filename, "chunks_deleted": deleted,
+        "event": "document_deleted", **redacted, "chunks_deleted": deleted,
     }))
     return {"deleted": filename, "chunks_deleted": deleted}
 
@@ -1053,10 +1063,34 @@ async def get_job_status(job_id: str, request: Request) -> dict:
     # records which files someone uploaded, so a mismatched session gets the
     # same 404 as a nonexistent job -- not a 403, which would confirm the ID
     # is real.
-    owner = job.get("session_id")
-    if owner and owner != _doc_session(request):
+    #
+    # Note the shape: a caller with no session, or a job with no owner, is
+    # refused. The previous `if owner and owner != caller` skipped the check
+    # entirely for an ownerless job -- /upload now requires a session so new
+    # jobs always have one, but records predating that guard live out the
+    # 48h TTL, and they list uploaded filenames.
+    caller = _doc_session(request)
+    if not caller or job.get("session_id") != caller:
         raise HTTPException(status_code=404, detail={"error": f"Job {job_id} not found."})
-    return job
+
+    # Projected, not returned whole. ui.html renders these directly and the
+    # caller is an anonymous browser, so returning the raw Firestore document
+    # means any field added to it later is published without anyone deciding
+    # to -- exactly the hazard ingestion/errors.py exists to bound. Adding a
+    # field to the response is now a deliberate edit here.
+    # session_id and expires_at are deliberately withheld: the caller already
+    # knows their own session, and the TTL is an internal detail.
+    return {
+        "job_id": job.get("job_id", job_id),
+        "status": job.get("status"),
+        "files": job.get("files", []),
+        "error": job.get("error"),
+        "error_code": job.get("error_code"),
+        "warning": job.get("warning"),
+        "ingest_summary": job.get("ingest_summary"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
 
 
 @app.post("/internal/process-ingest-job")
@@ -1121,6 +1155,8 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     # Begin per-request cost accumulation. Context-local, so concurrent
     # requests can't attribute each other's tokens -- see app/llm/cost.py.
     cost.start_request()
+    # Same request boundary: one question is embedded once, not three times.
+    providers.start_request()
     start = time.perf_counter()
 
     # --- Prompt-injection screening ---------------------------------------
@@ -1297,6 +1333,8 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     # top of generate/groundedness -- so this is the endpoint whose cost is
     # least predictable and most worth recording.
     cost.start_request()
+    # Same request boundary: one question is embedded once, not three times.
+    providers.start_request()
     start = time.perf_counter()
 
     # Same screening as /ask, and worth more here: the agentic loop makes

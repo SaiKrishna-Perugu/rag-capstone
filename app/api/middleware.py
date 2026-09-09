@@ -55,6 +55,7 @@ support for those -- no need to reinvent them as custom middleware.
 """
 
 import asyncio
+import hashlib
 import logging
 import secrets
 
@@ -95,6 +96,29 @@ _ADMIN_PATHS = frozenset({"/metrics"})
 
 _INTERNAL_PREFIX = "/internal/"
 
+def _constant_time_eq(provided: str, expected: str) -> bool:
+    """Compare two secrets without leaking length and without crashing on
+    non-ASCII input.
+
+    `secrets.compare_digest` raises TypeError on a non-ASCII str. Header values
+    arrive as bytes and Starlette decodes them latin-1, so any byte above 0x7F
+    in an X-Admin-Key/X-API-Key produces exactly that -- an unhandled 500 on an
+    unauthenticated path. On /metrics it is worse than noise: the tier returns
+    404 rather than 401 precisely so probing cannot confirm the route exists,
+    and a 500 confirms it. Measured against the live service before this fix:
+    a non-ASCII admin key returned 500 where a wrong ASCII key returned 404.
+
+    Hashing first normalises both sides to fixed-length bytes, which also
+    removes the length side-channel compare_digest still carries on inputs of
+    differing length. surrogatepass so a lone surrogate from a mis-decoded
+    header cannot raise here either.
+    """
+    return secrets.compare_digest(
+        hashlib.sha256(provided.encode("utf-8", "surrogatepass")).digest(),
+        hashlib.sha256(expected.encode("utf-8", "surrogatepass")).digest(),
+    )
+
+
 def _not_found() -> JSONResponse:
     # A fresh response per call: Starlette responses are single-use.
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
@@ -120,7 +144,20 @@ def _verify_oidc_token(request: Request) -> bool:
         # OIDC identity below are secrets whose values must not be recoverable
         # through response timing.
         provided = request.headers.get("X-API-Key", "")
-        return bool(config.API_KEY) and secrets.compare_digest(provided, config.API_KEY)
+        return bool(config.API_KEY) and _constant_time_eq(provided, config.API_KEY)
+
+    if not config.INGEST_TARGET_URL:
+        # google-auth SKIPS audience validation entirely when passed None, so
+        # `audience=... or None` would silently downgrade the check to
+        # "signed by anyone Google trusts, with the right email" -- a token
+        # this service account holds for any other audience would replay here.
+        # Absent config must not mean a weaker check; deny instead.
+        logger.error(
+            "Rejected /internal request: TASKS_SERVICE_ACCOUNT_EMAIL is set but "
+            "INGEST_TARGET_URL is not, so the token audience cannot be verified. "
+            "Set INGEST_TARGET_URL to this service's own URL (see README)."
+        )
+        return False
 
     header = request.headers.get("Authorization", "")
     if not header.lower().startswith("bearer "):
@@ -138,7 +175,7 @@ def _verify_oidc_token(request: Request) -> bool:
             # Reuses app/api/auth.py's pooled transport rather than building a
             # second one -- it exists to avoid a TLS handshake per call.
             auth._get_transport(),
-            audience=config.INGEST_TARGET_URL or None,
+            audience=config.INGEST_TARGET_URL,
         )
     except Exception as e:
         logger.warning(f"Rejected /internal request: OIDC verification failed ({e})")
@@ -146,7 +183,7 @@ def _verify_oidc_token(request: Request) -> bool:
 
     email = claims.get("email")
     if not (email and isinstance(email, str)
-            and secrets.compare_digest(email, config.TASKS_SERVICE_ACCOUNT_EMAIL)):
+            and _constant_time_eq(email, config.TASKS_SERVICE_ACCOUNT_EMAIL)):
         logger.warning(f"Rejected /internal request: unexpected OIDC identity {email!r}")
         return False
     if not claims.get("email_verified", False):
@@ -178,7 +215,7 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
             if not config.ADMIN_KEY:
                 return _not_found()
             provided_admin = request.headers.get("X-Admin-Key", "")
-            if not secrets.compare_digest(provided_admin, config.ADMIN_KEY):
+            if not _constant_time_eq(provided_admin, config.ADMIN_KEY):
                 return _not_found()
             return await call_next(request)
 
@@ -187,7 +224,7 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
         if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES):
             if config.API_KEY:
                 provided_key = request.headers.get("X-API-Key", "")
-                if not secrets.compare_digest(provided_key, config.API_KEY):
+                if not _constant_time_eq(provided_key, config.API_KEY):
                     return JSONResponse(
                         status_code=401,
                         content={"detail": "Invalid or missing API key."},
@@ -219,6 +256,26 @@ class IdentityMiddleware(BaseHTTPMiddleware):
         # limiting -- so a burst of junk bearer tokens stalls /health and
         # /ready too, on a service whose liveness probe has a 1s timeout.
         # A thread keeps the loop free; identity resolution stays fail-open.
+        # Short-circuit before spending anything. Two reasons, both measured
+        # rather than assumed:
+        #
+        # * This middleware is the OUTERMOST one, so it runs ahead of the
+        #   access gate, ahead of rate limiting, and in front of /health and
+        #   /ready. verify_firebase_token does cert fetch + RSA verification on
+        #   the shared default executor (min(32, cpu+4) ~= 6 threads at 2 vCPU),
+        #   so a burst of junk bearer tokens can queue /health behind it -- and
+        #   the liveness probe allows timeoutSeconds:1, failureThreshold:3 at
+        #   periodSeconds:15, i.e. three slow replies in 45s restart the
+        #   container and drop every in-flight /ask. Probes must never pay for
+        #   identity they cannot use.
+        # * On an anonymous demo almost no request carries an Authorization
+        #   header, and identity_from_header returns ANONYMOUS immediately for
+        #   those -- so the asyncio.to_thread hop was pure overhead on the
+        #   common path.
+        if request.url.path in _PROBE_PATHS or not request.headers.get("Authorization"):
+            request.state.identity = auth.ANONYMOUS
+            return await call_next(request)
+
         request.state.identity = await asyncio.to_thread(
             auth.identity_from_header, request.headers.get("Authorization")
         )

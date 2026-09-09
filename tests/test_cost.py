@@ -68,3 +68,102 @@ def test_concurrent_requests_do_not_share_totals():
         return await asyncio.gather(one(1000), one(5000), one(9000))
 
     assert asyncio.run(main()) == [2000, 10000, 18000]
+
+
+# ---------------------------------------------------------------------------
+# Per-request embedding memo (app/llm/providers.py).
+#
+# A cache-miss /ask embedded the SAME question three times -- cache lookup,
+# retrieval, cache write -- because each call site asks the provider directly.
+# All three are tagged stage="embedding", so the per-stage cost breakdown
+# aggregated 3x into one bucket and it never showed up as waste.
+# ---------------------------------------------------------------------------
+
+class _CountingEmbeddings:
+    """Stand-in for a provider client. Counts real calls."""
+
+    def __init__(self):
+        self.query_calls = 0
+        self.document_calls = 0
+
+    def embed_query(self, text):
+        self.query_calls += 1
+        return [0.1, 0.2, 0.3]
+
+    def embed_documents(self, texts):
+        self.document_calls += 1
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+
+def _wrapped():
+    from app.llm import providers
+    raw = _CountingEmbeddings()
+    return raw, providers._CostTrackingEmbeddings(raw, "text-embedding-005")
+
+
+def test_same_question_is_embedded_once_per_request():
+    from app.llm import providers
+    raw, emb = _wrapped()
+    providers.start_request()
+    for _ in range(3):
+        emb.embed_query("How long is the refund window?")
+    assert raw.query_calls == 1, (
+        f"one question, one embedding -- got {raw.query_calls} provider calls"
+    )
+
+
+def test_memo_does_not_leak_between_requests():
+    """Two visitors asking the identical question must not share a vector
+    across request boundaries -- the memo is scoped, not a global cache."""
+    from app.llm import providers
+    raw, emb = _wrapped()
+    providers.start_request()
+    emb.embed_query("same question")
+    providers.start_request()
+    emb.embed_query("same question")
+    assert raw.query_calls == 2
+
+
+def test_memo_survives_asyncio_to_thread():
+    """The property the whole design rests on.
+
+    The three real call sites run inside separate asyncio.to_thread hops, and
+    each thread gets a COPY of the context -- so a ContextVar.set() inside one
+    thread is invisible to the next. The memo works only because start_request
+    binds a MUTABLE dict in the request coroutine that every copy shares by
+    reference. If someone later 'simplifies' this to set the var lazily inside
+    embed_query, this test fails and that is exactly the point.
+    """
+    from app.llm import providers
+
+    async def run():
+        raw, emb = _wrapped()
+        providers.start_request()
+        await asyncio.to_thread(emb.embed_query, "q")
+        await asyncio.to_thread(emb.embed_query, "q")
+        return raw.query_calls
+
+    assert asyncio.run(run()) == 1
+
+
+def test_documents_are_never_memoised():
+    """embed_documents carries large, caller-controlled input that is not
+    repeated within a request -- memoising it would only grow memory."""
+    from app.llm import providers
+    raw, emb = _wrapped()
+    providers.start_request()
+    emb.embed_documents(["a", "b"])
+    emb.embed_documents(["a", "b"])
+    assert raw.document_calls == 2
+
+
+def test_without_start_request_every_call_reaches_the_provider():
+    """Absent memo degrades to the previous behaviour rather than breaking:
+    a caller that forgets start_request() loses an optimisation, not
+    correctness."""
+    from app.llm import providers
+    providers._QUERY_EMBEDDING_MEMO.set(None)
+    raw, emb = _wrapped()
+    emb.embed_query("q")
+    emb.embed_query("q")
+    assert raw.query_calls == 2

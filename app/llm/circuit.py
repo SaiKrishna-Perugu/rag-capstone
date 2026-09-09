@@ -125,7 +125,7 @@ class CircuitBreaker:
         accepted trade: single-probe gating needs a slot that must be
         released on every exit path, and a probe that never returns would
         wedge the breaker half-open permanently. A burst is bounded here by
-        the 20/minute rate limit in config.RATE_LIMIT.
+        the 10/minute rate limit in config.RATE_LIMIT.
         """
         with self._lock:
             return self._state_locked() is not CircuitState.OPEN

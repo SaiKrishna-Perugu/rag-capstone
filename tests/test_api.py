@@ -181,10 +181,56 @@ def test_upload_endpoint_job_tracking_unavailable(client, monkeypatch, tmp_path)
     assert response.status_code == 503
 
 def test_get_job_status_found(client):
-    with patch("app.ingestion.jobs.get_job", return_value={"status": "done", "ingest_summary": {"added": ["a.txt"]}}):
-        response = client.get("/jobs/job-123")
+    """The owner must match. This test used to pass a job with NO session_id
+    and no X-Session-Id header, which only succeeded because the ownership
+    check was `if owner and owner != caller` -- i.e. it encoded the fail-open
+    as the contract, the way an earlier test encoded an information leak."""
+    job = {
+        "job_id": "job-123",
+        "status": "done",
+        "session_id": "sess-1",
+        "ingest_summary": {"added": ["a.txt"]},
+    }
+    with patch("app.ingestion.jobs.get_job", return_value=job):
+        response = client.get("/jobs/job-123", headers={"X-Session-Id": "sess-1"})
     assert response.status_code == 200
     assert response.json()["status"] == "done"
+
+
+def test_get_job_status_ownerless_job_is_refused(client):
+    """A job with no owner is unreadable rather than readable by anyone.
+    /upload requires a session now, so new jobs always carry one -- but
+    records predating that guard live out the 48h TTL and list filenames."""
+    with patch("app.ingestion.jobs.get_job", return_value={"status": "done"}):
+        response = client.get("/jobs/job-123", headers={"X-Session-Id": "sess-1"})
+    assert response.status_code == 404
+
+
+def test_get_job_status_other_session_is_refused(client):
+    with patch("app.ingestion.jobs.get_job",
+               return_value={"status": "done", "session_id": "sess-owner"}):
+        response = client.get("/jobs/job-123", headers={"X-Session-Id": "sess-other"})
+    assert response.status_code == 404
+
+
+def test_job_response_is_projected_not_the_raw_record(client):
+    """The response is an explicit projection, so a field added to the
+    Firestore document is not published to an anonymous browser by default."""
+    job = {
+        "job_id": "job-123", "status": "done", "session_id": "sess-1",
+        "expires_at": "2030-01-01T00:00:00Z",
+        "internal_debug_blob": "must not be published",
+    }
+    with patch("app.ingestion.jobs.get_job", return_value=job):
+        response = client.get("/jobs/job-123", headers={"X-Session-Id": "sess-1"})
+    assert response.status_code == 200
+    allowed = {
+        "job_id", "status", "files", "error", "error_code",
+        "warning", "ingest_summary", "created_at", "updated_at",
+    }
+    assert set(response.json()) <= allowed
+    assert "session_id" not in response.json()
+    assert "internal_debug_blob" not in response.json()
 
 def test_get_job_status_not_found(client):
     with patch("app.ingestion.jobs.get_job", return_value=None):
@@ -291,3 +337,98 @@ def test_live_answer_is_not_flagged_as_cached(
     body = resp.json()
     assert body["cached"] is False
     assert len(body["sources"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Auth-comparison robustness.
+#
+# secrets.compare_digest raises TypeError on non-ASCII str. Unhandled, that is
+# a 500 on an unauthenticated path -- and on /metrics it also defeats the
+# deliberate 404-not-401 concealment, because a 500 confirms the route exists
+# where a 404 does not. Verified against the live service before the fix:
+# `X-Admin-Key: café` returned 500 while a wrong ASCII key returned 404.
+# ---------------------------------------------------------------------------
+
+# Sent as BYTES: httpx refuses a non-ASCII str header value client-side, so
+# a str payload fails before a request is ever made. Real headers arrive as
+# bytes and Starlette decodes them latin-1, so the server sees a non-ASCII
+# str -- and secrets.compare_digest raises TypeError on that. Built with an
+# explicit byte rather than a source literal so the file stays pure ASCII.
+# Verified live before the fix: 500 here where a wrong ASCII key gave 404,
+# which is what defeats /metrics' 404-not-401 concealment.
+_NON_ASCII = b"caf" + bytes([0xE9])
+
+
+def test_non_ascii_admin_key_does_not_500(client, monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_KEY", "correct-admin-key")
+    response = client.get("/metrics", headers={"X-Admin-Key": _NON_ASCII})
+    assert response.status_code == 404, (
+        "a non-ASCII admin key must be rejected like any other wrong key, "
+        f"not crash the handler (got {response.status_code})"
+    )
+
+
+def test_metrics_rejection_is_indistinguishable_across_bad_keys(client, monkeypatch):
+    """The whole point of 404-not-401 is that probing cannot confirm the route.
+    A different status for a malformed key hands that back."""
+    monkeypatch.setattr(config, "ADMIN_KEY", "correct-admin-key")
+    absent = client.get("/metrics")
+    wrong = client.get("/metrics", headers={"X-Admin-Key": "wrong"})
+    malformed = client.get("/metrics", headers={"X-Admin-Key": _NON_ASCII})
+    assert absent.status_code == wrong.status_code == malformed.status_code == 404
+    assert absent.json() == wrong.json() == malformed.json()
+
+
+def test_non_ascii_api_key_does_not_500(client, monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "correct-api-key")
+    response = client.post(
+        "/ask", json={"question": "hi"}, headers={"X-API-Key": _NON_ASCII}
+    )
+    assert response.status_code == 401
+
+
+def test_non_ascii_api_key_on_internal_tier_does_not_500(client, monkeypatch):
+    """The /internal fallback path compares the same way when no Tasks
+    service account is configured."""
+    monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", "")
+    monkeypatch.setattr(config, "API_KEY", "correct-api-key")
+    response = client.post(
+        "/internal/process-ingest-job",
+        json={"job_id": "x"},
+        headers={"X-API-Key": _NON_ASCII},
+    )
+    assert response.status_code == 403
+
+
+def test_internal_denied_when_audience_cannot_be_verified(client, monkeypatch):
+    """TASKS_SERVICE_ACCOUNT_EMAIL set but INGEST_TARGET_URL unset means the
+    token's audience cannot be checked -- google-auth SKIPS audience validation
+    entirely when passed None, so a token minted for any other audience would
+    replay here. Must fail closed rather than verify less.
+
+    Signature verification is stubbed to SUCCEED with the expected identity, so
+    the audience gap is the only thing left that can reject this request. A test
+    that passes a garbage token would pass for the wrong reason."""
+    sa = "tasks@example.iam.gserviceaccount.com"
+    monkeypatch.setattr(config, "TASKS_SERVICE_ACCOUNT_EMAIL", sa)
+    monkeypatch.setattr(config, "INGEST_TARGET_URL", "")
+    with patch(
+        "google.oauth2.id_token.verify_oauth2_token",
+        return_value={"email": sa, "email_verified": True},
+    ):
+        response = client.post(
+            "/internal/process-ingest-job",
+            json={"job_id": "x"},
+            headers={"Authorization": "Bearer valid.looking.token"},
+        )
+    assert response.status_code == 403
+
+
+def test_health_does_not_resolve_identity(client):
+    """Probes sit behind IdentityMiddleware, so a junk bearer token would
+    otherwise trigger cert-fetch + RSA verification on the shared executor
+    before any gate -- with a 1s liveness timeout behind it."""
+    with patch("app.api.auth.identity_from_header") as resolve:
+        response = client.get("/health", headers={"Authorization": "Bearer junk"})
+    assert response.status_code == 200
+    resolve.assert_not_called()

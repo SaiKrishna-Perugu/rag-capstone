@@ -118,3 +118,56 @@ def test_partial_rate_uses_the_sampler():
             assert rag._should_check_groundedness() is False
         with patch("app.retrieval.rag.random.random", return_value=0.1):
             assert rag._should_check_groundedness() is True
+
+
+# ---------------------------------------------------------------------------
+# Citation dedup, and the parity that keeps it true on all three answer paths.
+#
+# Dedup was added in 1207d69 to rag.answer_question() and agent.node_generate()
+# and missed on api/streaming.py, so /ask and /ask-agentic showed one card per
+# document while /ask-stream still showed six identical cards for a six-chunk
+# resume -- the exact symptom the dedup was written for, and one the
+# whole-document retrieval path makes the norm rather than the exception.
+# ---------------------------------------------------------------------------
+
+def _chunk_with(source: str, page, text: str):
+    chunk = MagicMock()
+    chunk.page_content = text
+    chunk.metadata = {"source": source, "page": page}
+    return chunk
+
+
+def test_build_sources_dedupes_by_source_and_page():
+    from app.retrieval.rag import build_sources
+    chunks = [
+        _chunk_with("resume.pdf", None, "first chunk"),
+        _chunk_with("resume.pdf", None, "second chunk"),
+        _chunk_with("resume.pdf", 2, "page two"),
+        _chunk_with("policy.txt", None, "other doc"),
+    ]
+    sources = build_sources(chunks)
+    assert [(s["source"], s["page"]) for s in sources] == [
+        ("resume.pdf", None), ("resume.pdf", 2), ("policy.txt", None),
+    ]
+
+
+def test_build_sources_keeps_the_first_chunk_of_each_key():
+    """First wins, so the excerpt is the highest-ranked chunk on the retrieval
+    path and the opening of the document on the whole-document path."""
+    from app.retrieval.rag import build_sources
+    sources = build_sources([
+        _chunk_with("a.md", None, "highest ranked"),
+        _chunk_with("a.md", None, "lower ranked"),
+    ])
+    assert len(sources) == 1
+    assert sources[0]["excerpt"] == "highest ranked"
+
+
+def test_all_three_answer_paths_share_one_build_sources():
+    """Structural parity, not a behavioural echo: assert the SAME function
+    object backs every path. A future re-inlined copy fails here rather than
+    quietly reintroducing the drift this test exists to prevent."""
+    from app.api import streaming
+    from app.retrieval import agent, rag
+    assert agent.build_sources is rag.build_sources
+    assert streaming.build_sources is rag.build_sources

@@ -29,6 +29,7 @@ from langsmith import traceable
 from app.llm.providers import get_llm
 from app.retrieval.rag import (
     _format_context,
+    build_sources,
     check_groundedness,
     generate_answer,
     retrieve,
@@ -120,20 +121,7 @@ def node_rewrite_query(state: AgentState) -> AgentState:
 def node_generate(state: AgentState) -> AgentState:
     answer = generate_answer(state["original_question"], state["chunks"])
     groundedness = check_groundedness(answer, state["chunks"])
-    sources = []
-    seen_sources = set()
-    for chunk in state["chunks"]:
-        key = (chunk.metadata.get("source", "unknown"), chunk.metadata.get("page"))
-        if key in seen_sources:
-            continue
-        seen_sources.add(key)
-        sources.append(
-            {
-                "source": key[0],
-                "page": key[1],
-                "excerpt": chunk.page_content[:200],
-            }
-        )
+    sources = build_sources(state["chunks"])
     return {**state, "answer": answer, "groundedness": groundedness, "sources": sources}
 
 

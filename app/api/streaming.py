@@ -10,12 +10,13 @@ import uuid
 
 from app import metrics
 from app.api import security
-from app.llm import cost
+from app.llm import cost, providers
 from app.llm.providers import get_llm
 from app.retrieval import cache, memory
 from app.retrieval.rag import (
     _ANSWER_SYSTEM_PROMPT,
     _format_context,
+    build_sources,
     check_groundedness,
     retrieve,
 )
@@ -41,6 +42,7 @@ async def stream_answer(
     # same body that later does the retrieval, the astream() call, and the
     # log write, or those three would each see a different accumulator.
     cost.start_request()
+    providers.start_request()
     start = time.perf_counter()
 
     # Screened before the SSE stream opens, so a refused request is a clean
@@ -117,7 +119,7 @@ async def stream_answer(
                 json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask-stream/retrieve", "error": str(exc)}),
                 exc_info=True,
             )
-            yield f"data: {json.dumps({'error': 'Retrieval failed', 'details': str(exc), 'request_id': request_id})}\n\n"
+            yield f"data: {json.dumps({'error': 'Retrieval failed. Check server logs.', 'request_id': request_id})}\n\n"
             return
             
         context = _format_context(chunks)
@@ -145,7 +147,7 @@ async def stream_answer(
                 json.dumps({"request_id": request_id, "event": "error", "endpoint": "ask-stream/generate", "error": str(exc)}),
                 exc_info=True,
             )
-            yield f"data: {json.dumps({'error': 'Generation failed', 'details': str(exc), 'request_id': request_id})}\n\n"
+            yield f"data: {json.dumps({'error': 'Generation failed. Check server logs.', 'request_id': request_id})}\n\n"
             return
             
         final_answer = "".join(full_answer)
@@ -167,14 +169,7 @@ async def stream_answer(
         groundedness = await asyncio.to_thread(check_groundedness, final_answer, chunks)
         
         # 6. Build sources and cache
-        sources = [
-            {
-                "source": c.metadata.get("source", "unknown"),
-                "page": c.metadata.get("page"),
-                "excerpt": c.page_content[:200],
-            }
-            for c in chunks
-        ]
+        sources = build_sources(chunks)
         
         # Two independent reasons to withhold from the shared cache: a leaked
         # system prompt, and an answer grounded in this visitor's private
