@@ -486,7 +486,7 @@ def cache_get(
     import numpy as np
 
     sql = """
-        SELECT question, answer, groundedness,
+        SELECT question, answer, groundedness, sources,
                1 - (embedding <=> %s) AS similarity
         FROM semantic_cache
         WHERE expires_at IS NULL OR expires_at > now()
@@ -507,7 +507,9 @@ def cache_get(
         return {
             "answer": row["answer"],
             "groundedness": row["groundedness"],
-            "sources": [],
+            # `or []` covers rows written before the column existed: a legacy
+            # entry degrades to an uncited answer rather than raising.
+            "sources": row["sources"] or [],
             "cached": True,
             "similarity_score": float(row["similarity"]),
         }
@@ -519,6 +521,7 @@ def cache_set(
     answer: str,
     groundedness: str,
     question_embedding: list[float],
+    sources: list[dict] | None = None,
 ) -> None:
     """Store a Q&A pair in the semantic cache, with a TTL.
 
@@ -531,8 +534,9 @@ def cache_set(
     import numpy as np
 
     sql = """
-        INSERT INTO semantic_cache (question, answer, groundedness, embedding, expires_at)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO semantic_cache (question, answer, groundedness, embedding,
+                                    expires_at, sources)
+        VALUES (%s, %s, %s, %s, %s, %s)
     """
     emb = np.array(question_embedding, dtype=np.float32)
     expires_at = (
@@ -543,7 +547,11 @@ def cache_set(
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (question, answer, groundedness, emb, expires_at))
+            cur.execute(
+                sql,
+                (question, answer, groundedness, emb, expires_at,
+                 psycopg2.extras.Json(sources or [])),
+            )
 
 
 def invalidate_cache() -> int:

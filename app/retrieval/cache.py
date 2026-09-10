@@ -28,7 +28,15 @@ def get_cached_answer(question: str) -> dict | None:
     try:
         embeddings = get_embeddings()
         question_embedding = embeddings.embed_query(question)
-        return database.cache_get(question_embedding, threshold=CACHE_THRESHOLD)
+        hit = database.cache_get(question_embedding, threshold=CACHE_THRESHOLD)
+        if hit is not None:
+            # Normalised here so no caller has to. A row written before the
+            # sources column existed yields NULL, and `.get("sources", [])`
+            # would hand that None straight to a list comprehension -- a 500
+            # on the first cache hit after deploy. The default belongs at the
+            # boundary, not in three separate response builders.
+            hit["sources"] = hit.get("sources") or []
+        return hit
     except Exception:
         # The cache is a latency optimization, not a correctness requirement --
         # a transient embeddings/store failure should degrade to a cache miss,
@@ -37,12 +45,25 @@ def get_cached_answer(question: str) -> dict | None:
         return None
 
 
-def set_cached_answer(question: str, answer: str, groundedness: str) -> None:
-    """Store a successful Q&A pair in the semantic cache."""
+def set_cached_answer(
+    question: str,
+    answer: str,
+    groundedness: str,
+    sources: list[dict] | None = None,
+) -> None:
+    """Store a successful Q&A pair -- with its citations -- in the cache.
+
+    `sources` is what makes a cache hit a complete answer rather than a bare
+    assertion. Without it a repeated question returned the right answer and no
+    citations, which reads as a retrieval failure to anyone looking at the UI.
+    Optional so a caller that has nothing to cite still stores a usable entry.
+    """
     try:
         embeddings = get_embeddings()
         question_embedding = embeddings.embed_query(question)
-        database.cache_set(question, answer, groundedness, question_embedding)
+        database.cache_set(
+            question, answer, groundedness, question_embedding, sources=sources
+        )
     except Exception:
         logger.warning("Semantic cache write failed; answer was still returned to the caller.", exc_info=True)
 

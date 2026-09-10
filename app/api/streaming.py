@@ -102,7 +102,9 @@ async def stream_answer(
                 "question": question,
                 "answer": cached_hit["answer"],
                 "groundedness": cached_hit["groundedness"],
-                "sources": [],
+                # Stored with the answer -- see retrieval/cache.py. Returning []
+                # made a repeated question look like retrieval had failed.
+                "sources": cached_hit.get("sources") or [],
                 "latency_ms": latency_ms,
                 "cached": True
             }
@@ -176,7 +178,10 @@ async def stream_answer(
         # upload (the cache is global and consulted before retrieval).
         used_private = any(c.metadata.get("_session_id") for c in chunks)
         if not leak.flagged and not used_private:
-            await asyncio.to_thread(cache.set_cached_answer, contextualized_q, final_answer, groundedness)
+            await asyncio.to_thread(
+                cache.set_cached_answer,
+                contextualized_q, final_answer, groundedness, sources,
+            )
         if session_id:
             await asyncio.to_thread(memory.add_to_history, session_id, question, final_answer)
             

@@ -1219,7 +1219,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             question=body.question,
             answer=cached_hit["answer"],
             groundedness=cached_hit["groundedness"],
-            sources=[],  # Cached answers don't return full source chunks
+            # A cache hit is a complete answer, citations included. These
+            # were stored alongside the answer; returning [] here made a
+            # repeated question look like a retrieval failure.
+            sources=[SourceChunk(**s) for s in cached_hit.get("sources") or []],
             latency_ms=latency_ms,
             cached=True,
         )
@@ -1288,7 +1291,10 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     # the next visitor asking something similar and silently undo the session
     # isolation entirely.
     if not result.used_private_docs:
-        await asyncio.to_thread(cache.set_cached_answer, contextualized_q, result.answer, result.groundedness)
+        await asyncio.to_thread(
+            cache.set_cached_answer,
+            contextualized_q, result.answer, result.groundedness, result.sources,
+        )
 
     if body.session_id:
         await asyncio.to_thread(memory.add_to_history, body.session_id, body.question, result.answer)
@@ -1386,7 +1392,7 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
             final_query=contextualized_q,
             answer=cached_hit["answer"],
             groundedness=cached_hit["groundedness"],
-            sources=[],
+            sources=[SourceChunk(**s) for s in cached_hit.get("sources") or []],
             retries_used=0,
             latency_ms=latency_ms,
         )
@@ -1453,6 +1459,7 @@ async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
         await asyncio.to_thread(
             cache.set_cached_answer,
             contextualized_q, final_state["answer"], final_state["groundedness"],
+            final_state["sources"],
         )
 
     if body.session_id:

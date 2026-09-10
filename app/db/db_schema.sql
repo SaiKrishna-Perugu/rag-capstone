@@ -72,6 +72,20 @@ CREATE TABLE IF NOT EXISTS semantic_cache (
 -- documents; nothing bounded this.
 ALTER TABLE semantic_cache ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 
+-- The citation cards for a cached answer. Added by ALTER for the same reason
+-- as expires_at above: CREATE TABLE IF NOT EXISTS is a no-op against the live
+-- table, so a column declared there would never reach production.
+--
+-- Without it, cache_get() returned a hardcoded empty list and every cache hit
+-- rendered as an answer with nothing behind it. Measured on production: a
+-- question answered with 2 citations returned the identical answer with ZERO
+-- when asked again in different words -- indistinguishable, from the UI, from
+-- retrieval having failed.
+--
+-- Nullable on purpose: rows written before this column existed have no
+-- sources, and must degrade to an uncited answer rather than an error.
+ALTER TABLE semantic_cache ADD COLUMN IF NOT EXISTS sources JSONB;
+
 -- Same reasoning as idx_chunks_embedding_hnsw above. It matters more here
 -- if anything: the cache starts empty by definition, so an IVFFLAT index
 -- over it was guaranteed to be built with no rows to cluster.
