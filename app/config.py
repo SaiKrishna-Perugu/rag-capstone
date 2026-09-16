@@ -384,10 +384,11 @@ LLM_FALLBACK_PROVIDER = os.getenv("LLM_FALLBACK_PROVIDER", "").lower()
 
 # --- LangSmith tracing ---------------------------------------------------
 # LangChain/LangGraph auto-trace every LLM call once these env vars are
-# set -- no code changes needed for that part. The @traceable decorators
-# in app/retrieval/agent.py add named, granular traces for the custom logic
-# (grading, rewriting) that isn't itself an LLM call LangSmith would
-# otherwise group meaningfully on its own.
+# set. app/tracing.py adds the request-level roots that group those calls
+# into one trace per /ask, /ask-stream and /ask-agentic request, and the
+# client hook that strips visitors' session ids from every run in them.
+# Production has this ON (LANGSMITH_API_KEY mounted from Secret Manager), so
+# prompts -- including passages from visitors' uploads -- reach LangSmith.
 LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
 if LANGSMITH_TRACING:
     os.environ["LANGCHAIN_TRACING_V2"] = "true"

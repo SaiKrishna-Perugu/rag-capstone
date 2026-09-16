@@ -868,11 +868,12 @@ deliberately does not do, and why.
 - Two eval harnesses: custom LLM-as-judge (`eval.py`) and standardized
   RAGAS metrics -- faithfulness, response relevancy, context precision,
   context recall (`eval_ragas.py`)
-- **LangSmith tracing** -- every agent node (`retrieve`, `grade`, `rewrite`,
-  `generate`, `fallback`) is wrapped with `@traceable`, so a full request
-  shows up in LangSmith as one root trace with each step nested inside,
-  including the actual LLM calls, latency, and token usage per step.
-  Off by default (`LANGSMITH_TRACING=false`); flip it on in `.env`.
+- **LangSmith tracing** -- every `/ask`, `/ask-stream` and `/ask-agentic`
+  request is one root trace (`app/tracing.py`), with retrieval, generation,
+  the groundedness check and -- for the agent -- every graph node
+  (`retrieve`, `grade`, `rewrite`, `generate`, `fallback`) nested inside it.
+  Visitors' session ids are stripped from every run before it is sent.
+  Off by default locally (`LANGSMITH_TRACING=false`); on in production.
 - Structured request logging (question, answer, sources, latency, retries used)
 - Source citation in every response (which chunks were used)
 - **Multi-cloud model provider support**: Groq (default) or GCP Vertex AI,

@@ -34,7 +34,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app import config, metrics
+from app import config, metrics, tracing
 from app.api import auth, security, streaming
 from app.api.middleware import AccessControlMiddleware, IdentityMiddleware
 from app.db import database
@@ -1149,6 +1149,7 @@ async def cleanup_expired() -> dict:
 
 @app.post("/ask", response_model=AskResponse)
 @limiter.limit(config.RATE_LIMIT)
+@tracing.traced_endpoint("ask")
 async def ask(request: Request, body: AskRequest) -> AskResponse:
     request_id = str(uuid.uuid4())
     metrics.record_request("ask")
@@ -1327,6 +1328,7 @@ async def ask_stream(request: Request, body: AskRequest):
 
 @app.post("/ask-agentic", response_model=AgenticAskResponse)
 @limiter.limit(config.RATE_LIMIT)
+@tracing.traced_endpoint("ask-agentic")
 async def ask_agentic(request: Request, body: AskRequest) -> AgenticAskResponse:
     """
     Self-correcting RAG: retrieve -> grade -> (generate | rewrite & retry) ->

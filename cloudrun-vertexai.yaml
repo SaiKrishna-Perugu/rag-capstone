@@ -132,8 +132,19 @@ spec:
         # RERANKER_PROVIDER=llm, so the multiplier is real either way.
         - name: VERTEX_CHAT_MODEL
           value: 'gemini-2.5-flash-lite'
+        # On in production, set imperatively and reconciled here. Every /ask*
+        # request becomes one LangSmith trace (app/tracing.py); visitors'
+        # session ids are stripped, but prompts -- including passages from
+        # their uploads -- are sent. The key is mounted from Secret Manager.
         - name: LANGSMITH_TRACING
-          value: 'false'
+          value: 'true'
+        - name: LANGSMITH_PROJECT
+          value: 'rag-capstone'
+        - name: LANGSMITH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: LangSmith_Api_Key
+              key: 'latest'
         - name: OTEL_GCP_EXPORT
           value: 'true'
         # Durable staging for uploaded files (app/ingestion/storage.py). Cloud

@@ -347,8 +347,24 @@ be called with the same question to compare behavior.
   them would make a routine sampling decision look like a provider error in
   the metrics.
 - `retrieval/agent.py` — the self-correcting LangGraph loop described above; every
-  node is wrapped with `@traceable` for LangSmith tracing (off by default,
-  `LANGSMITH_TRACING=false` in `.env`).
+  node is wrapped with `@traceable` for LangSmith tracing.
+- `tracing.py` — LangSmith request roots and redaction. Every `/ask*` request
+  is one trace: `ask` and `ask-agentic` are roots on the route handlers,
+  `ask-stream` on `streaming.stream_answer()` (the handler returns before any
+  token exists, so a root there would close too early). Roots are bound to one
+  `Client` whose `hide_inputs`/`hide_outputs` replace `session_id` /
+  `doc_session_id` at any depth, and nested LangChain/LangGraph runs inherit
+  that client — which is what covers LangGraph's own node runs, since they
+  record the whole `AgentState`. That id is the visitor's `X-Session-Id`, the
+  value that scopes their uploads. Use `traced_endpoint()`, not bare
+  `@traceable`, on a route: traceable adds a `config` parameter to the
+  signature and FastAPI would publish it as a query parameter. **Production
+  runs with `LANGSMITH_TRACING=true`** (key from Secret Manager secret
+  `LangSmith_Api_Key`, set imperatively). Prompts and retrieved passages are
+  not redacted, so visitors' uploaded text does reach LangSmith — a deliberate
+  trade for per-request debuggability, and the one place that text leaves the
+  project besides Vertex AI itself. `LANGSMITH_TRACING=false` is still the
+  local default in `.env.example`.
 - `retrieval/memory.py` — per-session conversation history + query contextualization,
   backed by Firestore (one document per `session_id`, capped at 5 turns,
   `expires_at` field for Firestore's native TTL -- the policy itself is a
