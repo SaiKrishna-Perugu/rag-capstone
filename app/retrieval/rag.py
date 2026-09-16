@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from app import config
 from app.llm.providers import get_llm
 from app.retrieval.hybrid import retrieve_with_hybrid_and_rerank, session_documents
+from app.tracing import traced
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class RagResult:
     used_private_docs: bool = False
 
 
+@traced("rag.retrieve", run_type="retriever")
 def retrieve(question: str, k: int | None = None, session_id: str | None = None) -> list:
     """
     Retrieve the top-k most relevant chunks for a question, via hybrid
@@ -101,6 +103,7 @@ def _format_context(chunks: list) -> str:
     return f"<retrieved_context>\n{body}\n</retrieved_context>"
 
 
+@traced("rag.generate_answer")
 def generate_answer(question: str, chunks: list) -> str:
     context = _format_context(chunks)
     # `stage` labels this call in the per-request cost breakdown, so
@@ -116,6 +119,7 @@ def generate_answer(question: str, chunks: list) -> str:
     return response.content
 
 
+@traced("rag.check_groundedness")
 def check_groundedness(answer: str, chunks: list) -> str:
     """
     Lightweight hallucination check: ask the LLM whether the answer's claims
@@ -197,6 +201,7 @@ def build_sources(chunks: list) -> list[dict]:
     return sources
 
 
+@traced("rag.answer_question")
 def answer_question(
     question: str,
     k: int | None = None,

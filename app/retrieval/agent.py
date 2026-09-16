@@ -24,7 +24,6 @@ implementation.
 from typing import Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
-from langsmith import traceable
 
 from app.llm.providers import get_llm
 from app.retrieval.rag import (
@@ -34,6 +33,7 @@ from app.retrieval.rag import (
     generate_answer,
     retrieve,
 )
+from app.tracing import traced
 
 MAX_RETRIES = 2  # total retries after the first attempt (3 attempts overall)
 
@@ -79,13 +79,13 @@ def _get_grading_llm(stage: str):
 
 # --- Graph nodes ---------------------------------------------------------
 
-@traceable(name="agent.retrieve", run_type="retriever")
+@traced("agent.retrieve", run_type="retriever")
 def node_retrieve(state: AgentState) -> AgentState:
     chunks = retrieve(state["current_query"], session_id=state.get("session_id"))
     return {**state, "chunks": chunks}
 
 
-@traceable(name="agent.grade_relevance", run_type="chain")
+@traced("agent.grade_relevance", run_type="chain")
 def node_grade(state: AgentState) -> AgentState:
     if not state["chunks"]:
         return {**state, "grade": "INSUFFICIENT"}
@@ -101,7 +101,7 @@ def node_grade(state: AgentState) -> AgentState:
     return {**state, "grade": grade}
 
 
-@traceable(name="agent.rewrite_query", run_type="chain")
+@traced("agent.rewrite_query", run_type="chain")
 def node_rewrite_query(state: AgentState) -> AgentState:
     llm = _get_grading_llm("rewrite")
     messages = [
@@ -117,7 +117,7 @@ def node_rewrite_query(state: AgentState) -> AgentState:
     }
 
 
-@traceable(name="agent.generate", run_type="chain")
+@traced("agent.generate", run_type="chain")
 def node_generate(state: AgentState) -> AgentState:
     answer = generate_answer(state["original_question"], state["chunks"])
     groundedness = check_groundedness(answer, state["chunks"])
@@ -125,7 +125,7 @@ def node_generate(state: AgentState) -> AgentState:
     return {**state, "answer": answer, "groundedness": groundedness, "sources": sources}
 
 
-@traceable(name="agent.fallback", run_type="chain")
+@traced("agent.fallback", run_type="chain")
 def node_fallback(state: AgentState) -> AgentState:
     return {
         **state,
@@ -180,7 +180,7 @@ def get_compiled_graph():
     return _compiled_graph
 
 
-@traceable(name="agentic_rag.run", run_type="chain")
+@traced("agentic_rag.run", run_type="chain")
 def run_agentic_rag(question: str, session_id: str | None = None) -> AgentState:
     """Entry point used by main.py and eval.py."""
     initial_state: AgentState = {

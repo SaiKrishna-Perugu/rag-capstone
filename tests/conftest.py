@@ -1,9 +1,18 @@
 from unittest.mock import MagicMock, patch
 
+import langsmith
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+# The suite is fully mocked and must not reach LangSmith. A developer's .env
+# often sets LANGSMITH_TRACING=true, and config.py loads .env with
+# override=True, so setting the variable here beforehand would simply be
+# overwritten. configure() is a process-wide switch that outranks the
+# environment and still yields to an explicit tracing_context -- which is how
+# tests/test_tracing.py exercises tracing on purpose.
+langsmith.configure(enabled=False)
 
 
 @pytest.fixture(autouse=True)

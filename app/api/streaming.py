@@ -20,9 +20,35 @@ from app.retrieval.rag import (
     check_groundedness,
     retrieve,
 )
+from app.tracing import traced
 
 logger = logging.getLogger("rag_service")
 
+
+def _summarize_stream(events: list[str]) -> dict:
+    """Trace output for a stream: its shape, not its text.
+
+    The answer is already on the nested generation run; repeating every
+    SSE line here would store it twice.
+    """
+    last: dict = {}
+    if events:
+        try:
+            last = json.loads(events[-1].removeprefix("data: "))
+        except ValueError:
+            pass
+    return {
+        "events": len(events),
+        "outcome": "error" if "error" in last else last.get("type", "incomplete"),
+        "cached": last.get("cached"),
+        "groundedness": last.get("groundedness"),
+    }
+
+
+# Traced here rather than on the route handler: the handler returns the
+# StreamingResponse before a single token is produced, so a root there would
+# close before the work it is meant to contain even starts.
+@traced("ask-stream", reduce_fn=_summarize_stream)
 async def stream_answer(
     question: str,
     session_id: str | None = None,
