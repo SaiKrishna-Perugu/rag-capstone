@@ -395,3 +395,29 @@ if LANGSMITH_TRACING:
     os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "rag-capstone")
     # LANGSMITH_API_KEY / LANGCHAIN_API_KEY is read directly from the
     # environment by the langsmith SDK -- set it in .env, not here.
+
+# --- TypeSafe System One judgments --------------------------------------
+# Typed yes/no and multiple-choice judgments (app/llm/typesafe.py) that
+# replace places where the pipeline parsed an LLM's free-text verdict. Each
+# judgment has its own switch and all of them default OFF: turning one on is
+# a measured decision per stage, and with a switch off -- or TypeSafe
+# unreachable -- the stage runs exactly as it did before. Enabling any of
+# them sends that stage's inputs to TypeSafe, which for the grader means the
+# question and retrieved passages, uploads included.
+TYPESAFE_GRADER = os.getenv("TYPESAFE_GRADER", "false").lower() == "true"
+# Probability-of-"sufficient" cut-off for the agentic grader. A starting
+# value to tune with scripts/compare_grader.py, not a measured one.
+TYPESAFE_GRADER_THRESHOLD = float(os.getenv("TYPESAFE_GRADER_THRESHOLD", "0.5"))
+
+TYPESAFE_MODEL = os.getenv("TYPESAFE_MODEL", "jev-1.13")
+# Every judgment sits on a request's critical path and has a fallback, so a
+# slow answer is worth less than an immediate fallback. The SDK's own
+# defaults (30s, two retries) are sized for batch jobs.
+TYPESAFE_TIMEOUT_SECONDS = float(os.getenv("TYPESAFE_TIMEOUT_SECONDS", "3"))
+TYPESAFE_MAX_RETRIES = int(os.getenv("TYPESAFE_MAX_RETRIES", "1"))
+
+# Fetched only when some judgment is switched on: _get_secret() falls back to
+# a Secret Manager round trip at import time, which nothing should pay for a
+# feature that is off.
+_TYPESAFE_ANY_ENABLED = TYPESAFE_GRADER
+TYPESAFE_API_KEY = _get_secret("TYPESAFE_API_KEY", "") if _TYPESAFE_ANY_ENABLED else ""

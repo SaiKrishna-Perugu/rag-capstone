@@ -45,6 +45,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "uvicorn[standard]==0.52.0",
     "flashrank>=0.2.10",
+    "typesafe-sdk==0.7.1",
 ]
 
 [tool.uv]

@@ -104,6 +104,10 @@ _prompt_leak_total = _meter.create_counter(
     "rag_prompt_leak_total",
     description="Answers suppressed because they echoed this app's system prompt.",
 )
+_typesafe_calls_total = _meter.create_counter(
+    "rag_typesafe_calls_total",
+    description="TypeSafe judgments, by pipeline stage and outcome (ok, fallback).",
+)
 
 
 # --- Public API ---------------------------------------------------------
@@ -164,3 +168,9 @@ def record_prompt_leak() -> None:
 def record_budget_exceeded() -> None:
     """A request was refused by the daily spend ceiling (app/llm/budget.py)."""
     _budget_exceeded_total.add(1)
+
+
+def record_typesafe_call(stage: str, outcome: str) -> None:
+    """One TypeSafe judgment (app/llm/typesafe.py): `ok`, or `fallback` when
+    the stage ran its pre-TypeSafe path instead."""
+    _typesafe_calls_total.add(1, {"stage": stage, "outcome": outcome})

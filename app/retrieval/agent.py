@@ -25,6 +25,8 @@ from typing import Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from app import config
+from app.llm import typesafe
 from app.llm.providers import get_llm
 from app.retrieval.rag import (
     _format_context,
@@ -49,6 +51,20 @@ context should be graded as NOT sufficient.
 
 Respond with exactly one word: "SUFFICIENT" or "INSUFFICIENT"."""
 
+# The same judgment asked of TypeSafe (config.TYPESAFE_GRADER). Its answer is
+# a probability, so the strictness the prompt above sets by wording ("Be
+# strict") becomes TYPESAFE_GRADER_THRESHOLD instead, tunable against data.
+_SUFFICIENCY_INSTRUCTIONS = (
+    "Do the passages in `passages` contain the information needed to answer "
+    "`question` directly, without guessing or relying on outside knowledge?"
+)
+_SUFFICIENCY_CRITERIA = {
+    "true": "At least one passage states what the answer needs; together "
+            "they are enough to answer the whole question.",
+    "false": "The passages are about a related topic but do not state the "
+             "answer, or cover only part of what the question asks.",
+}
+
 _REWRITE_SYSTEM_PROMPT = """You rewrite search queries to improve retrieval \
 from a vector database. The previous query did not retrieve sufficient \
 context. Rewrite it to be more specific, use different phrasing/synonyms, \
@@ -63,6 +79,10 @@ class AgentState(TypedDict):
     session_id: str | None
     chunks: list
     grade: str            # "SUFFICIENT" | "INSUFFICIENT" | ""
+    # TypeSafe's probability that the context is sufficient; None when the
+    # LLM grader decided (switch off, or TypeSafe unavailable). Kept in state
+    # so the value shows up in the trace next to the grade it produced.
+    sufficiency_p: float | None
     retry_count: int
     answer: str
     groundedness: str
@@ -90,6 +110,32 @@ def node_grade(state: AgentState) -> AgentState:
     if not state["chunks"]:
         return {**state, "grade": "INSUFFICIENT"}
 
+    if config.TYPESAFE_GRADER:
+        p = typesafe.noul(
+            state={
+                "question": state["original_question"],
+                "passages": [
+                    {"source": c.metadata.get("source", "unknown"), "text": c.page_content}
+                    for c in state["chunks"]
+                ],
+            },
+            instructions=_SUFFICIENCY_INSTRUCTIONS,
+            criteria=_SUFFICIENCY_CRITERIA,
+            stage="grade",
+        )
+        if p is not None:
+            grade = "SUFFICIENT" if p >= config.TYPESAFE_GRADER_THRESHOLD else "INSUFFICIENT"
+            return {**state, "grade": grade, "sufficiency_p": p}
+
+    return {**state, "grade": _grade_with_llm(state), "sufficiency_p": None}
+
+
+def _grade_with_llm(state: AgentState) -> str:
+    """The original grader, and the fallback whenever TypeSafe is not used.
+
+    Any reply other than exactly one of the two words -- a trailing period,
+    a sentence -- counts as INSUFFICIENT and costs a retry.
+    """
     context = _format_context(state["chunks"])
     llm = _get_grading_llm("grade")
     messages = [
@@ -97,8 +143,7 @@ def node_grade(state: AgentState) -> AgentState:
         ("human", f"QUESTION:\n{state['original_question']}\n\nCONTEXT:\n{context}"),
     ]
     verdict = llm.invoke(messages).content.strip().upper()
-    grade = verdict if verdict in ("SUFFICIENT", "INSUFFICIENT") else "INSUFFICIENT"
-    return {**state, "grade": grade}
+    return verdict if verdict in ("SUFFICIENT", "INSUFFICIENT") else "INSUFFICIENT"
 
 
 @traced("agent.rewrite_query", run_type="chain")
@@ -189,6 +234,7 @@ def run_agentic_rag(question: str, session_id: str | None = None) -> AgentState:
         "session_id": session_id,
         "chunks": [],
         "grade": "",
+        "sufficiency_p": None,
         "retry_count": 0,
         "answer": "",
         "groundedness": "NOT_CHECKED",

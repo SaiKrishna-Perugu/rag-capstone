@@ -365,6 +365,21 @@ be called with the same question to compare behavior.
   trade for per-request debuggability, and the one place that text leaves the
   project besides Vertex AI itself. `LANGSMITH_TRACING=false` is still the
   local default in `.env.example`.
+- `llm/typesafe.py` — TypeSafe System One judgments: typed probabilities in
+  place of parsing an LLM's one-word reply as text. The only module that talks
+  to TypeSafe. `noul()` returns a probability or **None**, and every caller
+  treats None as "run the pre-TypeSafe path" — no key, an exception, an
+  out-of-range answer, or an open breaker (key `"typesafe"` in
+  `llm/circuit.py`) all land there, never on an error. Spend goes through
+  `cost.add_usage()` (price row `jev-1.13`), so it counts against
+  `DAILY_BUDGET_USD`; calls are counted in `rag_typesafe_calls_total` and
+  traced. Each judgment has its own switch, **all off by default**, and the
+  key is only fetched from Secret Manager when one is on. Wired so far: the
+  agentic grader (`TYPESAFE_GRADER`, threshold `TYPESAFE_GRADER_THRESHOLD` —
+  choose it with `scripts/compare_grader.py`, not by guessing). Switching a
+  judgment on sends that stage's inputs to TypeSafe — for the grader, the
+  question and retrieved passages, uploads included — the same trade as
+  LangSmith, taken per stage. `tests/conftest.py` forces the switches off.
 - `retrieval/memory.py` — per-session conversation history + query contextualization,
   backed by Firestore (one document per `session_id`, capped at 5 turns,
   `expires_at` field for Firestore's native TTL -- the policy itself is a
