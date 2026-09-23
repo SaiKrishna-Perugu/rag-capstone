@@ -39,7 +39,7 @@ _DEFAULT_PRICING = {
     # TypeSafe System One (app/llm/typesafe.py). Input price from TypeSafe's
     # rerank cookbook (jev-1.12: 1,536,002 input tokens cost $0.0645); it
     # publishes no output price, and its answers are a handful of tokens.
-    "jev-1.13": (0.042, 0.0),
+    "jev-latest": (0.042, 0.0),
 }
 
 

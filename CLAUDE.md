@@ -371,7 +371,7 @@ be called with the same question to compare behavior.
   treats None as "run the pre-TypeSafe path" — no key, an exception, an
   out-of-range answer, or an open breaker (key `"typesafe"` in
   `llm/circuit.py`) all land there, never on an error. Spend goes through
-  `cost.add_usage()` (price row `jev-1.13`), so it counts against
+  `cost.add_usage()` (price row `jev-latest` — the API accepts only the `jev-latest`/`jev-preview` aliases, not pinned versions), so it counts against
   `DAILY_BUDGET_USD`; calls are counted in `rag_typesafe_calls_total` and
   traced. Each judgment has its own switch, **all off by default**, and the
   key is only fetched from Secret Manager when one is on. Wired so far: the

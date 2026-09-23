@@ -82,8 +82,8 @@ def noul(state: dict, instructions: str, criteria: dict | None, stage: str) -> f
         return _fallback(stage, type(exc).__name__)
 
     breaker.record_success()
-    # Priced by the configured model rather than response.model, which
-    # carries a patch suffix ("jev-1.13.0") the price table does not.
+    # Priced by the configured alias rather than response.model, which names
+    # whatever version the alias currently points at ("jev-1.13.0").
     cost.add_usage(
         config.TYPESAFE_MODEL,
         response.usage.input_tokens,

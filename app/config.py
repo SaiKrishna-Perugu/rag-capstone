@@ -409,7 +409,11 @@ TYPESAFE_GRADER = os.getenv("TYPESAFE_GRADER", "false").lower() == "true"
 # value to tune with scripts/compare_grader.py, not a measured one.
 TYPESAFE_GRADER_THRESHOLD = float(os.getenv("TYPESAFE_GRADER_THRESHOLD", "0.5"))
 
-TYPESAFE_MODEL = os.getenv("TYPESAFE_MODEL", "jev-1.13")
+# The API serves aliases, not pinned versions: `jev-latest` and
+# `jev-preview` are the only names it accepts ("jev-1.13" is a 400). So the
+# model can change underneath a fixed config; re-run
+# scripts/compare_grader.py when TypeSafe announces a new Jev version.
+TYPESAFE_MODEL = os.getenv("TYPESAFE_MODEL", "jev-latest")
 # Every judgment sits on a request's critical path and has a fallback, so a
 # slow answer is worth less than an immediate fallback. The SDK's own
 # defaults (30s, two retries) are sized for batch jobs.
