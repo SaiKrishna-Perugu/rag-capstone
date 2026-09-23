@@ -21,6 +21,8 @@ logged as one opaque call. It's also the right foundation to extend for
 more complex multi-agent orchestration later, rather than a throwaway
 implementation.
 """
+import json
+import logging
 from typing import Literal, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -36,6 +38,8 @@ from app.retrieval.rag import (
     retrieve,
 )
 from app.tracing import traced
+
+logger = logging.getLogger("rag_service")
 
 MAX_RETRIES = 2  # total retries after the first attempt (3 attempts overall)
 
@@ -125,6 +129,14 @@ def node_grade(state: AgentState) -> AgentState:
         )
         if p is not None:
             grade = "SUFFICIENT" if p >= config.TYPESAFE_GRADER_THRESHOLD else "INSUFFICIENT"
+            # One line per grade, attempt included: the distribution of p on
+            # real questions is what TYPESAFE_GRADER_THRESHOLD is tuned from,
+            # and the request log only carries the final outcome.
+            logger.info(json.dumps({
+                "event": "agent_grade", "sufficiency_p": round(p, 4),
+                "grade": grade, "attempt": state.get("retry_count", 0),
+                "threshold": config.TYPESAFE_GRADER_THRESHOLD,
+            }))
             return {**state, "grade": grade, "sufficiency_p": p}
 
     return {**state, "grade": _grade_with_llm(state), "sufficiency_p": None}
