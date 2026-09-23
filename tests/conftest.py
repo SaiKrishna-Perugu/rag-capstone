@@ -14,6 +14,12 @@ from app.main import app
 # tests/test_tracing.py exercises tracing on purpose.
 langsmith.configure(enabled=False)
 
+# Same reasoning for TypeSafe judgments: whatever .env says, the suite never
+# sends a real request. tests/test_typesafe.py switches them on per test.
+from app import config as _config
+
+_config.TYPESAFE_GRADER = False
+
 
 @pytest.fixture(autouse=True)
 def _disable_rate_limit():

@@ -147,6 +147,13 @@ spec:
               key: 'latest'
         - name: OTEL_GCP_EXPORT
           value: 'true'
+        # TypeSafe grader for /ask-agentic (app/llm/typesafe.py). Off until
+        # scripts/compare_grader.py has chosen TYPESAFE_GRADER_THRESHOLD.
+        # Turning it on also needs the key: create Secret Manager secret
+        # typesafe_api_key, grant rag-capstone-sa secretAccessor, and mount
+        # it as TYPESAFE_API_KEY here.
+        - name: TYPESAFE_GRADER
+          value: 'false'
         # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
         # Run instances have independent disks, so a Cloud Task can land on the
         # instance that never received the upload; staging in GCS removes that
