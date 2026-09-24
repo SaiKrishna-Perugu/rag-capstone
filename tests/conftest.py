@@ -19,6 +19,7 @@ langsmith.configure(enabled=False)
 from app import config as _config
 
 _config.TYPESAFE_GRADER = False
+_config.TYPESAFE_CHUNK_SCREEN = False
 
 
 @pytest.fixture(autouse=True)

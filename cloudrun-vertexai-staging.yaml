@@ -145,6 +145,10 @@ spec:
         # it as TYPESAFE_API_KEY here.
         - name: TYPESAFE_GRADER
           value: "false"
+        # Screening of uploaded passages for injected instructions
+        # (api/security.py::screen_retrieved_chunks). Same key as the grader.
+        - name: TYPESAFE_CHUNK_SCREEN
+          value: "false"
         # Durable staging for uploaded files (app/ingestion/storage.py). Cloud
         # Run instances have independent disks, so a Cloud Task can land on the
         # instance that never received the upload; staging in GCS removes that

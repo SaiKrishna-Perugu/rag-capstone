@@ -414,6 +414,14 @@ TYPESAFE_GRADER_THRESHOLD = float(os.getenv("TYPESAFE_GRADER_THRESHOLD", "0.5"))
 # model can change underneath a fixed config; re-run
 # scripts/compare_grader.py when TypeSafe announces a new Jev version.
 TYPESAFE_MODEL = os.getenv("TYPESAFE_MODEL", "jev-latest")
+
+# Screen passages from visitors' uploads for text addressed to the model
+# (api/security.py::screen_retrieved_chunks). Curated docs/ are never sent:
+# they are this repository's own files, not an injection vector.
+TYPESAFE_CHUNK_SCREEN = os.getenv("TYPESAFE_CHUNK_SCREEN", "false").lower() == "true"
+# Probability above which a passage is dropped before generation. Starting
+# value from TypeSafe's RAG-passage cookbook; tune it on real uploads.
+TYPESAFE_CHUNK_SCREEN_THRESHOLD = float(os.getenv("TYPESAFE_CHUNK_SCREEN_THRESHOLD", "0.7"))
 # Every judgment sits on a request's critical path and has a fallback, so a
 # slow answer is worth less than an immediate fallback. The SDK's own
 # defaults (30s, two retries) are sized for batch jobs.
@@ -423,5 +431,5 @@ TYPESAFE_MAX_RETRIES = int(os.getenv("TYPESAFE_MAX_RETRIES", "1"))
 # Fetched only when some judgment is switched on: _get_secret() falls back to
 # a Secret Manager round trip at import time, which nothing should pay for a
 # feature that is off.
-_TYPESAFE_ANY_ENABLED = TYPESAFE_GRADER
+_TYPESAFE_ANY_ENABLED = TYPESAFE_GRADER or TYPESAFE_CHUNK_SCREEN
 TYPESAFE_API_KEY = _get_secret("TYPESAFE_API_KEY", "") if _TYPESAFE_ANY_ENABLED else ""
