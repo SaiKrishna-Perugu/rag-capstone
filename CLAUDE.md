@@ -376,10 +376,14 @@ be called with the same question to compare behavior.
   traced. Each judgment has its own switch, **all off by default**, and the
   key is only fetched from Secret Manager when one is on. Wired so far: the
   agentic grader (`TYPESAFE_GRADER`, threshold `TYPESAFE_GRADER_THRESHOLD` —
-  choose it with `scripts/compare_grader.py`, not by guessing). Switching a
-  judgment on sends that stage's inputs to TypeSafe — for the grader, the
-  question and retrieved passages, uploads included — the same trade as
-  LangSmith, taken per stage. `tests/conftest.py` forces the switches off.
+  choose it with `scripts/compare_grader.py`, not by guessing), and
+  screening of uploaded passages (`TYPESAFE_CHUNK_SCREEN`, see `security.py`
+  below). `nouls()` asks several questions in one request and is
+  all-or-nothing: a partial set of answers is treated as a failure. Switching
+  a judgment on sends that stage's inputs to TypeSafe — for the grader, the
+  question and retrieved passages, uploads included; for screening, only the
+  question and uploaded passages — the same trade as LangSmith, taken per
+  stage. `tests/conftest.py` forces the switches off.
 - `retrieval/memory.py` — per-session conversation history + query contextualization,
   backed by Firestore (one document per `session_id`, capped at 5 turns,
   `expires_at` field for Firestore's native TTL -- the policy itself is a
@@ -459,6 +463,19 @@ be called with the same question to compare behavior.
   screening cannot suppress anything (tokens already sent), so it instead
   refuses to *cache* a leaked answer, which stops one success being
   replayed to later visitors.
+  `screen_retrieved_chunks()` is the **input** half of indirect-injection
+  defence, and **drops**: with `TYPESAFE_CHUNK_SCREEN` on, every passage from
+  a visitor's upload (metadata `_session_id`) gets one TypeSafe yes/no
+  question — does it address the AI answering, rather than inform — and
+  passages above `TYPESAFE_CHUNK_SCREEN_THRESHOLD` are removed before
+  generation, counted as `rag_injection_blocked_total{reason="indirect"}` and
+  logged by source and probability, never text. It runs at the end of
+  `rag.retrieve()`, so `/ask`, `/ask-stream` and every agent retry get it.
+  Curated `docs/` are never sent, so a request with no uploads costs nothing.
+  It fails **open** (TypeSafe unavailable → every passage passes), which is
+  why `screen_answer()` stays: this narrows what reaches the model, it is
+  not the only check. A dropped passage goes whole — legitimate text in the
+  same chunk as an injection is lost with it.
 - `metrics.py` — real OpenTelemetry instruments (Counter/Histogram), not a
   hand-rolled dataclass. `GET /metrics` always serves Prometheus
   exposition format (`prometheus_client.generate_latest()`, no separate

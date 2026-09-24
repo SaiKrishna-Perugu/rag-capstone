@@ -51,13 +51,28 @@ def _fallback(stage: str, reason: str) -> None:
     logger.warning(f"TypeSafe judgment '{stage}' unavailable ({reason}); using the fallback path.")
 
 
-@traced("typesafe.noul")
 def noul(state: dict, instructions: str, criteria: dict | None, stage: str) -> float | None:
     """Probability (0-1) that the answer to `instructions` is yes, or None.
 
     `criteria` optionally defines what yes and no mean: {"true": ..., "false": ...}.
     `stage` labels the call in the per-request cost breakdown and in
     rag_typesafe_calls_total.
+    """
+    answers = nouls(state, {"q": (instructions, criteria)}, stage)
+    return None if answers is None else answers["q"]
+
+
+@traced("typesafe.nouls")
+def nouls(
+    state: dict, questions: dict[str, tuple[str, dict | None]], stage: str
+) -> dict[str, float] | None:
+    """Several yes/no questions over one state, in one request.
+
+    `questions` maps an id of the caller's choosing to (instructions,
+    criteria); the ids stay in code and are never sent as meaning, so each
+    instruction must be complete on its own. Returns {id: probability} with
+    every id present, or None -- all or nothing, so a caller never acts on a
+    partial set of answers.
     """
     if not config.TYPESAFE_API_KEY:
         return _fallback(stage, "no API key")
@@ -71,11 +86,14 @@ def noul(state: dict, instructions: str, criteria: dict | None, stage: str) -> f
     try:
         response = _client().system_one(
             state=state,
-            questions={"q": Noul(instructions=instructions, criteria=criteria)},
+            questions={
+                qid: Noul(instructions=instructions, criteria=criteria)
+                for qid, (instructions, criteria) in questions.items()
+            },
         )
-        p = float(response.nouls["q"].noul)
-        if not 0.0 <= p <= 1.0:
-            raise ValueError(f"noul out of range: {p}")
+        answers = {qid: float(response.nouls[qid].noul) for qid in questions}
+        if not all(0.0 <= p <= 1.0 for p in answers.values()):
+            raise ValueError(f"noul out of range: {answers}")
     except Exception as exc:
         if breaker.record_failure():
             metrics.record_circuit_opened(_BREAKER)
@@ -91,4 +109,4 @@ def noul(state: dict, instructions: str, criteria: dict | None, stage: str) -> f
         stage=stage,
     )
     metrics.record_typesafe_call(stage, "ok")
-    return p
+    return answers

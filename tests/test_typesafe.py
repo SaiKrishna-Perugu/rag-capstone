@@ -158,3 +158,11 @@ def test_the_suite_runs_with_typesafe_off():
     """A developer .env with a TypeSafe switch on must not make the mocked
     suite send real requests; conftest.py switches them off."""
     assert config.TYPESAFE_GRADER is False
+
+
+def test_a_partial_set_of_answers_is_not_trusted(client):
+    """nouls() is all-or-nothing: a caller screening three passages must not
+    act on answers for two of them."""
+    client.system_one.return_value = _response(0.4)  # answers only "q"
+    out = typesafe.nouls({"x": 1}, {"q": ("Is it?", None), "r": ("Is that?", None)}, stage="chunk_screen")
+    assert out is None

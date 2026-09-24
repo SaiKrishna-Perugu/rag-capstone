@@ -10,6 +10,7 @@ import random
 from dataclasses import dataclass, field
 
 from app import config
+from app.api import security
 from app.llm.providers import get_llm
 from app.retrieval.hybrid import retrieve_with_hybrid_and_rerank, session_documents
 from app.tracing import traced
@@ -76,13 +77,14 @@ def retrieve(question: str, k: int | None = None, session_id: str | None = None)
     """
     whole = session_documents(session_id)
     if whole is None:
-        return retrieve_with_hybrid_and_rerank(question, k=k, session_id=session_id)
+        chunks = retrieve_with_hybrid_and_rerank(question, k=k, session_id=session_id)
+        return security.screen_retrieved_chunks(question, chunks)
 
     # session_id=None scopes this to the curated corpus: the visitor's own
     # chunks are already in `whole`, and retrieving them twice would spend
     # context on duplicates.
     curated = retrieve_with_hybrid_and_rerank(question, k=k, session_id=None)
-    return whole + curated
+    return security.screen_retrieved_chunks(question, whole + curated)
 
 
 def _format_context(chunks: list) -> str:
